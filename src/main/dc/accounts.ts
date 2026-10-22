@@ -41,6 +41,8 @@ export async function persistReader(secrets: SecretStore, client: DCInside): Pro
 export class AccountManager {
     private readonly sessions = new Map<string, LoggedIn>();
     private readonly statuses = new Map<string, AccountStatus>();
+    /** OTP를 요구받은 클라이언트입니다. OTP는 요구받은 클라이언트(같은 기기 정보)로 보내야 합니다. */
+    private readonly awaitingOtp = new Map<string, DCInside>();
 
     constructor(
         private readonly secrets: Pick<SecretStore, "get" | "set" | "removeByPrefix">,
@@ -64,7 +66,8 @@ export class AccountManager {
         const deviceKey = `device:${account.id}` as const;
         const otpKey = `otp:${account.id}` as const;
         const otpToken = otp ? undefined : this.secrets.get(otpKey) ?? undefined;
-        const client = this.createClient(await loadDevice(this.secrets, deviceKey));
+        const client = (otp && this.awaitingOtp.get(account.id)) || this.createClient(await loadDevice(this.secrets, deviceKey));
+        this.awaitingOtp.delete(account.id);
         try {
             const session = await client.login(account.loginId, password, otp ? {otp} : {otpToken});
             await saveDevice(this.secrets, deviceKey, client);
@@ -88,6 +91,8 @@ export class AccountManager {
         } catch (error) {
             this.sessions.delete(account.id);
             if (error instanceof OtpRequiredError) {
+                this.awaitingOtp.set(account.id, client);
+                await saveDevice(this.secrets, deviceKey, client);
                 // 저장된 토큰으로 실패했다면 만료된 것이므로 지웁니다.
                 if (otpToken) await this.secrets.set(otpKey, "");
                 return this.setStatus(account.id, {
@@ -172,6 +177,7 @@ export class AccountManager {
 
     async remove(accountId: string): Promise<void> {
         this.sessions.delete(accountId);
+        this.awaitingOtp.delete(accountId);
         this.statuses.delete(accountId);
         await this.secrets.removeByPrefix(`account:${accountId}`);
         await this.secrets.removeByPrefix(`device:${accountId}`);

@@ -28,10 +28,11 @@ interface FakeServer {
     /** 댓글 작성이 이 횟수만큼 세션 만료로 실패합니다. */
     expireWrites: number;
     written: string[];
+    clientsCreated: number;
 }
 
 function fakeClientFactory(server: FakeServer) {
-    return () => ({
+    return () => (server.clientsCreated++, {
         async login(_id: string, _password: string, options: LoginOptions = {}) {
             server.loginCalls.push(options);
             const viaToken = options.otpToken === server.validOtpToken;
@@ -60,7 +61,7 @@ function fakeClientFactory(server: FakeServer) {
 }
 
 function setup(secretsInit: Record<string, string> = {}) {
-    const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: []};
+    const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0};
     const secrets = memorySecrets({"account:acc1": "pw", ...secretsInit});
     const manager = new AccountManager(secrets, fakeClientFactory(server));
     return {server, secrets, manager};
@@ -74,6 +75,14 @@ describe("AccountManager OTP 로그인", () => {
         const status = await manager.login(ACCOUNT, "123456");
         expect(status).toMatchObject({state: "logged_in", nickname: "너구리국밥", memberType: "gonick", dcconCount: 1});
         expect(secrets.data["otp:acc1"]).toBe("token-abc");
+    });
+
+    it("OTP는 OTP를 요구받은 클라이언트(같은 기기 정보)로 보낸다", async () => {
+        const {server, manager} = setup();
+        await manager.login(ACCOUNT);
+        await manager.login(ACCOUNT, "123456");
+        expect(server.clientsCreated).toBe(1);
+        expect(server.loginCalls).toEqual([{otpToken: undefined}, {otp: "123456"}]);
     });
 
     it("저장된 OTP 토큰이 있으면 OTP 없이 로그인한다", async () => {
