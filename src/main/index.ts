@@ -17,10 +17,13 @@ async function main(): Promise<void> {
     const secrets = new SecretStore(dataDir);
     const ledger = new Ledger(dataDir);
     const accounts = new AccountManager(secrets);
-    const reader = await createReader(secrets);
+    let reader = await createReader(secrets);
     const engine = new Engine({
-        reader,
+        reader: () => reader,
         onReaderReady: () => persistReader(secrets, reader),
+        resetReader: async () => {
+            reader = await createReader(secrets, true);
+        },
         accounts,
         ledger,
         secrets,
