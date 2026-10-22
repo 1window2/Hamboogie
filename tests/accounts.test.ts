@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {AuthExpiredError, OtpRequiredError, type DCInside, type LoginOptions} from "@green-1052/dcinside.js";
+import {AuthExpiredError, DCInsideError, OtpRequiredError, type DCInside, type DeviceCredentials, type LoginOptions} from "@green-1052/dcinside.js";
 import {AccountManager} from "../src/main/dc/accounts";
 import type {AccountConfig} from "@shared/types";
 
@@ -29,10 +29,14 @@ interface FakeServer {
     expireWrites: number;
     written: string[];
     clientsCreated: number;
+    /** true면 저장된 기기 정보로 만든 클라이언트는 app_id 발급을 거절당합니다. */
+    savedDeviceBroken: boolean;
 }
 
+const APP_ID_REFUSED = () => new DCInsideError('app_id 발급 실패: {"result":false,"cause":"2114 DC Error Description :service id mismatched."}');
+
 function fakeClientFactory(server: FakeServer) {
-    return () => (server.clientsCreated++, {
+    return (credentials?: DeviceCredentials) => (server.clientsCreated++, {
         async login(_id: string, _password: string, options: LoginOptions = {}) {
             server.loginCalls.push(options);
             const viaToken = options.otpToken === server.validOtpToken;
@@ -44,11 +48,15 @@ function fakeClientFactory(server: FakeServer) {
         },
         auth: {exportCredentials: () => ({androidId: "1"})},
         dccons: {
-            list: async () => ({tab: [{title: "음식콘"}], list: [[{package_idx: 1, detail_idx: 11, title: "햄버거"}]]}),
+            async list() {
+                if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
+                return {tab: [{title: "음식콘"}], list: [[{package_idx: 1, detail_idx: 11, title: "햄버거"}]]};
+            },
             insert: async () => ({img_tag: "<img>"})
         },
         comments: {
             async write(_gallery: string, _no: number, content: unknown) {
+                if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
                 if (server.expireWrites > 0) {
                     server.expireWrites--;
                     throw new AuthExpiredError("login", "세션 만료");
@@ -61,7 +69,7 @@ function fakeClientFactory(server: FakeServer) {
 }
 
 function setup(secretsInit: Record<string, string> = {}) {
-    const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0};
+    const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0, savedDeviceBroken: false};
     const secrets = memorySecrets({"account:acc1": "pw", ...secretsInit});
     const manager = new AccountManager(secrets, fakeClientFactory(server));
     return {server, secrets, manager};
@@ -128,5 +136,31 @@ describe("AccountManager 댓글 작성", () => {
         await manager.login(ACCOUNT);
         await manager.remove("acc1");
         expect(Object.keys(secrets.data)).toEqual([]);
+    });
+});
+
+describe("AccountManager app_id 거절 복구", () => {
+    it("로그인 후 app_id가 거절되면 기기 정보를 새로 받아 OTP 없이 다시 로그인한다", async () => {
+        const {server, secrets, manager} = setup({"otp:acc1": "token-abc", "device:acc1": JSON.stringify({androidId: "old"})});
+        server.savedDeviceBroken = true;
+        const status = await manager.login(ACCOUNT);
+        expect(status).toMatchObject({state: "logged_in", dcconCount: 1});
+        expect(status.state === "logged_in" && status.dcconError).toBeUndefined();
+        expect(server.clientsCreated).toBe(2);
+        expect(server.loginCalls).toEqual([{otpToken: "token-abc"}, {otpToken: "token-abc"}]);
+        expect(secrets.data["device:acc1"]).toBe(JSON.stringify({androidId: "1"}));
+    });
+
+    it("댓글 작성 중 app_id가 거절되면 기기 정보를 새로 받아 다시 로그인한 뒤 한 번 더 시도한다", async () => {
+        const {server, manager} = setup({"otp:acc1": "token-abc", "device:acc1": JSON.stringify({androidId: "old"})});
+        await manager.login(ACCOUNT);
+        // 로그인 때는 멀쩡하던 기기 정보가 나중에(11시간 뒤 재발급 등) 거절되는 상황입니다.
+        const sessionClient = (manager as unknown as {sessions: Map<string, {client: DCInside}>}).sessions.get("acc1")!.client;
+        (sessionClient.comments as unknown as {write: () => Promise<never>}).write = async () => {
+            throw APP_ID_REFUSED();
+        };
+        await manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"});
+        expect(server.written).toEqual(["줄"]);
+        expect(server.clientsCreated).toBe(2);
     });
 });

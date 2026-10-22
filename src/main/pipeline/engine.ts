@@ -1,7 +1,7 @@
 import type {DCInside, PostItem} from "@green-1052/dcinside.js";
 import {galleryProblems, PROVIDER_LABELS} from "@shared/settings";
 import type {GalleryConfig, Settings} from "@shared/types";
-import type {AccountManager} from "../dc/accounts";
+import {isAppIdFailure, type AccountManager} from "../dc/accounts";
 import {htmlToText} from "../dc/text";
 import type {Decision} from "../llm/decision";
 import {createProvider} from "../llm/providers";
@@ -26,8 +26,11 @@ export interface Analysis {
 }
 
 export interface EngineDeps {
-    reader: DCInside;
+    /** 글 읽기 전용 클라이언트입니다. `resetReader` 뒤에는 새 클라이언트를 돌려줍니다. */
+    reader(): DCInside;
     onReaderReady(): Promise<void>;
+    /** 읽기용 기기 정보를 버리고 새 클라이언트를 만듭니다. */
+    resetReader(): Promise<void>;
     accounts: AccountManager;
     ledger: Ledger;
     secrets: SecretStore;
@@ -108,6 +111,7 @@ export class Engine {
             }
         } catch (error) {
             this.deps.logger.error(`목록 확인 실패: ${errorMessage(error)}`, {galleryId: gallery.galleryId});
+            await this.recoverReader(error);
         }
         // 설정이 바뀌었을 수 있으니 다음 간격은 최신 설정에서 읽습니다.
         if (runId === this.runId) this.schedule(configId, runId, (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
@@ -120,7 +124,7 @@ export class Engine {
         const collected = new Map<number, NewPost>();
 
         for (let page = 1; page <= MAX_PAGES_PER_TICK; page++) {
-            const response = await reader.articles.list({gallery: gallery.galleryId, page});
+            const response = await reader().articles.list({gallery: gallery.galleryId, page});
             if (!this.readerReady) {
                 this.readerReady = true;
                 await this.deps.onReaderReady();
@@ -149,14 +153,23 @@ export class Engine {
         const detectedAt = Date.now();
         let analysis: Analysis;
         try {
-            const article = await this.deps.reader.articles.read(gallery.galleryId, post.no);
+            const article = await this.deps.reader().articles.read(gallery.galleryId, post.no);
             const title = article.view_info?.subject ?? post.title;
             const body = htmlToText(article.view_main?.memo ?? "");
             analysis = await this.analyze(gallery, title, body, detectedAt);
         } catch (error) {
             analysis = {decision: null, plan: {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`}};
+            await this.recoverReader(error);
         }
         await this.dispatch(gallery, post, analysis.plan);
+    }
+
+    /** 읽기용 클라이언트의 app_id 발급이 거절됐으면 기기 정보를 새로 받습니다. 다음 확인부터 새 클라이언트를 씁니다. */
+    private async recoverReader(error: unknown): Promise<void> {
+        if (!isAppIdFailure(error)) return;
+        this.deps.logger.warn("읽기용 앱 인증(app_id)이 거절되어 기기 정보를 새로 받습니다.");
+        this.readerReady = false;
+        await this.deps.resetReader();
     }
 
     /** 글 내용을 LLM으로 판단하고 행동 계획을 세웁니다. LLM 호출이 실패하면 알림 계획을 돌려줍니다. */
