@@ -1,9 +1,10 @@
 {
   "name": "hamboogie",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "디시인사이드 나눔 글 자동 줄서기 데스크톱 프로그램",
   "license": "GPL-3.0-only",
+  "author": "1window2",
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
