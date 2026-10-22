@@ -1,6 +1,7 @@
 import {useState} from "react";
 import {INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, KEYWORD_MAX, newGallery} from "@shared/settings";
 import type {AccountView, GalleryConfig, Settings} from "@shared/types";
+import {NumberInput} from "../components/NumberInput";
 
 interface Props {
     draft: Settings;
@@ -84,7 +85,7 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
 
                 <label className="field">
                     <span>줄 서기 지연 (초)</span>
-                    <input type="number" min={0} value={gallery.delaySec} onChange={(event) => onChange({delaySec: Number(event.target.value)})}/>
+                    <NumberInput value={gallery.delaySec} onChange={(delaySec) => onChange({delaySec})}/>
                     <small className="muted">나눔 글을 감지한 뒤 기다릴 시간입니다. 0이면 즉시 줄을 섭니다.</small>
                 </label>
 
@@ -161,8 +162,13 @@ function IntervalField({value, onChange}: {value: number; onChange(value: number
         <label className="field">
             <span>감시 간격</span>
             <div className="row">
-                <input type="number" min={1} value={value / factor} onChange={(event) => onChange(Number(event.target.value) * factor)}/>
-                <select value={unit} onChange={(event) => setUnit(event.target.value as "sec" | "min")}>
+                <NumberInput value={Math.round(value / factor)} min={1} onChange={(amount) => onChange(amount * factor)}/>
+                <select value={unit} onChange={(event) => {
+                    const next = event.target.value as "sec" | "min";
+                    setUnit(next);
+                    // 분 단위로 바꾸면 화면에 보이는 값과 실제 값이 같도록 분 단위로 맞춥니다.
+                    if (next === "min" && value % 60 !== 0) onChange(Math.max(1, Math.round(value / 60)) * 60);
+                }}>
                     <option value="sec">초</option>
                     <option value="min">분</option>
                 </select>
