@@ -42,8 +42,11 @@ export class SettingsStore {
     }
 }
 
+/** 내부 전용 비밀 정보입니다. renderer에서는 설정할 수 없습니다. */
+export type InternalSecretKey = `device:${string}` | `otp:${string}`;
+
 /**
- * 계정 비밀번호, LLM API 키, 디바이스 인증 정보를 OS 보안 저장소(Windows DPAPI, macOS 키체인)로 암호화해 둡니다.
+ * 계정 비밀번호, OTP 토큰, LLM API 키, 디바이스 인증 정보를 OS 보안 저장소(Windows DPAPI, macOS 키체인)로 암호화해 둡니다.
  */
 export class SecretStore {
     private readonly path: string;
@@ -62,14 +65,14 @@ export class SecretStore {
         return key in this.data;
     }
 
-    get(key: SecretKey | `device:${string}`): string | null {
+    get(key: SecretKey | InternalSecretKey): string | null {
         const encrypted = this.data[key];
         if (!encrypted) return null;
         this.ensureAvailable();
         return safeStorage.decryptString(Buffer.from(encrypted, "base64"));
     }
 
-    async set(key: SecretKey | `device:${string}`, value: string): Promise<void> {
+    async set(key: SecretKey | InternalSecretKey, value: string): Promise<void> {
         if (value) {
             this.ensureAvailable();
             this.data[key] = safeStorage.encryptString(value).toString("base64");

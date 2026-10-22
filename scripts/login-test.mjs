@@ -55,9 +55,13 @@ try {
     console.error("\n[보유 디시콘] 조회 실패:", error.message);
 }
 
-const gallery = await ask("\n댓글 작성까지 테스트하려면 갤러리 ID를 입력하세요(건너뛰려면 Enter): ");
-if (gallery) {
-    const no = Number(await ask("글 번호: "));
+// 댓글 테스트는 사람이 없는 테스트용 갤러리(asgeir)의 1번 글에서만 합니다.
+const TEST_GALLERY = "asgeir";
+const TEST_POST_NO = 1;
+const answer = await ask(`\n${TEST_GALLERY} 갤러리 ${TEST_POST_NO}번 글에 댓글 작성까지 테스트할까요? (y/N): `);
+if (answer.toLowerCase() === "y") {
+    const gallery = TEST_GALLERY;
+    const no = TEST_POST_NO;
     const text = (await ask("댓글 내용(기본값: 줄): ")) || "줄";
     const confirm = await ask(`${gallery} 갤러리 ${no}번 글에 "${text}" 댓글을 실제로 답니다. 진행할까요? (y/N): `);
     if (confirm.toLowerCase() === "y") {

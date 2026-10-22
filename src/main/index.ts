@@ -1,6 +1,6 @@
 import {join} from "node:path";
 import {app, BrowserWindow, ipcMain, shell} from "electron";
-import type {AppState, LlmProviderId, SecretKey, Settings} from "@shared/types";
+import type {AccountConfig, AppState, LlmProviderId, SecretKey, Settings} from "@shared/types";
 import {AccountManager, createReader, persistReader} from "./dc/accounts";
 import {Logger} from "./logger";
 import {sendDiscordNotice} from "./notify/discord";
@@ -67,14 +67,21 @@ async function main(): Promise<void> {
         await secrets.set(key, value);
         return state();
     });
-    ipcMain.handle("login", async (_event, accountId: string) => {
-        const account = settingsStore.get().accounts.find((item) => item.id === accountId);
-        if (!account) throw new Error("계정을 찾을 수 없습니다.");
-        const pending = accounts.login(account);
+    async function loginAccount(account: AccountConfig, otp?: string): Promise<void> {
+        const pending = accounts.login(account, otp);
         pushState();
         const status = await pending;
         if (status.state === "logged_in") logger.success(`${status.nickname} (${account.loginId}) 로그인 성공`);
+        else if (status.state === "otp_required") logger.warn(`${account.loginId} ${status.message}`);
         else if (status.state === "error") logger.error(`${account.loginId} ${status.message}`);
+        pushState();
+    }
+
+    ipcMain.handle("login", async (_event, accountId: string, otp?: string) => {
+        const account = settingsStore.get().accounts.find((item) => item.id === accountId);
+        if (!account) throw new Error("계정을 찾을 수 없습니다.");
+        if (otp !== undefined && !/^\d{6}$/.test(otp)) throw new Error("OTP는 숫자 6자리입니다.");
+        await loginAccount(account, otp);
         return state();
     });
     ipcMain.handle("start", () => {
@@ -126,6 +133,11 @@ async function main(): Promise<void> {
         engine.stop();
         app.quit();
     });
+
+    // 비밀번호가 저장된 계정은 앱을 켤 때 자동으로 로그인합니다. OTP 토큰이 없으면 OTP 입력을 기다립니다.
+    for (const account of settingsStore.get().accounts) {
+        if (account.loginId && secrets.has(`account:${account.id}`)) await loginAccount(account);
+    }
 }
 
 void main();
