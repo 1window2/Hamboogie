@@ -16,6 +16,8 @@ async function main(): Promise<void> {
         return;
     }
     await app.whenReady();
+    // 개발 모드에서는 Dock에 Electron 기본 아이콘 대신 앱 아이콘을 보여줍니다. 배포 빌드는 설치 파일의 아이콘을 씁니다.
+    if (import.meta.env.DEV && process.platform === "darwin") app.dock?.setIcon(join(app.getAppPath(), "build/icon.png"));
     const dataDir = app.getPath("userData");
     const logger = new Logger(join(dataDir, "hamboogie.log"));
     const settingsStore = new SettingsStore(dataDir);
@@ -50,7 +52,8 @@ async function main(): Promise<void> {
                 status: accounts.status(account.id)
             })),
             secretsSet,
-            running: engine.running
+            running: engine.running,
+            watching: engine.watching
         };
     }
 

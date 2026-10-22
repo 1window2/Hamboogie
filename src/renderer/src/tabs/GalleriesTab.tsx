@@ -28,6 +28,11 @@ export function GalleriesTab({draft, setDraft, accounts}: Props) {
     );
 }
 
+function galleryUrl(gallery: GalleryConfig): string {
+    const kind = gallery.isMinor ? "mgallery/" : "";
+    return `https://gall.dcinside.com/${kind}board/lists/?id=${encodeURIComponent(gallery.galleryId)}`;
+}
+
 function GalleryCard({gallery, accounts, onChange, onRemove}: {
     gallery: GalleryConfig;
     accounts: AccountView[];
@@ -77,7 +82,10 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
                     <input type="checkbox" checked={gallery.enabled} onChange={(event) => onChange({enabled: event.target.checked})}/>
                     감시 사용
                 </label>
-                <button className="button danger small push-right" onClick={onRemove}>삭제</button>
+                {gallery.galleryId && (
+                    <a className="button small push-right" href={galleryUrl(gallery)} target="_blank" rel="noreferrer">갤러리 열기</a>
+                )}
+                <button className={gallery.galleryId ? "button danger small" : "button danger small push-right"} onClick={onRemove}>삭제</button>
             </div>
 
             <div className="grid">

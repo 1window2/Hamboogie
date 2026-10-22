@@ -76,6 +76,8 @@ export interface AppState {
     accounts: AccountView[];
     secretsSet: Partial<Record<SecretKey, boolean>>;
     running: boolean;
+    /** 감시 중인 갤러리 수입니다. */
+    watching: number;
 }
 
 /** 개발 모드 전용 테스트 실행 입력입니다. */

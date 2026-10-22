@@ -62,6 +62,10 @@ export class Engine {
         return this.watchers.size > 0;
     }
 
+    get watching(): number {
+        return this.watchers.size;
+    }
+
     /** 감시를 시작합니다. 시작할 수 없는 갤러리는 로그에 이유를 남기고 건너뜁니다. */
     start(): void {
         this.stop();
