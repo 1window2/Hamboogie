@@ -16,7 +16,8 @@ function statusText(status: AccountStatus): string {
             return "로그인 중…";
         case "logged_in": {
             const type = status.memberType === "gonick" ? "고닉" : status.memberType === "semi" ? "반고닉" : "종류 알 수 없음";
-            return `로그인됨 · ${status.nickname} · ${type} · 디시콘 ${status.dcconCount}개`;
+            const dccon = status.dcconError ? "디시콘 불러오기 실패" : `디시콘 ${status.dcconCount}개`;
+            return `로그인됨 · ${status.nickname} · ${type} · ${dccon}`;
         }
         case "otp_required":
         case "error":

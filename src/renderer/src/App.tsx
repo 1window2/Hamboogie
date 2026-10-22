@@ -4,14 +4,17 @@ import {GalleriesTab} from "./tabs/GalleriesTab";
 import {AccountsTab} from "./tabs/AccountsTab";
 import {LlmTab} from "./tabs/LlmTab";
 import {LogsTab} from "./tabs/LogsTab";
+import {DevTestTab} from "./tabs/DevTestTab";
 
-type TabId = "galleries" | "accounts" | "llm" | "logs";
+type TabId = "galleries" | "accounts" | "llm" | "logs" | "devTest";
 
 const TABS: {id: TabId; label: string}[] = [
     {id: "galleries", label: "갤러리"},
     {id: "accounts", label: "계정"},
     {id: "llm", label: "LLM · 알림"},
-    {id: "logs", label: "로그"}
+    {id: "logs", label: "로그"},
+    // 개발 모드에서만 보입니다.
+    ...(import.meta.env.DEV ? [{id: "devTest" as const, label: "테스트"}] : [])
 ];
 
 export function App() {
@@ -66,7 +69,7 @@ export function App() {
             </header>
 
             {error && <div className="banner error">{error}</div>}
-            {dirty && tab !== "logs" && (
+            {dirty && tab !== "logs" && tab !== "devTest" && (
                 <div className="banner unsaved">
                     저장하지 않은 변경 사항이 있습니다.
                     <button className="button primary small" onClick={save}>설정 저장</button>
@@ -82,6 +85,7 @@ export function App() {
                 {tab === "accounts" && <AccountsTab draft={draft} setDraft={setDraft} state={state} run={run}/>}
                 {tab === "llm" && <LlmTab draft={draft} setDraft={setDraft} state={state} run={run}/>}
                 {tab === "logs" && <LogsTab/>}
+                {import.meta.env.DEV && tab === "devTest" && <DevTestTab/>}
             </main>
         </div>
     );

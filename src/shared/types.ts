@@ -53,7 +53,7 @@ export type AccountStatus =
     | {state: "logged_out"}
     | {state: "logging_in"}
     | {state: "otp_required"; message: string}
-    | {state: "logged_in"; nickname: string; memberType: MemberType | null; dcconCount: number}
+    | {state: "logged_in"; nickname: string; memberType: MemberType | null; dcconCount: number; dcconError?: string}
     | {state: "error"; message: string};
 
 export interface AccountView extends AccountConfig {
@@ -78,6 +78,24 @@ export interface AppState {
     running: boolean;
 }
 
+/** 개발 모드 전용 테스트 실행 입력입니다. */
+export interface DevTestInput {
+    title: string;
+    body: string;
+    /** false면 판단만 하고 댓글이나 알림은 보내지 않습니다. */
+    act: boolean;
+}
+
+export interface DevTestResult {
+    /** LLM 판단에 걸린 시간(ms)입니다. */
+    elapsedMs: number;
+    /** LLM 판단 원문입니다. 분석이 실패하면 null입니다. */
+    decision: Record<string, unknown> | null;
+    plan:
+        | {kind: "skip" | "notify"; reason: string}
+        | {kind: "comment"; waitSec: number; attempts: {account: string; content: string}[]};
+}
+
 /** renderer → main 호출 목록입니다. */
 export interface HamboogieApi {
     getState(): Promise<AppState>;
@@ -91,4 +109,6 @@ export interface HamboogieApi {
     getLogs(): Promise<LogEntry[]>;
     onLog(listener: (entry: LogEntry) => void): () => void;
     onState(listener: (state: AppState) => void): () => void;
+    /** 개발 모드 전용입니다. 배포 빌드에서는 호출하면 실패합니다. */
+    devTestRun(input: DevTestInput): Promise<DevTestResult>;
 }

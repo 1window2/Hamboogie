@@ -3,6 +3,7 @@ import {galleryProblems, PROVIDER_LABELS} from "@shared/settings";
 import type {GalleryConfig, Settings} from "@shared/types";
 import type {AccountManager} from "../dc/accounts";
 import {htmlToText} from "../dc/text";
+import type {Decision} from "../llm/decision";
 import {createProvider} from "../llm/providers";
 import type {Logger} from "../logger";
 import {sendDiscordNotice} from "../notify/discord";
@@ -13,9 +14,15 @@ import {makePlan, type Plan} from "./planner";
 /** 한 번 확인할 때 최대로 넘겨볼 목록 페이지 수입니다. */
 const MAX_PAGES_PER_TICK = 3;
 
-interface NewPost {
+export interface NewPost {
     no: number;
     title: string;
+}
+
+export interface Analysis {
+    /** LLM 판단입니다. 분석이 실패하면 null입니다. */
+    decision: Decision | null;
+    plan: Plan;
 }
 
 export interface EngineDeps {
@@ -135,40 +142,64 @@ export class Engine {
 
     private async handlePost(gallery: GalleryConfig, post: NewPost): Promise<void> {
         const {ledger, logger} = this.deps;
-        const context = {galleryId: gallery.galleryId, postNo: post.no};
         if (ledger.has(gallery.galleryId, post.no)) return;
         if (!matchesKeywords(post.title, gallery.keywords)) return;
 
-        logger.info(`키워드 일치: "${post.title}"`, context);
+        logger.info(`키워드 일치: "${post.title}"`, {galleryId: gallery.galleryId, postNo: post.no});
         const detectedAt = Date.now();
-        let plan: Plan;
+        let analysis: Analysis;
         try {
             const article = await this.deps.reader.articles.read(gallery.galleryId, post.no);
             const title = article.view_info?.subject ?? post.title;
             const body = htmlToText(article.view_main?.memo ?? "");
+            analysis = await this.analyze(gallery, title, body, detectedAt);
+        } catch (error) {
+            analysis = {decision: null, plan: {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`}};
+        }
+        await this.dispatch(gallery, post, analysis.plan);
+    }
+
+    /** 글 내용을 LLM으로 판단하고 행동 계획을 세웁니다. LLM 호출이 실패하면 알림 계획을 돌려줍니다. */
+    async analyze(gallery: GalleryConfig, title: string, body: string, detectedAt: number): Promise<Analysis> {
+        try {
             const decision = await this.decide(title, body);
             const settings = this.deps.settings();
-            plan = makePlan(decision, gallery, this.deps.accounts.candidates(settings.accounts, gallery.accountIds), detectedAt);
+            const candidates = this.deps.accounts.candidates(settings.accounts, gallery.accountIds);
+            return {decision, plan: makePlan(decision, gallery, candidates, detectedAt)};
         } catch (error) {
-            plan = {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`};
+            return {decision: null, plan: {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`}};
         }
+    }
+
+    /**
+     * 계획대로 넘어가거나, 알리거나, 줄 서기를 예약합니다.
+     *
+     * @param options.useLedger false면 처리한 글 기록을 보지도 남기지도 않습니다. 개발 모드 테스트 전용입니다.
+     * @param options.label 로그와 알림 앞에 붙일 표시입니다.
+     */
+    async dispatch(gallery: GalleryConfig, post: NewPost, plan: Plan, options: {useLedger?: boolean; label?: string} = {}): Promise<void> {
+        const {ledger, logger} = this.deps;
+        const useLedger = options.useLedger ?? true;
+        const label = options.label ? `${options.label} ` : "";
+        const context = {galleryId: gallery.galleryId, postNo: post.no};
+        const claim = () => !useLedger || ledger.claim(gallery.galleryId, post.no);
 
         switch (plan.kind) {
             case "skip":
-                logger.info(`넘어감: ${plan.reason}`, context);
+                logger.info(`${label}넘어감: ${plan.reason}`, context);
                 return;
             case "notify":
-                if (!ledger.claim(gallery.galleryId, post.no)) return;
-                logger.warn(`판단 불가, 알림 전송: ${plan.reason}`, context);
-                await this.notify(`판단이 필요한 글: ${post.title}`, plan.reason, gallery.galleryId, post.no);
+                if (!claim()) return;
+                logger.warn(`${label}판단 불가, 알림 전송: ${plan.reason}`, context);
+                await this.notify(`${label}판단이 필요한 글: ${post.title}`, plan.reason, gallery.galleryId, post.no);
                 return;
             case "comment": {
-                if (!ledger.claim(gallery.galleryId, post.no)) return;
+                if (!claim()) return;
                 const waitMs = Math.max(0, plan.notBefore - Date.now());
-                if (waitMs > 0) logger.info(`${Math.round(waitMs / 1000)}초 뒤에 줄을 섭니다.`, context);
+                if (waitMs > 0) logger.info(`${label}${Math.round(waitMs / 1000)}초 뒤에 줄을 섭니다.`, context);
                 const timer = setTimeout(() => {
                     this.scheduled.delete(timer);
-                    void this.execute(gallery, post, plan);
+                    void this.execute(gallery, post, plan, label);
                 }, waitMs);
                 this.scheduled.add(timer);
             }
@@ -183,7 +214,7 @@ export class Engine {
     }
 
     /** 우선순위 순서로 한 계정씩 시도하고, 하나라도 성공하면 멈춥니다. 글 하나에는 댓글 하나만 답니다. */
-    private async execute(gallery: GalleryConfig, post: NewPost, plan: Extract<Plan, {kind: "comment"}>): Promise<void> {
+    private async execute(gallery: GalleryConfig, post: NewPost, plan: Extract<Plan, {kind: "comment"}>, prefix = ""): Promise<void> {
         const {accounts, logger} = this.deps;
         const context = {galleryId: gallery.galleryId, postNo: post.no};
         const failures: string[] = [];
@@ -191,15 +222,15 @@ export class Engine {
             const label = attempt.content.type === "text" ? `"${attempt.content.text}"` : `디시콘 "${attempt.content.dccon.title}"`;
             try {
                 await accounts.writeComment(attempt.accountId, gallery.galleryId, post.no, attempt.content);
-                logger.success(`줄 서기 성공: ${accounts.nickname(attempt.accountId)} 계정으로 ${label}`, context);
+                logger.success(`${prefix}줄 서기 성공: ${accounts.nickname(attempt.accountId)} 계정으로 ${label}`, context);
                 return;
             } catch (error) {
                 const message = `${accounts.nickname(attempt.accountId)}: ${errorMessage(error)}`;
                 failures.push(message);
-                logger.error(`줄 서기 실패 (${message})`, context);
+                logger.error(`${prefix}줄 서기 실패 (${message})`, context);
             }
         }
-        await this.notify(`줄 서기 실패: ${post.title}`, failures.join("\n"), gallery.galleryId, post.no);
+        await this.notify(`${prefix}줄 서기 실패: ${post.title}`, failures.join("\n"), gallery.galleryId, post.no);
     }
 
     private async notify(title: string, description: string, galleryId: string, postNo: number): Promise<void> {

@@ -23,6 +23,7 @@ const api: HamboogieApi = {
     stop: invoker("stop"),
     testWebhook: invoker("testWebhook"),
     getLogs: invoker("getLogs"),
+    devTestRun: import.meta.env.DEV ? invoker("devTestRun") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
     onLog: (listener) => subscribe<LogEntry>("log", listener),
     onState: (listener) => subscribe<AppState>("state", listener)
 };
