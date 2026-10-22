@@ -14,10 +14,22 @@ function readJson<T>(path: string, fallback: T): T {
     }
 }
 
-async function writeJson(path: string, value: unknown): Promise<void> {
-    const temp = `${path}.tmp`;
-    await writeFile(temp, JSON.stringify(value, null, 2), "utf8");
-    await rename(temp, path);
+const writeQueues = new Map<string, Promise<void>>();
+
+/**
+ * 임시 파일에 쓴 뒤 바꿔치기합니다. 같은 파일에 대한 쓰기는 순서대로 하나씩 처리해서,
+ * 동시에 저장할 때 임시 파일이 겹쳐 써져 내용이 깨지는 일을 막습니다.
+ */
+function writeJson(path: string, value: unknown): Promise<void> {
+    const content = JSON.stringify(value, null, 2);
+    const write = async () => {
+        const temp = `${path}.tmp`;
+        await writeFile(temp, content, "utf8");
+        await rename(temp, path);
+    };
+    const next = (writeQueues.get(path) ?? Promise.resolve()).catch(() => {}).then(write);
+    writeQueues.set(path, next);
+    return next;
 }
 
 /** 일반 설정입니다. 비밀 정보는 들어 있지 않습니다. */
@@ -65,11 +77,15 @@ export class SecretStore {
         return key in this.data;
     }
 
+    /** 복호화하지 못하면(다른 앱 이름으로 저장됐거나 OS 암호화 키가 바뀐 경우) null을 돌려줍니다. */
     get(key: SecretKey | InternalSecretKey): string | null {
         const encrypted = this.data[key];
-        if (!encrypted) return null;
-        this.ensureAvailable();
-        return safeStorage.decryptString(Buffer.from(encrypted, "base64"));
+        if (!encrypted || !safeStorage.isEncryptionAvailable()) return null;
+        try {
+            return safeStorage.decryptString(Buffer.from(encrypted, "base64"));
+        } catch {
+            return null;
+        }
     }
 
     async set(key: SecretKey | InternalSecretKey, value: string): Promise<void> {

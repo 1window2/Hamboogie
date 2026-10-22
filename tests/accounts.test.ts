@@ -11,6 +11,7 @@ function memorySecrets(initial: Record<string, string> = {}) {
     return {
         data,
         get: (key: string) => data[key] ?? null,
+        has: (key: string) => key in data,
         set: async (key: string, value: string) => {
             if (value) data[key] = value;
             else delete data[key];

@@ -10,6 +10,11 @@ import {Ledger, SecretStore, SettingsStore} from "./store";
 const PROVIDERS: LlmProviderId[] = ["gemini", "openai", "claude"];
 
 async function main(): Promise<void> {
+    // 앱이 두 개 뜨면 감시 엔진도 두 개가 되어 같은 글에 댓글이 두 번 달릴 수 있으므로 하나만 실행합니다.
+    if (!app.requestSingleInstanceLock()) {
+        app.quit();
+        return;
+    }
     await app.whenReady();
     const dataDir = app.getPath("userData");
     const logger = new Logger(join(dataDir, "hamboogie.log"));
@@ -17,12 +22,12 @@ async function main(): Promise<void> {
     const secrets = new SecretStore(dataDir);
     const ledger = new Ledger(dataDir);
     const accounts = new AccountManager(secrets);
-    let reader = await createReader(secrets);
+    let reader = createReader(secrets);
     const engine = new Engine({
         reader: () => reader,
         onReaderReady: () => persistReader(secrets, reader),
         resetReader: async () => {
-            reader = await createReader(secrets, true);
+            reader = createReader(secrets, true);
         },
         accounts,
         ledger,
@@ -131,6 +136,11 @@ async function main(): Promise<void> {
     });
     window.on("closed", () => {
         window = null;
+    });
+    app.on("second-instance", () => {
+        if (!window) return;
+        if (window.isMinimized()) window.restore();
+        window.focus();
     });
     // 외부 링크는 앱 안이 아니라 기본 브라우저로 엽니다.
     window.webContents.setWindowOpenHandler(({url}) => {
