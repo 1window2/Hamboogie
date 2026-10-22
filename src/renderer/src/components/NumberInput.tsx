@@ -1,0 +1,48 @@
+import {useEffect, useRef, useState} from "react";
+import {parseNonNegativeInt} from "./number-text";
+
+interface Props {
+    value: number;
+    onChange(value: number): void;
+    min?: number;
+}
+
+/**
+ * 0 이상의 정수 입력칸입니다. 입력 중인 글자는 따로 들고 있어서, 칸을 비우거나 앞자리 0을 지우는 도중에
+ * 값이 0으로 되돌아가지 않습니다. 비운 채로 포커스를 잃으면 입력을 시작하기 전 값으로 돌아갑니다.
+ */
+export function NumberInput({value, onChange, min}: Props) {
+    const [text, setText] = useState(String(value));
+    const valueAtFocus = useRef(value);
+
+    // 되돌리기나 단위 변경처럼 밖에서 값이 바뀌면 입력칸도 맞춥니다.
+    useEffect(() => {
+        setText((current) => parseNonNegativeInt(current) === value ? current : String(value));
+    }, [value]);
+
+    function commit(next: string) {
+        const parsed = parseNonNegativeInt(next);
+        return parsed !== null && (min === undefined || parsed >= min) ? parsed : null;
+    }
+
+    return (
+        <input type="text" inputMode="numeric" value={text}
+               onFocus={() => {
+                   valueAtFocus.current = value;
+               }}
+               onChange={(event) => {
+                   const next = event.target.value.replace(/\D/g, "");
+                   setText(next);
+                   const parsed = commit(next);
+                   if (parsed !== null) onChange(parsed);
+               }}
+               onBlur={() => {
+                   if (commit(text) !== null) {
+                       setText(String(value));
+                       return;
+                   }
+                   setText(String(valueAtFocus.current));
+                   if (value !== valueAtFocus.current) onChange(valueAtFocus.current);
+               }}/>
+    );
+}

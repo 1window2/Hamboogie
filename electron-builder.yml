@@ -1,0 +1,17 @@
+appId: io.github.1window2.hamboogie
+productName: Hamboogie
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+win:
+  target: nsis
+  artifactName: ${productName}-${version}-setup.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+mac:
+  target: dmg
+  category: public.app-category.utilities
+  artifactName: ${productName}-${version}-${arch}.${ext}
