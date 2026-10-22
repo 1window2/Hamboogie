@@ -17,7 +17,7 @@ function describe(error: unknown): string {
     return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
-async function loadDevice(secrets: Pick<SecretStore, "get">, key: `device:${string}`): Promise<DeviceCredentials | undefined> {
+function loadDevice(secrets: Pick<SecretStore, "get">, key: `device:${string}`): DeviceCredentials | undefined {
     const saved = secrets.get(key);
     if (!saved) return undefined;
     try {
@@ -41,8 +41,8 @@ export function isAppIdFailure(error: unknown): boolean {
 }
 
 /** 글 읽기 전용 클라이언트를 만듭니다. 로그인하지 않으며 디바이스 인증 정보만 재사용합니다. */
-export async function createReader(secrets: SecretStore, freshDevice = false): Promise<DCInside> {
-    return new DCInside({credentials: freshDevice ? undefined : await loadDevice(secrets, "device:reader")});
+export function createReader(secrets: SecretStore, freshDevice = false): DCInside {
+    return new DCInside({credentials: freshDevice ? undefined : loadDevice(secrets, "device:reader")});
 }
 
 /** 인증 정보 발급은 첫 요청 때 일어나므로, 첫 요청이 성공한 뒤에 호출합니다. */
@@ -56,9 +56,11 @@ export class AccountManager {
     private readonly statuses = new Map<string, AccountStatus>();
     /** OTP를 요구받은 클라이언트입니다. OTP는 요구받은 클라이언트(같은 기기 정보)로 보내야 합니다. */
     private readonly awaitingOtp = new Map<string, DCInside>();
+    /** 진행 중인 로그인입니다. 같은 계정의 재로그인이 겹치면 하나만 하고 결과를 함께 씁니다. */
+    private readonly pendingLogins = new Map<string, Promise<AccountStatus>>();
 
     constructor(
-        private readonly secrets: Pick<SecretStore, "get" | "set" | "removeByPrefix">,
+        private readonly secrets: Pick<SecretStore, "get" | "has" | "set" | "removeByPrefix">,
         private readonly createClient: (credentials?: DeviceCredentials) => DCInside = (credentials) => new DCInside({credentials})
     ) {}
 
@@ -75,15 +77,33 @@ export class AccountManager {
      * @param freshDevice 저장된 기기 정보를 버리고 새로 받습니다.
      */
     async login(account: AccountConfig, otp?: string, freshDevice = false): Promise<AccountStatus> {
+        // OTP를 넣은 로그인은 사용자가 직접 한 것이라 겹치지 않습니다. 자동 재로그인만 합칩니다.
+        const pending = otp ? undefined : this.pendingLogins.get(account.id);
+        if (pending) return pending;
+        const attempt = this.doLogin(account, otp, freshDevice);
+        if (!otp) this.pendingLogins.set(account.id, attempt);
+        try {
+            return await attempt;
+        } finally {
+            if (this.pendingLogins.get(account.id) === attempt) this.pendingLogins.delete(account.id);
+        }
+    }
+
+    private async doLogin(account: AccountConfig, otp: string | undefined, freshDevice: boolean): Promise<AccountStatus> {
         const password = this.secrets.get(`account:${account.id}`);
-        if (!account.loginId || !password) return this.setStatus(account.id, {state: "error", message: "아이디와 비밀번호를 먼저 입력하세요."});
+        if (!account.loginId || !password) {
+            const message = account.loginId && this.secrets.has(`account:${account.id}`)
+                ? "저장된 비밀번호를 읽지 못했습니다. 비밀번호를 다시 저장하세요."
+                : "아이디와 비밀번호를 먼저 입력하세요.";
+            return this.setStatus(account.id, {state: "error", message});
+        }
 
         this.statuses.set(account.id, {state: "logging_in"});
         const deviceKey = `device:${account.id}` as const;
         const otpKey = `otp:${account.id}` as const;
         const otpToken = otp ? undefined : this.secrets.get(otpKey) ?? undefined;
         const client = (otp && this.awaitingOtp.get(account.id))
-            || this.createClient(freshDevice ? undefined : await loadDevice(this.secrets, deviceKey));
+            || this.createClient(freshDevice ? undefined : loadDevice(this.secrets, deviceKey));
         this.awaitingOtp.delete(account.id);
         try {
             const session = await client.login(account.loginId, password, otp ? {otp} : {otpToken});
@@ -99,7 +119,7 @@ export class AccountManager {
             };
             const dccons = await this.loadDccons(client);
             // OTP를 썼더라도 위에서 OTP 토큰을 저장했으므로, 다시 로그인할 때는 OTP를 묻지 않습니다.
-            if (dccons.error !== undefined && isAppIdFailure(dccons.error) && !freshDevice) return this.login(account, undefined, true);
+            if (dccons.error !== undefined && isAppIdFailure(dccons.error) && !freshDevice) return this.doLogin(account, undefined, true);
             // app_id를 받은 뒤에 저장해야 앱을 다시 켰을 때 app_id를 또 발급받지 않습니다.
             await saveDevice(this.secrets, deviceKey, client);
             loggedIn.dccons = dccons.items;

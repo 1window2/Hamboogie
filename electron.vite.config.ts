@@ -6,7 +6,9 @@ const shared = {"@shared": resolve("src/shared")};
 
 export default defineConfig({
     main: {
-        resolve: {alias: shared}
+        resolve: {alias: shared},
+        // 라이브러리를 node_modules째로 싣지 않고 쓰는 코드만 묶어서 설치 파일을 줄입니다.
+        build: {externalizeDeps: false, minify: true}
     },
     preload: {
         resolve: {alias: shared},
@@ -17,6 +19,7 @@ export default defineConfig({
     },
     renderer: {
         resolve: {alias: shared},
-        plugins: [react()]
+        plugins: [react()],
+        build: {minify: true}
     }
 });

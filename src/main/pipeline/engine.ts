@@ -4,7 +4,7 @@ import type {GalleryConfig, Settings} from "@shared/types";
 import {isAppIdFailure, type AccountManager} from "../dc/accounts";
 import {htmlToText} from "../dc/text";
 import type {Decision} from "../llm/decision";
-import {createProvider} from "../llm/providers";
+import {createProvider, type LlmProvider} from "../llm/providers";
 import type {Logger} from "../logger";
 import {sendDiscordNotice} from "../notify/discord";
 import type {Ledger, SecretStore} from "../store";
@@ -53,6 +53,8 @@ export class Engine {
     private readonly lastSeen = new Map<string, number>();
     private readerReady = false;
     private runId = 0;
+    /** 같은 서비스/모델/키라면 LLM 클라이언트를 다시 만들지 않습니다. */
+    private provider: {key: string; instance: LlmProvider} | null = null;
 
     constructor(private readonly deps: EngineDeps) {}
 
@@ -223,7 +225,10 @@ export class Engine {
         const {llm} = this.deps.settings();
         const apiKey = this.deps.secrets.get(`llm:${llm.provider}`);
         if (!apiKey) throw new Error(`${PROVIDER_LABELS[llm.provider]} API 키가 설정되지 않았습니다.`);
-        return createProvider(llm.provider, apiKey, llm.models[llm.provider]).decide({title, body});
+        const model = llm.models[llm.provider];
+        const key = `${llm.provider}\n${model}\n${apiKey}`;
+        if (this.provider?.key !== key) this.provider = {key, instance: createProvider(llm.provider, apiKey, model)};
+        return this.provider.instance.decide({title, body});
     }
 
     /** 우선순위 순서로 한 계정씩 시도하고, 하나라도 성공하면 멈춥니다. 글 하나에는 댓글 하나만 답니다. */
