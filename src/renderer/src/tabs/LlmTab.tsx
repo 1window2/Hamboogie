@@ -13,6 +13,7 @@ const PROVIDERS: LlmProviderId[] = ["gemini", "openai", "claude"];
 
 export function LlmTab({draft, setDraft, state, run}: Props) {
     const [webhookResult, setWebhookResult] = useState<{ok: boolean; message: string} | null>(null);
+    const [showWebhook, setShowWebhook] = useState(false);
     const webhookSaved = draft.discordWebhookUrl === state.settings.discordWebhookUrl;
 
     return (
@@ -20,8 +21,8 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
             <section className="card">
                 <h2>LLM</h2>
                 <p className="muted">글 제목과 본문 텍스트만 보냅니다. 사용할 서비스 하나를 고르고 API 키를 입력하세요.</p>
-                <p className="muted">
-                    ※ 무료 API 키는 요청 횟수 제한이 있습니다(예: Gemini 무료 등급은 모델당 분당 약 5회).
+                <p className="muted note">
+                    무료 API 키는 요청 횟수 제한이 있습니다(예: Gemini 무료 등급은 모델당 분당 약 5회).
                     감시하는 갤러리가 많거나 키워드가 비어 있으면 한도에 걸려 판단이 실패할 수 있습니다.
                 </p>
                 <div className="row">
@@ -43,8 +44,13 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
                 <p className="muted">줄 서기에 실패했거나 자동으로 판단할 수 없는 글이 있을 때만 알림을 보냅니다.</p>
                 <label className="field">
                     <span>웹훅 주소</span>
-                    <input value={draft.discordWebhookUrl} placeholder="https://discord.com/api/webhooks/…"
-                           onChange={(event) => setDraft({...draft, discordWebhookUrl: event.target.value})}/>
+                    <div className="row">
+                        {/* 웹훅 주소를 아는 사람은 누구나 알림을 보낼 수 있어서 기본으로 가립니다. */}
+                        <input type={showWebhook ? "text" : "password"} value={draft.discordWebhookUrl} autoComplete="off"
+                               placeholder="https://discord.com/api/webhooks/…"
+                               onChange={(event) => setDraft({...draft, discordWebhookUrl: event.target.value})}/>
+                        <button className="button small" onClick={() => setShowWebhook(!showWebhook)}>{showWebhook ? "가리기" : "보기"}</button>
+                    </div>
                 </label>
                 <div className="row">
                     <button className="button small" disabled={!webhookSaved || !draft.discordWebhookUrl}
@@ -63,7 +69,7 @@ function ProviderRow({provider, draft, setDraft, state, run}: Props & {provider:
     const [apiKey, setApiKey] = useState("");
     const hasKey = state.secretsSet[`llm:${provider}`] === true;
     return (
-        <div className="grid provider-row">
+        <div className="provider-row">
             <strong>{PROVIDER_LABELS[provider]}</strong>
             <label className="field">
                 <span>모델</span>

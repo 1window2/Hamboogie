@@ -50,6 +50,42 @@ h1 {
     margin: 0;
 }
 
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.card p {
+    margin: 0;
+}
+
+.note {
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--bg);
+}
+
+a.button {
+    text-decoration: none;
+}
+
+.button:not(:disabled):hover {
+    border-color: var(--muted);
+}
+
+.button.primary:not(:disabled):hover {
+    filter: brightness(1.08);
+}
+
+.button.selected {
+    background: var(--text);
+    color: var(--surface);
+    border-color: var(--text);
+}
+
+
 h2 {
     font-size: 15px;
     margin: 0 0 4px;
@@ -177,9 +213,16 @@ fieldset {
 }
 
 .provider-row {
+    display: grid;
+    grid-template-columns: 80px minmax(0, 1fr) minmax(0, 1.3fr);
+    gap: 14px;
     align-items: end;
-    padding-top: 8px;
+    padding-top: 12px;
     border-top: 1px solid var(--border);
+}
+
+.provider-row > strong {
+    padding-bottom: 8px;
 }
 
 .field {

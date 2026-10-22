@@ -5,6 +5,7 @@ import {AccountsTab} from "./tabs/AccountsTab";
 import {LlmTab} from "./tabs/LlmTab";
 import {LogsTab} from "./tabs/LogsTab";
 import {DevTestTab} from "./tabs/DevTestTab";
+import iconUrl from "./assets/icon.svg";
 
 type TabId = "galleries" | "accounts" | "llm" | "logs" | "devTest";
 
@@ -51,7 +52,7 @@ export function App() {
     return (
         <div className="app">
             <header className="header">
-                <h1>Hamboogie</h1>
+                <h1 className="brand"><img src={iconUrl} alt="" width={26} height={26}/>Hamboogie</h1>
                 <nav className="tabs">
                     {TABS.map((item) => (
                         <button key={item.id} className={tab === item.id ? "tab active" : "tab"} onClick={() => setTab(item.id)}>
@@ -60,7 +61,9 @@ export function App() {
                     ))}
                 </nav>
                 <div className="header-actions">
-                    <span className={state.running ? "badge running" : "badge"}>{state.running ? "감시 중" : "멈춤"}</span>
+                    <span className={state.running ? "badge running" : "badge"}>
+                        {state.running ? `감시 중 · 갤러리 ${state.watching}개` : "멈춤"}
+                    </span>
                     {state.running
                         ? <button className="button" onClick={() => run(() => window.hamboogie.stop(), true)}>감시 멈추기</button>
                         : <button className="button primary" disabled={dirty} title={dirty ? "설정을 먼저 저장하세요" : undefined}
