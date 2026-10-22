@@ -20,6 +20,10 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
             <section className="card">
                 <h2>LLM</h2>
                 <p className="muted">글 제목과 본문 텍스트만 보냅니다. 사용할 서비스 하나를 고르고 API 키를 입력하세요.</p>
+                <p className="muted">
+                    ※ 무료 API 키는 요청 횟수 제한이 있습니다(예: Gemini 무료 등급은 모델당 분당 약 5회).
+                    감시하는 갤러리가 많거나 키워드가 비어 있으면 한도에 걸려 판단이 실패할 수 있습니다.
+                </p>
                 <div className="row">
                     {PROVIDERS.map((provider) => (
                         <label key={provider} className="check">
