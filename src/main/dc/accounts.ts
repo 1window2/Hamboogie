@@ -1,9 +1,11 @@
-import {DCInside, OtpRequiredError, CaptchaRequiredError, type DeviceCredentials} from "@green-1052/dcinside.js";
+import {AuthExpiredError, CaptchaRequiredError, DCInside, OtpRequiredError, type DeviceCredentials} from "@green-1052/dcinside.js";
 import type {AccountConfig, AccountStatus, MemberType} from "@shared/types";
 import type {SecretStore} from "../store";
 import type {CandidateAccount, CommentContent, OwnedDccon} from "../pipeline/planner";
 
 interface LoggedIn {
+    /** 세션 만료 시 다시 로그인할 때 씁니다. */
+    account: AccountConfig;
     client: DCInside;
     nickname: string;
     /** 로그인 응답으로 판별한 계정 종류입니다. 알 수 없으면 null입니다. */
@@ -11,7 +13,7 @@ interface LoggedIn {
     dccons: OwnedDccon[];
 }
 
-async function loadDevice(secrets: SecretStore, key: `device:${string}`): Promise<DeviceCredentials | undefined> {
+async function loadDevice(secrets: Pick<SecretStore, "get">, key: `device:${string}`): Promise<DeviceCredentials | undefined> {
     const saved = secrets.get(key);
     if (!saved) return undefined;
     try {
@@ -21,7 +23,7 @@ async function loadDevice(secrets: SecretStore, key: `device:${string}`): Promis
     }
 }
 
-async function saveDevice(secrets: SecretStore, key: `device:${string}`, client: DCInside): Promise<void> {
+async function saveDevice(secrets: Pick<SecretStore, "set">, key: `device:${string}`, client: DCInside): Promise<void> {
     await secrets.set(key, JSON.stringify(client.auth.exportCredentials()));
 }
 
@@ -40,52 +42,69 @@ export class AccountManager {
     private readonly sessions = new Map<string, LoggedIn>();
     private readonly statuses = new Map<string, AccountStatus>();
 
-    constructor(private readonly secrets: SecretStore) {}
+    constructor(
+        private readonly secrets: Pick<SecretStore, "get" | "set" | "removeByPrefix">,
+        private readonly createClient: (credentials?: DeviceCredentials) => DCInside = (credentials) => new DCInside({credentials})
+    ) {}
 
     status(accountId: string): AccountStatus {
         return this.statuses.get(accountId) ?? {state: "logged_out"};
     }
 
-    async login(account: AccountConfig): Promise<AccountStatus> {
+    /**
+     * 로그인합니다. 저장된 OTP 토큰이 있으면 OTP 없이 통과하고, 없거나 만료됐으면 `otp_required` 상태가 됩니다.
+     *
+     * @param otp 사용자가 입력한 OTP 6자리입니다.
+     */
+    async login(account: AccountConfig, otp?: string): Promise<AccountStatus> {
         const password = this.secrets.get(`account:${account.id}`);
-        if (!account.loginId || !password) {
-            const status: AccountStatus = {state: "error", message: "아이디와 비밀번호를 먼저 입력하세요."};
-            this.statuses.set(account.id, status);
-            return status;
-        }
+        if (!account.loginId || !password) return this.setStatus(account.id, {state: "error", message: "아이디와 비밀번호를 먼저 입력하세요."});
+
         this.statuses.set(account.id, {state: "logging_in"});
         const deviceKey = `device:${account.id}` as const;
-        const client = new DCInside({credentials: await loadDevice(this.secrets, deviceKey)});
+        const otpKey = `otp:${account.id}` as const;
+        const otpToken = otp ? undefined : this.secrets.get(otpKey) ?? undefined;
+        const client = this.createClient(await loadDevice(this.secrets, deviceKey));
         try {
-            const session = await client.login(account.loginId, password);
+            const session = await client.login(account.loginId, password, otp ? {otp} : {otpToken});
             await saveDevice(this.secrets, deviceKey, client);
+            // OTP로 로그인하면 다음부터 OTP 없이 통과할 수 있는 토큰을 줍니다.
+            if (session.result.otp_token) await this.secrets.set(otpKey, session.result.otp_token);
             const isGonick = session.result.is_gonick;
             const loggedIn: LoggedIn = {
+                account,
                 client,
                 nickname: session.result.name ?? account.loginId,
                 detectedMemberType: isGonick === 1 ? "gonick" : isGonick === 0 ? "semi" : null,
                 dccons: await this.loadDccons(client)
             };
             this.sessions.set(account.id, loggedIn);
-            const status: AccountStatus = {
+            return this.setStatus(account.id, {
                 state: "logged_in",
                 nickname: loggedIn.nickname,
                 memberType: this.memberType(account, loggedIn),
                 dcconCount: loggedIn.dccons.length
-            };
-            this.statuses.set(account.id, status);
-            return status;
+            });
         } catch (error) {
             this.sessions.delete(account.id);
-            const message = error instanceof OtpRequiredError
-                ? "OTP 인증이 필요한 계정입니다. (OTP 입력은 아직 지원하지 않습니다)"
-                : error instanceof CaptchaRequiredError
-                    ? "로그인에 캡차 입력이 필요합니다. 디시 앱이나 웹에서 한 번 로그인한 뒤 다시 시도하세요."
-                    : `로그인 실패: ${error instanceof Error ? error.message : String(error)}`;
-            const status: AccountStatus = {state: "error", message};
-            this.statuses.set(account.id, status);
-            return status;
+            if (error instanceof OtpRequiredError) {
+                // 저장된 토큰으로 실패했다면 만료된 것이므로 지웁니다.
+                if (otpToken) await this.secrets.set(otpKey, "");
+                return this.setStatus(account.id, {
+                    state: "otp_required",
+                    message: otp ? `OTP 인증 실패: ${error.message}` : "OTP 번호를 입력하세요."
+                });
+            }
+            const message = error instanceof CaptchaRequiredError
+                ? "로그인에 캡차 입력이 필요합니다. 디시 앱이나 웹에서 한 번 로그인한 뒤 다시 시도하세요."
+                : `로그인 실패: ${error instanceof Error ? error.message : String(error)}`;
+            return this.setStatus(account.id, {state: "error", message});
         }
+    }
+
+    private setStatus(accountId: string, status: AccountStatus): AccountStatus {
+        this.statuses.set(accountId, status);
+        return status;
     }
 
     private async loadDccons(client: DCInside): Promise<OwnedDccon[]> {
@@ -120,10 +139,24 @@ export class AccountManager {
         });
     }
 
+    /** 댓글을 답니다. 로그인 세션이 만료됐으면 저장된 정보로 다시 로그인한 뒤 한 번 더 시도합니다. */
     async writeComment(accountId: string, galleryId: string, postNo: number, content: CommentContent): Promise<void> {
         const loggedIn = this.sessions.get(accountId);
         if (!loggedIn) throw new Error("로그인되지 않은 계정입니다.");
-        const {client} = loggedIn;
+        try {
+            await this.write(loggedIn.client, galleryId, postNo, content);
+        } catch (error) {
+            if (!(error instanceof AuthExpiredError)) throw error;
+            const status = await this.login(loggedIn.account);
+            const renewed = this.sessions.get(accountId);
+            if (status.state !== "logged_in" || !renewed) {
+                throw new Error(`세션이 만료되어 다시 로그인했지만 실패했습니다: ${"message" in status ? status.message : status.state}`);
+            }
+            await this.write(renewed.client, galleryId, postNo, content);
+        }
+    }
+
+    private async write(client: DCInside, galleryId: string, postNo: number, content: CommentContent): Promise<void> {
         if (content.type === "text") {
             await client.comments.write(galleryId, postNo, content.text);
             return;
@@ -142,5 +175,6 @@ export class AccountManager {
         this.statuses.delete(accountId);
         await this.secrets.removeByPrefix(`account:${accountId}`);
         await this.secrets.removeByPrefix(`device:${accountId}`);
+        await this.secrets.removeByPrefix(`otp:${accountId}`);
     }
 }

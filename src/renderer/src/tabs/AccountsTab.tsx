@@ -18,6 +18,7 @@ function statusText(status: AccountStatus): string {
             const type = status.memberType === "gonick" ? "고닉" : status.memberType === "semi" ? "반고닉" : "종류 알 수 없음";
             return `로그인됨 · ${status.nickname} · ${type} · 디시콘 ${status.dcconCount}개`;
         }
+        case "otp_required":
         case "error":
             return status.message;
     }
@@ -45,7 +46,7 @@ export function AccountsTab({draft, setDraft, state, run}: Props) {
 
     return (
         <div className="stack">
-            <p className="muted">비밀번호는 이 컴퓨터의 OS 보안 저장소로 암호화해 보관하며, 화면에 다시 표시하지 않습니다.</p>
+            <p className="muted">비밀번호와 OTP 토큰은 이 컴퓨터의 OS 보안 저장소로 암호화해 보관하며, 화면에 다시 표시하지 않습니다. 비밀번호가 저장된 계정은 앱을 켤 때 자동으로 로그인합니다.</p>
             {draft.accounts.map((account) => {
                 const view = state.accounts.find((item) => item.id === account.id);
                 return view && (
@@ -68,7 +69,14 @@ function AccountCard({account, view, onChange, run, onRemove, saved}: {
     saved: boolean;
 }) {
     const [password, setPassword] = useState("");
+    const [otp, setOtp] = useState("");
     const status = view.status;
+    const otpValid = /^\d{6}$/.test(otp);
+
+    function submitOtp() {
+        if (!otpValid) return;
+        void run(() => window.hamboogie.login(account.id, otp), true).then(() => setOtp(""));
+    }
 
     return (
         <section className="card">
@@ -100,7 +108,17 @@ function AccountCard({account, view, onChange, run, onRemove, saved}: {
                 </label>
             </div>
             <div className="row">
-                <span className={status.state === "error" ? "error-text" : status.state === "logged_in" ? "ok-text" : "muted"}>{statusText(status)}</span>
+                <span className={status.state === "error" || status.state === "otp_required" ? "error-text" : status.state === "logged_in" ? "ok-text" : "muted"}>
+                    {statusText(status)}
+                </span>
+                {status.state === "otp_required" && (
+                    <>
+                        <input className="otp-input" value={otp} inputMode="numeric" maxLength={6} placeholder="OTP 6자리" autoFocus
+                               onChange={(event) => setOtp(event.target.value.replace(/\D/g, ""))}
+                               onKeyDown={(event) => event.key === "Enter" && submitOtp()}/>
+                        <button className="button primary small" disabled={!otpValid} onClick={submitOtp}>OTP 확인</button>
+                    </>
+                )}
                 <button className="button small push-right" disabled={!saved || !account.loginId || !view.hasPassword || status.state === "logging_in"}
                         title={!saved ? "설정을 먼저 저장하세요" : undefined}
                         onClick={() => run(() => window.hamboogie.login(account.id), true)}>

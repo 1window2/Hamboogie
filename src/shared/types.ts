@@ -52,6 +52,7 @@ export type SecretKey = `llm:${LlmProviderId}` | `account:${string}`;
 export type AccountStatus =
     | {state: "logged_out"}
     | {state: "logging_in"}
+    | {state: "otp_required"; message: string}
     | {state: "logged_in"; nickname: string; memberType: MemberType | null; dcconCount: number}
     | {state: "error"; message: string};
 
@@ -82,7 +83,8 @@ export interface HamboogieApi {
     getState(): Promise<AppState>;
     saveSettings(settings: Settings): Promise<AppState>;
     setSecret(key: SecretKey, value: string): Promise<AppState>;
-    login(accountId: string): Promise<AppState>;
+    /** `otp`는 OTP 6자리입니다. 상태가 `otp_required`일 때만 넘깁니다. */
+    login(accountId: string, otp?: string): Promise<AppState>;
     start(): Promise<AppState>;
     stop(): Promise<AppState>;
     testWebhook(): Promise<{ok: boolean; message: string}>;

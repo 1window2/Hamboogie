@@ -392,3 +392,9 @@ fieldset {
 .log.error .level {
     color: var(--error);
 }
+
+.otp-input {
+    width: 110px;
+    letter-spacing: 2px;
+    text-align: center;
+}
