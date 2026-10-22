@@ -10,7 +10,7 @@ export const DEFAULT_COMMENT_TEXT = "줄";
 export const DEFAULT_KEYWORDS = ["나눔", "뿌림", "뿌린다", "뿌려", "선착", "줄", "기프티콘", "쏜다", "추첨"];
 
 export const DEFAULT_MODELS: Record<LlmProviderId, string> = {
-    gemini: "gemini-3.5-flash-lite",
+    gemini: "gemini-3.6-flash",
     openai: "gpt-6-luna",
     claude: "claude-haiku-5-5"
 };

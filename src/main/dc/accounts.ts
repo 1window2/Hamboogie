@@ -79,14 +79,17 @@ export class AccountManager {
                 client,
                 nickname: session.result.name ?? account.loginId,
                 detectedMemberType: isGonick === 1 ? "gonick" : isGonick === 0 ? "semi" : null,
-                dccons: await this.loadDccons(client)
+                dccons: []
             };
+            const dccons = await this.loadDccons(client);
+            loggedIn.dccons = dccons.items;
             this.sessions.set(account.id, loggedIn);
             return this.setStatus(account.id, {
                 state: "logged_in",
                 nickname: loggedIn.nickname,
                 memberType: this.memberType(account, loggedIn),
-                dcconCount: loggedIn.dccons.length
+                dcconCount: loggedIn.dccons.length,
+                ...(dccons.error ? {dcconError: dccons.error} : {})
             });
         } catch (error) {
             this.sessions.delete(account.id);
@@ -112,11 +115,11 @@ export class AccountManager {
         return status;
     }
 
-    private async loadDccons(client: DCInside): Promise<OwnedDccon[]> {
+    private async loadDccons(client: DCInside): Promise<{items: OwnedDccon[]; error?: string}> {
         try {
             const response = await client.dccons.list();
             const tabs = response.tab ?? [];
-            return (response.list ?? []).flatMap((items, index) => items.flatMap((item) =>
+            const items = (response.list ?? []).flatMap((list, index) => list.flatMap((item) =>
                 item.package_idx !== undefined && item.detail_idx !== undefined
                     ? [{
                         packageIdx: item.package_idx,
@@ -125,8 +128,9 @@ export class AccountManager {
                         packageTitle: tabs[index]?.title ?? ""
                     }]
                     : []));
-        } catch {
-            return [];
+            return {items};
+        } catch (error) {
+            return {items: [], error: error instanceof Error ? `${error.name}: ${error.message}` : String(error)};
         }
     }
 

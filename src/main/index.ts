@@ -52,6 +52,12 @@ async function main(): Promise<void> {
 
     logger.subscribe((entry) => window?.webContents.send("log", entry));
 
+    // 개발 모드 전용 테스트 실행입니다. 배포 빌드에서는 이 분기와 모듈이 통째로 빠집니다.
+    if (import.meta.env.DEV) {
+        const {registerDevTestIpc} = await import("./dev/test-run");
+        registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get()});
+    }
+
     ipcMain.handle("getState", () => state());
     ipcMain.handle("getLogs", () => logger.recent());
     ipcMain.handle("saveSettings", async (_event, next: Settings) => {
@@ -71,7 +77,10 @@ async function main(): Promise<void> {
         const pending = accounts.login(account, otp);
         pushState();
         const status = await pending;
-        if (status.state === "logged_in") logger.success(`${status.nickname} (${account.loginId}) 로그인 성공`);
+        if (status.state === "logged_in") {
+            logger.success(`${status.nickname} (${account.loginId}) 로그인 성공`);
+            if (status.dcconError) logger.warn(`${account.loginId} 보유 디시콘을 불러오지 못했습니다: ${status.dcconError}`);
+        }
         else if (status.state === "otp_required") logger.warn(`${account.loginId} ${status.message}`);
         else if (status.state === "error") logger.error(`${account.loginId} ${status.message}`);
         pushState();
