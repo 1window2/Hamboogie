@@ -2,7 +2,7 @@ import {ApiError, AuthExpiredError, CaptchaRequiredError, DCInside, OtpRequiredE
 import type {AccountConfig, AccountStatus, MemberType} from "@shared/types";
 import type {SecretStore} from "../store";
 import {AppIdBackoff} from "./app-id-backoff";
-import {isOutdatedAppError, OUTDATED_APP_MESSAGE} from "./app-version";
+import {DC_APP_VERSION, isOutdatedAppError, OUTDATED_APP_MESSAGE} from "./app-version";
 import type {CandidateAccount, CommentContent, OwnedDccon} from "../pipeline/planner";
 
 interface LoggedIn {
@@ -42,18 +42,31 @@ function describe(error: unknown): string {
     return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
+/** 저장한 기기 정보에 함께 적는, 그때 쓰던 앱 버전 코드입니다. */
+type SavedDevice = DeviceCredentials & {appVersion?: string};
+
+/**
+ * 저장된 기기 정보를 읽습니다. 받아 둔 app_id는 발급받을 때의 앱 버전에 묶여 있어, 디시가 강제 업데이트를 걸면
+ * 옛 버전으로 받은 app_id는 거절됩니다. 그래서 다른 앱 버전으로 저장한 정보면 app_id만 버리고 새로 받게 합니다.
+ */
 function loadDevice(secrets: Pick<SecretStore, "get">, key: `device:${string}`): DeviceCredentials | undefined {
     const saved = secrets.get(key);
     if (!saved) return undefined;
     try {
-        return JSON.parse(saved) as DeviceCredentials;
+        const {appVersion, ...credentials} = JSON.parse(saved) as SavedDevice;
+        return appVersion === DC_APP_VERSION.code ? credentials : {...credentials, appId: null, appIdIssuedAt: null};
     } catch {
         return undefined;
     }
 }
 
+function serializeDevice(client: DCInside): string {
+    const credentials = client.auth.exportCredentials();
+    return JSON.stringify(credentials ? {...credentials, appVersion: DC_APP_VERSION.code} satisfies SavedDevice : null);
+}
+
 async function saveDevice(secrets: Pick<SecretStore, "set">, key: `device:${string}`, client: DCInside): Promise<void> {
-    await secrets.set(key, JSON.stringify(client.auth.exportCredentials()));
+    await secrets.set(key, serializeDevice(client));
 }
 
 /**
@@ -75,7 +88,7 @@ export function createReader(secrets: SecretStore, freshDevice = false): DCInsid
  * 내용이 바뀌었을 때(새 app_id를 받았을 때 등)만 저장합니다.
  */
 export async function persistReader(secrets: SecretStore, client: DCInside): Promise<void> {
-    const credentials = JSON.stringify(client.auth.exportCredentials());
+    const credentials = serializeDevice(client);
     if (secrets.get("device:reader") !== credentials) await secrets.set("device:reader", credentials);
 }
 

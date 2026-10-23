@@ -199,6 +199,19 @@ describe("AccountManager app_id 거절 대응", () => {
 });
 
 describe("디시 앱 버전", () => {
+    it("다른 앱 버전으로 저장한 기기 정보는 받아 둔 app_id만 버리고, 같은 버전이면 그대로 쓴다", async () => {
+        const used: (DeviceCredentials | undefined)[] = [];
+        const device = {androidId: "old", securityToken: "s", fid: "f", refreshToken: "r", clientToken: "c", appId: "old-app-id", appIdIssuedAt: 1};
+        for (const appVersion of [undefined, "100175", DC_APP_VERSION.code]) {
+            const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0, savedDeviceBroken: false};
+            const secrets = memorySecrets({"account:acc1": "pw", "otp:acc1": "token-abc", "device:acc1": JSON.stringify({...device, appVersion})});
+            const factory = fakeClientFactory(server);
+            await new AccountManager(secrets, (credentials) => (used.push(credentials), factory(credentials)), new AppIdBackoff()).login(ACCOUNT);
+        }
+        expect(used.map((credentials) => credentials?.appId)).toEqual([null, null, "old-app-id"]);
+        expect(used.every((credentials) => credentials?.androidId === "old")).toBe(true);
+    });
+
     it("클라이언트를 만들기 전에 디시가 요구하는 버전으로 맞춘다", () => {
         applyDcAppVersion();
         expect(APP.versionName).toBe(DC_APP_VERSION.name);
