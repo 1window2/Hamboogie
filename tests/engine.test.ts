@@ -78,3 +78,15 @@ describe("Engine 성공 알림", () => {
         expect(triedToNotify(logger)).toBe(true);
     });
 });
+
+describe("Engine 마감 재확인", () => {
+    it("예약해 둔 사이 마감이 지났으면 댓글을 달지 않고 실패로 기록한다", async () => {
+        const {engine, written, recorded} = setup();
+        const gallery = {...newGallery("g"), galleryId: "gf2"};
+        const plan = {kind: "comment" as const, notBefore: Date.now() + 30, deadline: Date.now() + 10, attempts: [{accountId: "a", content: {type: "text" as const, text: "줄"}}]};
+        await engine.dispatch(gallery, {no: 30, title: "3시까지 나눔"}, plan);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        expect(written).toEqual([]);
+        expect(recorded).toEqual([expect.objectContaining({postNo: 30, outcome: "failure"})]);
+    });
+});

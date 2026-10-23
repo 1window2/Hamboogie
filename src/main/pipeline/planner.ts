@@ -22,7 +22,7 @@ export type CommentContent = {type: "text"; text: string} | {type: "dccon"; dcco
 export type Plan =
     | {kind: "skip"; reason: string}
     | {kind: "notify"; reason: string}
-    | {kind: "comment"; notBefore: number; attempts: {accountId: string; content: CommentContent}[]};
+    | {kind: "comment"; notBefore: number; attempts: {accountId: string; content: CommentContent}[]; deadline?: number};
 
 const TEXT_MAX_LENGTH = 30;
 /** "N시부터" 줄은 정각보다 이만큼 늦게 섭니다. 이 컴퓨터 시계가 디시 서버보다 빨라 정각 전 댓글로 찍히는 것을 막습니다. */
@@ -89,12 +89,10 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     if (!decision.is_giveaway) return {kind: "skip", reason: "나눔 글이 아님"};
     if (gallery.category === "food" && !decision.is_food) return {kind: "skip", reason: "음식 나눔이 아님"};
 
-    if (decision.ends_at) {
-        const endsAt = resolveClock(decision.ends_at, detectedAt);
-        // 감지 시각 기준으로 다음 날로 넘어갔다면 이미 지난 마감으로 봅니다(12시간 이상 남은 경우).
-        if (endsAt !== null && endsAt - detectedAt > 12 * 60 * 60 * 1000) {
-            return {kind: "skip", reason: `마감 시각(${decision.ends_at})이 지남`};
-        }
+    // 감지 시각 기준으로 다음 날로 넘어갔다면 이미 지난 마감으로 봅니다(12시간 이상 남은 경우).
+    const endsAt = decision.ends_at ? resolveClock(decision.ends_at, detectedAt) : null;
+    if (endsAt !== null && endsAt - detectedAt > 12 * 60 * 60 * 1000) {
+        return {kind: "skip", reason: `마감 시각(${decision.ends_at})이 지남`};
     }
 
     if (accounts.length === 0) return {kind: "notify", reason: "로그인된 대기 계정이 없어 줄을 설 수 없습니다. 계정 탭에서 로그인 상태를 확인하세요."};
@@ -112,11 +110,16 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
         if (startsAt - detectedAt <= 12 * 60 * 60 * 1000) notBefore = startsAt + START_MARGIN_MS;
     }
     notBefore += gallery.delaySec * 1000;
+    // 줄 서기 지연이나 시작 시각 대기 때문에 마감 뒤에 댓글을 달게 되면 처음부터 서지 않습니다.
+    if (endsAt !== null && notBefore > endsAt) {
+        return {kind: "skip", reason: `줄 서기 지연 때문에 마감 시각(${decision.ends_at}) 전에 댓글을 달 수 없음`};
+    }
+    const deadline = endsAt !== null ? {deadline: endsAt} : {};
 
     if (decision.line_method === "text") {
         const text = decision.line_text?.trim() || DEFAULT_COMMENT_TEXT;
         if (!isSafeCommentText(text)) return {kind: "notify", reason: `요구 문구를 자동으로 달기 어려움: "${text}"`};
-        return {kind: "comment", notBefore, attempts: qualified.map((account) => ({accountId: account.id, content: {type: "text", text}}))};
+        return {kind: "comment", notBefore, attempts: qualified.map((account) => ({accountId: account.id, content: {type: "text", text}})), ...deadline};
     }
 
     const keyword = decision.dccon_keyword?.trim() ?? "";
@@ -125,5 +128,5 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
         return dccon ? [{accountId: account.id, content: {type: "dccon" as const, dccon}}] : [];
     });
     if (attempts.length === 0) return {kind: "notify", reason: `요구 디시콘("${keyword}")을 가진 대기 계정이 없음`};
-    return {kind: "comment", notBefore, attempts};
+    return {kind: "comment", notBefore, attempts, ...deadline};
 }

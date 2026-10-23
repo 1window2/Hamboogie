@@ -55,6 +55,7 @@ export function App() {
         <div className="app">
             <header className="header">
                 <h1 className="brand"><img src={iconUrl} alt="" width={26} height={26}/>Hamboogie<small className="version">v{state.version}</small></h1>
+                {state.offline && <span className="badge failure" title="디시 대신 가짜 글과 가짜 계정을 씁니다">오프라인 모드</span>}
                 <nav className="tabs">
                     {TABS.map((item) => (
                         <button key={item.id} className={tab === item.id ? "tab active" : "tab"} onClick={() => setTab(item.id)}>

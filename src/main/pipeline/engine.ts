@@ -295,8 +295,15 @@ export class Engine {
     private async execute(gallery: GalleryConfig, post: NewPost, plan: Extract<Plan, {kind: "comment"}>, prefix = ""): Promise<void> {
         const {accounts, logger} = this.deps;
         const context = {galleryId: gallery.galleryId, postNo: post.no};
+        // 예약해 둔 사이 마감이 지났으면 달지 않습니다. 앞 계정이 실패해 재시도하는 동안 지난 경우도 막습니다.
+        const pastDeadline = () => plan.deadline !== undefined && Date.now() > plan.deadline;
         const failures: string[] = [];
         for (const attempt of plan.attempts) {
+            if (pastDeadline()) {
+                logger.warn(`${prefix}마감 시각이 지나 줄을 서지 않았습니다.`, context);
+                this.record(gallery, post, "failure", "마감 시각이 지나 댓글을 달지 않음", prefix !== "");
+                return;
+            }
             const label = attempt.content.type === "text" ? `"${attempt.content.text}"` : `디시콘 "${attempt.content.dccon.title}"`;
             try {
                 await accounts.writeComment(attempt.accountId, gallery.galleryId, post.no, attempt.content);

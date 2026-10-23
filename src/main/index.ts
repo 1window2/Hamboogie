@@ -1,6 +1,8 @@
+import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
 import {app, BrowserWindow, ipcMain, Notification, shell} from "electron";
 import type {AccountConfig, AppState, LlmProviderId, SecretKey, Settings} from "@shared/types";
+import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
 import {AccountManager, createReader, persistReader} from "./dc/accounts";
 import {checkGallery} from "./dc/gallery-check";
 import {Logger} from "./logger";
@@ -18,6 +20,20 @@ async function main(): Promise<void> {
         app.quit();
         return;
     }
+    // 개발 모드 오프라인(npm run dev:offline): 디시 대신 가짜 클라이언트를 쓰고, 진짜 기록을 더럽히지 않도록
+    // 데이터 폴더를 따로 씁니다. 설정과 API 키만 처음 한 번 복사해 옵니다. 배포 빌드에서는 이 분기가 빠집니다.
+    const offline = import.meta.env.DEV && process.argv.includes("--offline");
+    if (offline) {
+        const realDir = app.getPath("userData");
+        const offlineDir = join(realDir, "offline");
+        mkdirSync(offlineDir, {recursive: true});
+        for (const file of ["settings.json", "secrets.json"]) {
+            if (!existsSync(join(offlineDir, file)) && existsSync(join(realDir, file))) copyFileSync(join(realDir, file), join(offlineDir, file));
+        }
+        app.setPath("userData", offlineDir);
+    }
+    // Windows는 앱 식별자를 정해야 알림(트레이 안내 등)이 제대로 뜹니다. electron-builder의 appId와 같게 둡니다.
+    if (process.platform === "win32") app.setAppUserModelId("io.github.1window2.hamboogie");
     await app.whenReady();
     // 개발 모드에서는 Dock에 Electron 기본 아이콘 대신 앱 아이콘을 보여줍니다. 배포 빌드는 설치 파일의 아이콘을 씁니다.
     if (import.meta.env.DEV && process.platform === "darwin") app.dock?.setIcon(join(app.getAppPath(), "build/icon.png"));
@@ -27,13 +43,20 @@ async function main(): Promise<void> {
     const secrets = new SecretStore(dataDir);
     const ledger = new Ledger(dataDir);
     const history = new HistoryStore(dataDir);
-    const accounts = new AccountManager(secrets);
-    let reader = createReader(secrets);
+    let fakeClient: ((credentials?: DeviceCredentials) => DCInside) | undefined;
+    if (offline) {
+        const {blockDcinsideRequests, createFakeClientFactory} = await import("./dev/offline");
+        blockDcinsideRequests((host) => logger.error(`오프라인 모드에서 디시 요청을 막았습니다: ${host}`));
+        fakeClient = createFakeClientFactory((message) => logger.info(`[오프라인] ${message}`));
+        logger.warn("오프라인 모드입니다. 디시 대신 가짜 글과 가짜 계정을 씁니다.");
+    }
+    const accounts = new AccountManager(secrets, fakeClient);
+    let reader = fakeClient ? fakeClient() : createReader(secrets);
     const engine = new Engine({
         reader: () => reader,
         onReaderReady: () => persistReader(secrets, reader),
         resetReader: async () => {
-            reader = createReader(secrets, true);
+            reader = fakeClient ? fakeClient() : createReader(secrets, true);
         },
         accounts,
         ledger,
@@ -61,6 +84,7 @@ async function main(): Promise<void> {
             running: engine.running,
             watching: engine.watching,
             version: app.getVersion(),
+            offline,
             update: updater?.state() ?? {state: "idle"}
         };
     }

@@ -70,6 +70,14 @@ describe("makePlan", () => {
         expect(plan.kind === "comment" && plan.notBefore).toBe(NOW + 10 * 60 * 1000 + START_MARGIN_MS + 5000);
     });
 
+    it("지연 시간을 더하면 마감을 넘기는 줄은 서지 않고, 서는 줄에는 마감 시각을 붙인다", () => {
+        // 14:00 감지, 14:01 마감
+        expect(makePlan(decision({ends_at: "14:01"}), {...gallery, delaySec: 120}, [gonick], NOW)).toMatchObject({kind: "skip", reason: expect.stringContaining("줄 서기 지연")});
+        const plan = makePlan(decision({ends_at: "14:01"}), {...gallery, delaySec: 30}, [gonick], NOW);
+        expect(plan).toMatchObject({kind: "comment", deadline: NOW + 60 * 1000});
+        expect(makePlan(decision({starts_at: "14:05", ends_at: "14:03"}), gallery, [gonick], NOW).kind).toBe("skip");
+    });
+
     it("로그인된 대기 계정이 하나도 없으면 넘기지 않고 알림을 보낸다", () => {
         expect(makePlan(decision(), gallery, [], NOW)).toMatchObject({kind: "notify", reason: expect.stringContaining("로그인된 대기 계정이 없어")});
         // 나눔 글이 아니면 계정과 상관없이 그냥 넘어갑니다.

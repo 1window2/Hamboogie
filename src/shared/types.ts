@@ -101,6 +101,8 @@ export interface AppState {
     watching: number;
     version: string;
     update: UpdateState;
+    /** 개발 모드 오프라인(가짜 디시)으로 실행 중인지입니다. */
+    offline: boolean;
 }
 
 /** 줄 서기 기록 한 건입니다. */
