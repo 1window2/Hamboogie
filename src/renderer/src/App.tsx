@@ -102,7 +102,7 @@ export function App() {
             )}
 
             <main className="content">
-                {tab === "galleries" && <GalleriesTab draft={draft} setDraft={setDraft} accounts={state.accounts}/>}
+                {tab === "galleries" && <GalleriesTab draft={draft} setDraft={setDraft} accounts={state.accounts} status={state.galleryStatus}/>}
                 {tab === "accounts" && <AccountsTab draft={draft} setDraft={setDraft} state={state} run={run}/>}
                 {tab === "llm" && <LlmTab draft={draft} setDraft={setDraft} state={state} run={run}/>}
                 {tab === "history" && <HistoryTab/>}

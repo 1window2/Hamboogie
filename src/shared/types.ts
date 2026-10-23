@@ -22,6 +22,11 @@ export interface GalleryConfig {
     keywords: string[];
     /** 제외 키워드입니다. 제목이나 본문에 하나라도 있으면 LLM 판단 없이 넘깁니다. */
     excludeKeywords: string[];
+    /**
+     * 새 글마다 본문을 읽어 제목과 본문을 합쳐 키워드를 확인합니다. 제목에 티를 안 내는 나눔 글도 잡지만,
+     * 새 글마다 디시 요청이 하나씩 늘어납니다. 끄면 제목에 키워드가 있는 글만 엽니다.
+     */
+    scanBody: boolean;
     /** 대기 계정 ID 목록입니다. 앞에 있을수록 우선순위가 높습니다. */
     accountIds: string[];
     /** 나눔 글을 감지한 뒤 줄을 서기까지 기다릴 시간(초)입니다. */
@@ -92,6 +97,15 @@ export type UpdateState =
     | {state: "available"; version: string; url: string}
     | {state: "error"; message: string};
 
+/** 갤러리별 감시 상태입니다. */
+export interface GalleryStatus {
+    lastCheckedAt: number;
+    /** 마지막 확인에서 찾은 새 글 수입니다. */
+    newPosts: number;
+    /** 마지막 확인에서 키워드에 걸린 글 수입니다. */
+    matched: number;
+}
+
 export interface AppState {
     settings: Settings;
     accounts: AccountView[];
@@ -99,6 +113,8 @@ export interface AppState {
     running: boolean;
     /** 감시 중인 갤러리 수입니다. */
     watching: number;
+    /** 갤러리 설정 항목 id별 감시 상태입니다. */
+    galleryStatus: Record<string, GalleryStatus>;
     version: string;
     update: UpdateState;
     /** 개발 모드 오프라인(가짜 디시)으로 실행 중인지입니다. */

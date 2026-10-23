@@ -1,6 +1,6 @@
 import {useEffect, useState} from "react";
 import {INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
-import type {AccountView, GalleryConfig, Settings} from "@shared/types";
+import type {AccountView, GalleryConfig, GalleryStatus, Settings} from "@shared/types";
 import {NumberInput} from "../components/NumberInput";
 import {KeywordEditor} from "../components/KeywordEditor";
 
@@ -8,9 +8,10 @@ interface Props {
     draft: Settings;
     setDraft(settings: Settings): void;
     accounts: AccountView[];
+    status: Record<string, GalleryStatus>;
 }
 
-export function GalleriesTab({draft, setDraft, accounts}: Props) {
+export function GalleriesTab({draft, setDraft, accounts, status}: Props) {
     function update(id: string, patch: Partial<GalleryConfig>) {
         setDraft({...draft, galleries: draft.galleries.map((gallery) => gallery.id === id ? {...gallery, ...patch} : gallery)});
     }
@@ -19,7 +20,7 @@ export function GalleriesTab({draft, setDraft, accounts}: Props) {
         <div className="stack">
             {draft.galleries.length === 0 && <p className="muted">감시할 갤러리를 추가하세요.</p>}
             {draft.galleries.map((gallery) => (
-                <GalleryCard key={gallery.id} gallery={gallery} accounts={accounts} onChange={(patch) => update(gallery.id, patch)}
+                <GalleryCard key={gallery.id} gallery={gallery} accounts={accounts} status={status[gallery.id]} onChange={(patch) => update(gallery.id, patch)}
                              onRemove={() => setDraft({...draft, galleries: draft.galleries.filter((item) => item.id !== gallery.id)})}/>
             ))}
             <button className="button add" onClick={() => setDraft({...draft, galleries: [...draft.galleries, newGallery(crypto.randomUUID())]})}>
@@ -34,9 +35,14 @@ function galleryUrl(gallery: GalleryConfig): string {
     return `https://gall.dcinside.com/${kind}board/lists/?id=${encodeURIComponent(gallery.galleryId)}`;
 }
 
-function GalleryCard({gallery, accounts, onChange, onRemove}: {
+function formatClock(time: number): string {
+    return new Date(time).toLocaleTimeString("ko-KR", {hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false});
+}
+
+function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
     gallery: GalleryConfig;
     accounts: AccountView[];
+    status: GalleryStatus | undefined;
     onChange(patch: Partial<GalleryConfig>): void;
     onRemove(): void;
 }) {
@@ -102,6 +108,11 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
                 ? <small className="ok-text check-status">✓ {gallery.title}{gallery.isMinor ? " (마이너 갤러리)" : ""}</small>
                 : checkError ? <small className="error-text check-status">{checkError}</small>
                     : gallery.galleryId.trim() && <small className="error-text check-status">갤러리 ID를 확인해야 감시할 수 있습니다.</small>}
+            {status && (
+                <small className="muted check-status">
+                    마지막 확인 {formatClock(status.lastCheckedAt)} · 새 글 {status.newPosts}개 · 키워드 일치 {status.matched}개
+                </small>
+            )}
 
             <div className="grid">
                 <IntervalField value={gallery.intervalSec} onChange={(intervalSec) => onChange({intervalSec})}/>
@@ -135,6 +146,14 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
                                    나눔 글에 자주 쓰이는 키워드를 설정하는 것을 강력히 권장합니다.
                                </div>
                            )}/>
+
+            <div className="field">
+                <label className="check">
+                    <input type="checkbox" checked={gallery.scanBody} onChange={(event) => onChange({scanBody: event.target.checked})}/>
+                    본문까지 키워드 확인
+                </label>
+                <small className="muted">새 글마다 본문을 열어 제목과 본문을 함께 봅니다. 제목에 티를 안 내는 나눔 글도 잡지만 새 글마다 디시 요청이 하나씩 늘어납니다.</small>
+            </div>
 
             <KeywordEditor label="제외 키워드" keywords={gallery.excludeKeywords} onChange={(excludeKeywords) => onChange({excludeKeywords})}
                            placeholder="제목이나 본문에 있으면 넘길 단어 (쉼표로 여러 개)"

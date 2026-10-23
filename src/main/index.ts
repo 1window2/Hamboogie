@@ -28,11 +28,6 @@ function isAllowedExternalUrl(raw: string): boolean {
 }
 
 async function main(): Promise<void> {
-    // 앱이 두 개 뜨면 감시 엔진도 두 개가 되어 같은 글에 댓글이 두 번 달릴 수 있으므로 하나만 실행합니다.
-    if (!app.requestSingleInstanceLock()) {
-        app.quit();
-        return;
-    }
     // 개발 모드 오프라인(npm run dev:offline): 디시 대신 가짜 클라이언트를 쓰고, 진짜 기록을 더럽히지 않도록
     // 데이터 폴더를 따로 씁니다. 설정과 API 키만 처음 한 번 복사해 옵니다. 배포 빌드에서는 이 분기가 빠집니다.
     const offline = import.meta.env.DEV && process.argv.includes("--offline");
@@ -44,6 +39,12 @@ async function main(): Promise<void> {
             if (!existsSync(join(offlineDir, file)) && existsSync(join(realDir, file))) copyFileSync(join(realDir, file), join(offlineDir, file));
         }
         app.setPath("userData", offlineDir);
+    }
+    // 앱이 두 개 뜨면 감시 엔진도 두 개가 되어 같은 글에 댓글이 두 번 달릴 수 있으므로 하나만 실행합니다.
+    // 데이터 폴더 단위로 잠그므로, 오프라인 모드(별도 폴더)는 일반 실행과 함께 켤 수 있습니다.
+    if (!app.requestSingleInstanceLock()) {
+        app.quit();
+        return;
     }
     // Windows는 앱 식별자를 정해야 알림(트레이 안내 등)이 제대로 뜹니다. electron-builder의 appId와 같게 둡니다.
     if (process.platform === "win32") app.setAppUserModelId("io.github.1window2.hamboogie");
@@ -95,7 +96,7 @@ async function main(): Promise<void> {
         secrets,
         logger,
         settings: () => settingsStore.get(),
-        onAccountsChanged: () => pushState()
+        onStateChanged: () => pushState()
     });
 
     let window: BrowserWindow | null = null;
@@ -114,6 +115,7 @@ async function main(): Promise<void> {
             secretsSet,
             running: engine.running,
             watching: engine.watching,
+            galleryStatus: engine.galleryStatus(),
             version: app.getVersion(),
             offline,
             update: updater?.state() ?? {state: "idle"}

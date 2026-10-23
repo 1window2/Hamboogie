@@ -7,7 +7,7 @@ export const KEYWORD_MAX = 30;
 export const DELAY_MAX_SEC = 60 * 60;
 export const DEFAULT_COMMENT_TEXT = "줄";
 
-export const DEFAULT_KEYWORDS = ["나눔", "뿌림", "뿌린다", "뿌려", "선착", "줄", "기프티콘", "쏜다", "추첨"];
+export const DEFAULT_KEYWORDS = ["나눔", "뿌림", "뿌린다", "뿌려", "선착", "줄", "기프티콘", "쏜다", "추첨", "드림", "드립니다", "드려요", "쏩니다", "까지"];
 
 export const DEFAULT_MODELS: Record<LlmProviderId, string> = {
     gemini: "gemini-3.6-flash",
@@ -41,6 +41,7 @@ export function newGallery(id: string): GalleryConfig {
         category: "food",
         keywords: [...DEFAULT_KEYWORDS],
         excludeKeywords: [],
+        scanBody: true,
         accountIds: [],
         delaySec: 0
     };
@@ -76,6 +77,8 @@ export function normalizeGallery(gallery: GalleryConfig, accounts: AccountConfig
         keywords: normalizeKeywords(gallery.keywords),
         // 이전 버전에서 저장한 설정에는 제외 키워드가 없습니다.
         excludeKeywords: normalizeKeywords(gallery.excludeKeywords ?? []),
+        // 이전 버전에서 저장한 설정에는 없으므로 기본(켜짐)으로 봅니다.
+        scanBody: gallery.scanBody ?? true,
         accountIds: [...new Set(gallery.accountIds)].filter((id) => accountIds.has(id))
     };
 }

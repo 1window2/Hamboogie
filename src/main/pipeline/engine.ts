@@ -1,6 +1,6 @@
 import type {DCInside, PostItem} from "@green-1052/dcinside.js";
 import {galleryProblems, PROVIDER_LABELS} from "@shared/settings";
-import type {GalleryConfig, HistoryEntry, Settings} from "@shared/types";
+import type {GalleryConfig, GalleryStatus, HistoryEntry, Settings} from "@shared/types";
 import {isAppIdFailure, isDefiniteCommentFailure, type AccountManager} from "../dc/accounts";
 import type {AppIdBackoff} from "../dc/app-id-backoff";
 import {htmlToText} from "../dc/text";
@@ -43,8 +43,8 @@ export interface EngineDeps {
     secrets: SecretStore;
     logger: Logger;
     settings(): Settings;
-    /** 계정 상태가 바뀌었을 때(디시콘을 다시 불러온 경우 등) 화면을 갱신합니다. */
-    onAccountsChanged?(): void;
+    /** 계정 상태나 감시 상태가 바뀌었을 때 화면을 갱신합니다. */
+    onStateChanged?(): void;
 }
 
 /** 감시로 찾은 글의 줄 서기입니다. 개발 모드 테스트(`live`가 없음)와 구분합니다. */
@@ -72,6 +72,8 @@ export class Engine {
     private runId = 0;
     /** 줄 서기 세대입니다. 사용자가 감시를 멈출 때만 바뀌고, 감시를 다시 시작할 때는 예약을 유지합니다. */
     private epoch = 0;
+    /** 갤러리 설정 항목 id별 마지막 확인 결과입니다. */
+    private readonly statuses = new Map<string, GalleryStatus>();
     /** 같은 서비스/모델/키라면 LLM 클라이언트를 다시 만들지 않습니다. */
     private provider: {key: string; instance: LlmProvider} | null = null;
 
@@ -83,6 +85,11 @@ export class Engine {
 
     get watching(): number {
         return this.watchers.size;
+    }
+
+    /** 갤러리별 마지막 확인 시각과 결과입니다. */
+    galleryStatus(): Record<string, GalleryStatus> {
+        return Object.fromEntries(this.statuses);
     }
 
     /** 감시를 (다시) 시작합니다. 예약해 둔 줄 서기는 그대로 둡니다. 시작할 수 없는 갤러리는 로그에 이유를 남기고 건너뜁니다. */
@@ -125,6 +132,7 @@ export class Engine {
         for (const timer of this.watchers.values()) clearTimeout(timer);
         this.watchers.clear();
         this.lastSeen.clear();
+        this.statuses.clear();
     }
 
     private schedule(configId: string, runId: number, delayMs: number): void {
@@ -147,11 +155,11 @@ export class Engine {
         if (problems.length > 0) {
             this.deps.logger.warn(`감시를 멈춤: ${problems.join(" ")}`, {galleryId: gallery.galleryId || "(이름 없음)"});
             this.watchers.delete(configId);
-            this.deps.onAccountsChanged?.();
+            this.deps.onStateChanged?.();
             return;
         }
         try {
-            if (await this.deps.accounts.maintain(this.deps.settings().accounts)) this.deps.onAccountsChanged?.();
+            if (await this.deps.accounts.maintain(this.deps.settings().accounts)) this.deps.onStateChanged?.();
             // app_id 발급이 거절된 뒤에는 잠시 목록 확인을 쉽니다. 다시 시도해 봐야 거절만 늘어납니다.
             if (this.deps.appId.canTry()) await this.checkGallery(gallery, runId);
         } catch (error) {
@@ -187,62 +195,91 @@ export class Engine {
             if (lastSeen === undefined || items.length === 0 || items.some((item) => item.no! <= lastSeen)) break;
         }
 
+        const report = (newPosts: number, matched: number) => {
+            this.statuses.set(gallery.id, {lastCheckedAt: Date.now(), newPosts, matched});
+            this.deps.onStateChanged?.();
+        };
         if (lastSeen === undefined) {
             const newest = Math.max(0, ...collected.keys());
             this.lastSeen.set(key, newest);
             logger.info(`감시 시작. 기준 글 #${newest} 이후의 새 글만 확인합니다.`, {galleryId: gallery.galleryId});
+            report(0, 0);
             return;
         }
         const posts = [...collected.values()].filter((post) => post.no > lastSeen).sort((a, b) => a.no - b.no);
-        for (const post of posts) {
-            if (runId !== this.runId) return;
-            if (!(await this.handlePost(gallery, post))) return;
-            this.lastSeen.set(key, post.no);
+        let matched = 0;
+        try {
+            for (const post of posts) {
+                if (runId !== this.runId) return;
+                const result = await this.handlePost(gallery, post);
+                if (result === "retry") return;
+                if (result === "matched") matched++;
+                this.lastSeen.set(key, post.no);
+            }
+        } finally {
+            report(posts.length, matched);
         }
     }
 
-    /** 글 하나를 처리합니다. 지금은 처리할 수 없어 다음에 다시 봐야 하면 false를 돌려줍니다. */
-    private async handlePost(gallery: GalleryConfig, post: NewPost): Promise<boolean> {
+    /**
+     * 글 하나를 처리합니다. 지금은 처리할 수 없어 다음에 다시 봐야 하면 "retry",
+     * 키워드에 걸려 판단까지 했으면 "matched", 그 밖에는 "done"을 돌려줍니다.
+     *
+     * 본문 확인이 켜져 있으면 새 글마다 본문을 읽어 제목과 본문을 합쳐 키워드를 봅니다.
+     * 꺼져 있으면 제목에 키워드가 있는 글만 엽니다. 읽은 본문은 LLM 판단에 그대로 씁니다.
+     */
+    private async handlePost(gallery: GalleryConfig, post: NewPost): Promise<"done" | "matched" | "retry"> {
         const {ledger, logger} = this.deps;
-        if (ledger.has(gallery.galleryId, post.no)) return true;
-        if (!matchesKeywords(post.title, gallery.keywords)) return true;
+        if (ledger.has(gallery.galleryId, post.no)) return "done";
+        const titleMatched = matchesKeywords(post.title, gallery.keywords);
+        if (!titleMatched && !gallery.scanBody) return "done";
         const context = {galleryId: gallery.galleryId, postNo: post.no};
         const excludedByTitle = this.excludedBy(gallery, post.title);
         if (excludedByTitle) {
             logger.info(`넘어감: 제목에 제외 키워드 "${excludedByTitle}"`, context);
-            return true;
+            return "done";
         }
-        if (!this.deps.appId.canTry()) return false;
+        if (!this.deps.appId.canTry()) return "retry";
 
-        logger.info(`키워드 일치: "${post.title}"`, context);
         const epoch = this.epoch;
         const detectedAt = Date.now();
-        let analysis: Analysis;
+        let title = post.title;
+        let body: string;
         try {
             const article = await this.deps.reader().articles.read(gallery.galleryId, post.no);
-            const title = article.view_info?.subject ?? post.title;
-            const body = htmlToText(article.view_main?.memo ?? "");
-            const excludedByBody = this.excludedBy(gallery, body);
-            if (excludedByBody) {
-                logger.info(`넘어감: 본문에 제외 키워드 "${excludedByBody}"`, context);
-                return true;
-            }
-            analysis = await this.analyze(gallery, title, body, detectedAt);
+            title = article.view_info?.subject ?? post.title;
+            body = htmlToText(article.view_main?.memo ?? "");
         } catch (error) {
             // 금방 지워진 글은 알릴 필요가 없습니다.
             if (/삭제했거나 존재하지 않는/.test(errorMessage(error))) {
-                logger.info("넘어감: 삭제된 글", context);
-                return true;
+                if (titleMatched) logger.info("넘어감: 삭제된 글", context);
+                return "done";
             }
             // app_id 거절이면 잠시 쉬고 이 글부터 다음에 다시 봅니다. 알리거나 처리한 글로 남기지 않습니다.
             if (isAppIdFailure(error)) {
                 await this.recoverReader(error);
-                return false;
+                return "retry";
             }
-            analysis = {decision: null, plan: {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`}};
+            // 제목에 키워드가 있던 글만 알립니다. 본문을 확인하려던 일반 글까지 알리면 알림이 넘칩니다.
+            if (!titleMatched) {
+                logger.warn(`본문을 읽지 못해 넘어감: ${errorMessage(error)}`, context);
+                return "done";
+            }
+            await this.dispatch(gallery, post, {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`}, {live: {epoch}});
+            return "matched";
         }
+
+        const bodyKeyword = titleMatched ? null : findKeyword(body, gallery.keywords);
+        if (!titleMatched && !bodyKeyword) return "done";
+        const excludedByBody = this.excludedBy(gallery, body);
+        if (excludedByBody) {
+            logger.info(`넘어감: 본문에 제외 키워드 "${excludedByBody}"`, context);
+            return "done";
+        }
+        logger.info(bodyKeyword ? `본문 키워드 "${bodyKeyword}" 일치: "${title}"` : `키워드 일치: "${title}"`, context);
+        const analysis = await this.analyze(gallery, title, body, detectedAt);
         await this.dispatch(gallery, post, analysis.plan, {live: {epoch}});
-        return true;
+        return "matched";
     }
 
     /**
