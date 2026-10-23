@@ -140,4 +140,12 @@ export class Ledger {
         void writeJson(this.path, this.keys).catch(() => {});
         return true;
     }
+
+    /** 기록을 되돌립니다. 예약한 줄 서기가 실행되지 못하고 취소됐을 때 씁니다. */
+    release(galleryId: string, postNo: number): void {
+        const key = Ledger.key(galleryId, postNo);
+        if (!this.set.delete(key)) return;
+        this.keys.splice(this.keys.indexOf(key), 1);
+        void writeJson(this.path, this.keys).catch(() => {});
+    }
 }

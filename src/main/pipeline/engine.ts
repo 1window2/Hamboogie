@@ -49,7 +49,8 @@ function errorMessage(error: unknown): string {
 /** 갤러리 감시, 글 분석, 줄 서기를 실행합니다. */
 export class Engine {
     private readonly watchers = new Map<string, ReturnType<typeof setTimeout>>();
-    private readonly scheduled = new Set<ReturnType<typeof setTimeout>>();
+    /** 예약된 줄 서기입니다. 취소되면 처리 기록을 되돌리기 위해 글 정보를 같이 둡니다. */
+    private readonly scheduled = new Map<ReturnType<typeof setTimeout>, {galleryId: string; postNo: number; useLedger: boolean}>();
     private readonly lastSeen = new Map<string, number>();
     private readerReady = false;
     private runId = 0;
@@ -80,6 +81,12 @@ export class Engine {
             }
             this.schedule(gallery.id, runId, 0);
         }
+        for (const gallery of this.deps.settings().galleries) {
+            if (!this.watchers.has(gallery.id)) continue;
+            if (this.deps.accounts.candidates(this.deps.settings().accounts, gallery.accountIds).length === 0) {
+                logger.warn("로그인된 대기 계정이 없습니다. 이대로면 나눔 글을 찾아도 줄을 설 수 없습니다.", {galleryId: gallery.galleryId});
+            }
+        }
         if (this.watchers.size === 0) logger.warn("감시할 수 있는 갤러리가 없습니다.");
         else logger.info(`갤러리 ${this.watchers.size}개 감시를 시작합니다.`);
     }
@@ -87,8 +94,13 @@ export class Engine {
     stop(): void {
         this.runId++;
         for (const timer of this.watchers.values()) clearTimeout(timer);
-        for (const timer of this.scheduled) clearTimeout(timer);
-        if (this.watchers.size > 0 || this.scheduled.size > 0) this.deps.logger.info("감시를 멈췄습니다. 예약된 줄 서기도 취소했습니다.");
+        // 실행되지 못한 줄 서기는 처리 기록을 되돌려, 다시 감시할 때 같은 글을 다시 볼 수 있게 합니다.
+        for (const [timer, pending] of this.scheduled) {
+            clearTimeout(timer);
+            if (pending.useLedger) this.deps.ledger.release(pending.galleryId, pending.postNo);
+            this.deps.logger.warn("예약된 줄 서기를 취소했습니다.", {galleryId: pending.galleryId, postNo: pending.postNo});
+        }
+        if (this.watchers.size > 0) this.deps.logger.info("감시를 멈췄습니다.");
         this.watchers.clear();
         this.scheduled.clear();
         this.lastSeen.clear();
@@ -164,6 +176,11 @@ export class Engine {
             const body = htmlToText(article.view_main?.memo ?? "");
             analysis = await this.analyze(gallery, title, body, detectedAt);
         } catch (error) {
+            // 금방 지워진 글은 알릴 필요가 없습니다.
+            if (/삭제했거나 존재하지 않는/.test(errorMessage(error))) {
+                logger.info("넘어감: 삭제된 글", {galleryId: gallery.galleryId, postNo: post.no});
+                return;
+            }
             analysis = {decision: null, plan: {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`}};
             await this.recoverReader(error);
         }
@@ -220,7 +237,7 @@ export class Engine {
                     this.scheduled.delete(timer);
                     void this.execute(gallery, post, plan, label);
                 }, waitMs);
-                this.scheduled.add(timer);
+                this.scheduled.set(timer, {galleryId: gallery.galleryId, postNo: post.no, useLedger});
             }
         }
     }
@@ -255,17 +272,22 @@ export class Engine {
         await this.notify(`${prefix}줄 서기 실패: ${post.title}`, failures.join("\n"), gallery.galleryId, post.no);
     }
 
-    private async notify(title: string, description: string, galleryId: string, postNo: number): Promise<void> {
+    private notify(title: string, description: string, galleryId: string, postNo: number): Promise<void> {
+        return this.alert(title, description, {galleryId, postNo});
+    }
+
+    /** Discord로 알립니다. 글과 관련된 알림이면 글 링크를 붙입니다. */
+    async alert(title: string, description: string, post?: {galleryId: string; postNo: number}): Promise<void> {
         const {logger} = this.deps;
         const webhookUrl = this.deps.settings().discordWebhookUrl;
         if (!webhookUrl) {
-            logger.warn("Discord 웹훅이 설정되지 않아 알림을 보내지 못했습니다.", {galleryId, postNo});
+            logger.warn("Discord 웹훅이 설정되지 않아 알림을 보내지 못했습니다.", post);
             return;
         }
         try {
-            await sendDiscordNotice(webhookUrl, {title, description, url: postUrl(galleryId, postNo)});
+            await sendDiscordNotice(webhookUrl, {title, description, ...(post ? {url: postUrl(post.galleryId, post.postNo)} : {})});
         } catch (error) {
-            logger.error(`Discord 알림 전송 실패: ${errorMessage(error)}`, {galleryId, postNo});
+            logger.error(`Discord 알림 전송 실패: ${errorMessage(error)}`, post);
         }
     }
 }

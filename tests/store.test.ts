@@ -19,3 +19,18 @@ describe("Ledger", () => {
         expect(reopened.claim("gf2", 150)).toBe(false);
     });
 });
+
+describe("Ledger.release", () => {
+    it("되돌린 기록은 다시 기록할 수 있고, 다시 열어도 빠져 있다", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "hamboogie-ledger-"));
+        const ledger = new Ledger(dir);
+        ledger.claim("gf2", 1);
+        ledger.claim("gf2", 2);
+        ledger.release("gf2", 1);
+        expect(ledger.has("gf2", 1)).toBe(false);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(new Ledger(dir).has("gf2", 1)).toBe(false);
+        expect(new Ledger(dir).has("gf2", 2)).toBe(true);
+        expect(ledger.claim("gf2", 1)).toBe(true);
+    });
+});

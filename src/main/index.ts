@@ -160,9 +160,15 @@ async function main(): Promise<void> {
     });
 
     // 비밀번호가 저장된 계정은 앱을 켤 때 자동으로 로그인합니다. OTP 토큰이 없으면 OTP 입력을 기다립니다.
+    // 실패하면 줄을 설 수 없으니 Discord로도 알립니다.
+    const failed: string[] = [];
     for (const account of settingsStore.get().accounts) {
-        if (account.loginId && secrets.has(`account:${account.id}`)) await loginAccount(account);
+        if (!account.loginId || !secrets.has(`account:${account.id}`)) continue;
+        await loginAccount(account);
+        const status = accounts.status(account.id);
+        if (status.state === "otp_required" || status.state === "error") failed.push(`${account.loginId}: ${status.message}`);
     }
+    if (failed.length > 0) await engine.alert("계정 자동 로그인 실패", `앱에서 다시 로그인해야 줄을 설 수 있습니다.\n${failed.join("\n")}`);
 }
 
 void main();

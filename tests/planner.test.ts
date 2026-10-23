@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {newGallery} from "@shared/settings";
 import type {Decision} from "../src/main/llm/decision";
-import {isSafeCommentText, makePlan, resolveClock, type CandidateAccount} from "../src/main/pipeline/planner";
+import {isSafeCommentText, makePlan, resolveClock, START_MARGIN_MS, type CandidateAccount} from "../src/main/pipeline/planner";
 
 // 2026-10-23 14:00 (한국 시간)
 const NOW = Date.UTC(2026, 9, 23, 5, 0);
@@ -67,7 +67,13 @@ describe("makePlan", () => {
         expect(makePlan(decision({ends_at: "13:30"}), gallery, [gonick], NOW).kind).toBe("skip");
         expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], NOW).kind).toBe("comment");
         const plan = makePlan(decision({starts_at: "14:10"}), {...gallery, delaySec: 5}, [gonick], NOW);
-        expect(plan.kind === "comment" && plan.notBefore).toBe(NOW + 10 * 60 * 1000 + 5000);
+        expect(plan.kind === "comment" && plan.notBefore).toBe(NOW + 10 * 60 * 1000 + START_MARGIN_MS + 5000);
+    });
+
+    it("로그인된 대기 계정이 하나도 없으면 넘기지 않고 알림을 보낸다", () => {
+        expect(makePlan(decision(), gallery, [], NOW)).toMatchObject({kind: "notify", reason: expect.stringContaining("로그인된 대기 계정이 없어")});
+        // 나눔 글이 아니면 계정과 상관없이 그냥 넘어갑니다.
+        expect(makePlan(decision({is_giveaway: false}), gallery, [], NOW).kind).toBe("skip");
     });
 
     it("디시콘 줄은 그 디시콘을 가진 계정만 서고, 아무도 없으면 알림을 보낸다", () => {

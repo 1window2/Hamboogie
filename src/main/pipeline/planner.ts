@@ -25,6 +25,8 @@ export type Plan =
     | {kind: "comment"; notBefore: number; attempts: {accountId: string; content: CommentContent}[]};
 
 const TEXT_MAX_LENGTH = 30;
+/** "N시부터" 줄은 정각보다 이만큼 늦게 섭니다. 이 컴퓨터 시계가 디시 서버보다 빨라 정각 전 댓글로 찍히는 것을 막습니다. */
+export const START_MARGIN_MS = 2000;
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 /** `HH:MM`(한국 시간)을 기준 시각 이후의 가장 가까운 시각으로 바꿉니다. 기준보다 이르면 다음 날로 봅니다. */
@@ -95,6 +97,7 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
         }
     }
 
+    if (accounts.length === 0) return {kind: "notify", reason: "로그인된 대기 계정이 없어 줄을 설 수 없습니다. 계정 탭에서 로그인 상태를 확인하세요."};
     const qualified = accounts.filter((account) => eligible(account, decision.member_requirement));
     if (qualified.length === 0) return {kind: "skip", reason: "참여 자격에 맞는 대기 계정이 없음"};
 
@@ -106,7 +109,7 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
         const startsAt = resolveClock(decision.starts_at, detectedAt);
         if (startsAt === null) return {kind: "notify", reason: `시작 시각을 해석할 수 없음: ${decision.starts_at}`};
         // 12시간 넘게 남았다면 이미 시작된 줄로 봅니다.
-        if (startsAt - detectedAt <= 12 * 60 * 60 * 1000) notBefore = startsAt;
+        if (startsAt - detectedAt <= 12 * 60 * 60 * 1000) notBefore = startsAt + START_MARGIN_MS;
     }
     notBefore += gallery.delaySec * 1000;
 
