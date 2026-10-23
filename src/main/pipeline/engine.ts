@@ -45,6 +45,8 @@ interface Candidate {
     post: NewPost;
     title: string;
     body: string;
+    /** 본문을 실제로 읽었는지입니다. 읽지 않은 글은 본문의 조건(봇 색출 등)을 확인할 수 없어 자동으로 줄 서지 않습니다. */
+    bodyRead: boolean;
     detectedAt: number;
 }
 
@@ -291,7 +293,7 @@ export class Engine {
                     decisionSlots = Math.max(1, budget - 1);
                     const picked = await this.screen(gallery, pending);
                     if (runId !== this.runId) return;
-                    if (picked) candidates.push(...await this.withBodies(gallery, picked));
+                    if (picked) candidates.push(...await this.withBodies(gallery, picked, found.reads));
                     // 골라내기가 실패하면 다음 확인 때 다시 보냅니다.
                     else this.queueForScreening(gallery, key, pending);
                 }
@@ -317,14 +319,23 @@ export class Engine {
     /**
      * 골라낸 글 가운데 본문을 읽지 않은 글은 판단 전에 본문을 읽습니다. 제목만 보고 판단하면 본문의 줄 조건을 놓칩니다.
      * 지금 읽을 수 없거나, 지워졌거나, 본문에 제외 키워드가 있는 글은 뺍니다.
+     * 이번 확인에서 이미 읽은 본문(`readSoFar`)과 합쳐 본문 요청 상한을 넘지 않게 하고, 넘는 글은 넘깁니다.
+     * 글 하나가 LLM을 속여 많은 글을 고르게 하더라도 디시 요청이 상한을 넘지 않게 하기 위해서입니다.
      */
-    private async withBodies(gallery: GalleryConfig, picked: Candidate[]): Promise<Candidate[]> {
+    private async withBodies(gallery: GalleryConfig, picked: Candidate[], readSoFar: number): Promise<Candidate[]> {
         const result: Candidate[] = [];
+        let remaining = gallery.bodyReadLimit === 0 ? Infinity : Math.max(0, gallery.bodyReadLimit - readSoFar);
+        let skipped = 0;
         for (const candidate of picked) {
-            if (candidate.body) {
+            if (candidate.bodyRead) {
                 result.push(candidate);
                 continue;
             }
+            if (remaining <= 0) {
+                skipped++;
+                continue;
+            }
+            remaining--;
             const context = {galleryId: gallery.galleryId, postNo: candidate.post.no};
             if (!this.deps.appId.canTry()) {
                 this.deps.logger.warn("앱 인증 대기 중이라 골라낸 글의 본문을 읽지 못해 넘어감", context);
@@ -339,11 +350,14 @@ export class Engine {
                     this.deps.logger.info(`넘어감: 본문에 제외 키워드 "${excluded}"`, context);
                     continue;
                 }
-                result.push({...candidate, title: article.view_info?.subject ?? candidate.title, body});
+                result.push({...candidate, title: article.view_info?.subject ?? candidate.title, body, bodyRead: true});
             } catch (error) {
                 if (isAppIdFailure(error)) await this.recoverReader(error);
                 this.deps.logger.warn(`골라낸 글의 본문을 읽지 못해 넘어감: ${errorMessage(error)}`, context);
             }
+        }
+        if (skipped > 0) {
+            this.deps.logger.warn(`골라낸 글 ${skipped}개는 본문 요청 상한(${gallery.bodyReadLimit}개)을 넘어 판단하지 않고 넘깁니다.`, {galleryId: gallery.galleryId});
         }
         return result;
     }
@@ -369,11 +383,14 @@ export class Engine {
             logger.info(`새 글 ${others.length}개 중 최근 ${scanned.length}개만 본문을 확인하고, 나머지는 제목으로만 판단합니다. (본문 요청 상한 ${limit}개)`, {galleryId: gallery.galleryId});
         }
 
-        const result = {matched: [] as Candidate[], unmatched: [] as Candidate[], last: null as number | null, notified: 0};
+        const result = {matched: [] as Candidate[], unmatched: [] as Candidate[], last: null as number | null, notified: 0, reads: 0};
         for (const post of posts) {
             if (runId !== this.runId) return null;
             const matchedByTitle = titleMatched.has(post.no);
-            const outcome = await this.inspect(gallery, post, matchedByTitle, noKeywords ? scan.has(post.no) : matchedByTitle || scan.has(post.no), epoch);
+            const read = noKeywords ? scan.has(post.no) : matchedByTitle || scan.has(post.no);
+            const outcome = await this.inspect(gallery, post, matchedByTitle, read, epoch);
+            // 본문 요청 상한에 드는 읽기만 셉니다(키워드가 있으면 제목에 키워드가 있는 글은 상한과 상관없이 엽니다).
+            if (read && (noKeywords || !matchedByTitle) && outcome !== "retry") result.reads++;
             if (outcome === "retry") break;
             if (outcome === "notified") result.notified++;
             else if (outcome !== "done") result[outcome.kind].push(outcome.candidate);
@@ -398,7 +415,7 @@ export class Engine {
         }
         const detectedAt = Date.now();
         if (!read) {
-            const candidate = {post, title: post.title, body: "", detectedAt};
+            const candidate = {post, title: post.title, body: "", bodyRead: false, detectedAt};
             if (titleMatched) {
                 logger.info(`키워드 일치(본문 요청 상한을 넘어 제목으로만 판단): "${post.title}"`, context);
                 return {kind: "matched", candidate};
@@ -439,7 +456,7 @@ export class Engine {
             if (titleMatched) logger.info(`넘어감: 본문에 제외 키워드 "${excludedByBody}"`, context);
             return "done";
         }
-        const candidate = {post, title, body, detectedAt};
+        const candidate = {post, title, body, bodyRead: true, detectedAt};
         const bodyKeyword = titleMatched ? null : findKeyword(body, gallery.keywords);
         if (!titleMatched && !bodyKeyword) return gallery.screenUnmatched ? {kind: "unmatched", candidate} : "done";
         logger.info(bodyKeyword ? `본문 키워드 "${bodyKeyword}" 일치: "${title}"` : `키워드 일치: "${title}"`, context);
@@ -508,6 +525,14 @@ export class Engine {
                 } catch (error) {
                     results = group.map(() => ({decision: null, failure: errorMessage(error)}));
                 }
+                // 묶어 보낸 글끼리는 한 글이 다른 글의 판단을 바꾸도록 꾸밀 수 있습니다. 나눔이라는 판단은 그 글만 따로 다시 물어 확인하고,
+                // 지금 남은 요청 자리가 없으면 기다리지 않고(선착순을 놓치지 않게) 자동으로 서지 않고 알립니다.
+                for (const [index, candidate] of group.entries()) {
+                    if (!results[index]!.decision?.is_giveaway) continue;
+                    results[index] = this.limiter.available() > 0
+                        ? await decideOne(candidate)
+                        : {decision: null, failure: "여러 글을 묶어 판단한 결과라 따로 확인해야 하는데 남은 LLM 요청이 없어, 직접 확인이 필요함"};
+                }
                 // 묶음 응답이 실패했거나 빠진 글은, 지금 남은 요청 수로 감당되면 하나씩 다시 물어봅니다.
                 const missing = group.filter((_, index) => !results[index]!.decision);
                 if (missing.length > 0 && missing.length <= this.limiter.available()) {
@@ -547,10 +572,15 @@ export class Engine {
         await this.limiter.acquire();
     }
 
-    private planFor(gallery: GalleryConfig, decision: Decision, candidate: {title: string; body: string; detectedAt: number}): Plan {
+    private planFor(gallery: GalleryConfig, decision: Decision, candidate: {title: string; body: string; bodyRead?: boolean; detectedAt: number}): Plan {
         const settings = this.deps.settings();
         const accounts = this.deps.accounts.candidates(settings.accounts, gallery.accountIds);
-        return makePlan(decision, gallery, accounts, candidate.detectedAt, `${candidate.title}\n${candidate.body}`);
+        const plan = makePlan(decision, gallery, accounts, candidate.detectedAt, `${candidate.title}\n${candidate.body}`);
+        // 본문을 읽지 않은 글은 본문에 봇 색출 문구나 다른 조건이 있어도 알 수 없으므로, 자동으로 서지 않고 알립니다.
+        if (plan.kind === "comment" && candidate.bodyRead === false) {
+            return {kind: "notify", reason: "본문 요청 상한을 넘어 본문을 확인하지 못했습니다. 글을 직접 확인하세요."};
+        }
+        return plan;
     }
 
     /**

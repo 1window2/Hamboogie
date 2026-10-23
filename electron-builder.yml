@@ -13,6 +13,8 @@ electronFuses:
   enableNodeOptionsEnvironmentVariable: false
   enableNodeCliInspectArguments: false
   onlyLoadAppFromAsar: true
+  # 앱 파일(app.asar)을 몰래 바꿔 비밀 정보를 꺼내는 것을 막기 위해, 실행할 때 빌드 때의 해시와 비교합니다.
+  enableEmbeddedAsarIntegrityValidation: true
   # 서명하지 않은 macOS 빌드는 퓨즈를 바꾸면 기존 서명이 깨져 Apple Silicon에서 실행되지 않으므로 임시 서명을 다시 합니다.
   resetAdHocDarwinSignature: true
 win:

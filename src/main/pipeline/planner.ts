@@ -83,17 +83,28 @@ export function normalizeForMatch(text: string): string {
 /** 봇 색출용 낚시 문구에 자주 쓰이는 단어입니다. 이런 문구를 요구하면 자동으로 달지 않고 알립니다. */
 const BAIT_WORDS = ["봇", "매크로", "자동", "bot", "macro", "프로그램", "크롤"];
 /**
- * 글 자체에 이런 말이 있으면 봇을 걸러내려는 글일 수 있어 자동으로 줄을 서지 않고 알립니다.
- * ("댓글 단 매크로 차단" 같은 글). "로봇"처럼 흔한 낱말에 걸리지 않게 그 낱말은 먼저 지웁니다.
+ * 글 자체에 이런 말이 있으면 봇을 걸러내려는 글일 수 있어 자동으로 줄 서지 않고 알립니다.
+ * ("댓글 단 매크로 차단" 같은 글). "로봇"처럼 흔한 낱말 안에 들어 있는 것은 세지 않습니다.
  */
 const POST_BAIT_WORDS = ["봇", "매크로", "bot", "macro", "크롤", "자동댓글", "자동으로댓글"];
 const POST_BAIT_IGNORED = ["로봇", "robot"];
 
-/** 글에 봇 색출로 보이는 말이 있으면 그 말을 돌려줍니다. */
+/**
+ * 글에 봇 색출로 보이는 말이 있으면 그 말을 돌려줍니다. "매.크.로"처럼 기호를 끼워 넣어도 찾도록 기호를 지운 뒤 봅니다.
+ * 흔한 낱말을 미리 지우지 않고, 찾은 자리가 그 낱말 안일 때만 넘깁니다("매크로봇"이 "매크"로 바뀌어 빠지지 않게).
+ */
 export function findBaitWord(postText: string): string | null {
-    let text = normalizeForMatch(postText);
-    for (const word of POST_BAIT_IGNORED) text = text.replaceAll(word, "");
-    return POST_BAIT_WORDS.find((word) => text.includes(word)) ?? null;
+    const text = normalizeForMatch(postText).replace(/[\p{P}\p{S}]/gu, "");
+    for (const word of POST_BAIT_WORDS) {
+        for (let at = text.indexOf(word); at !== -1; at = text.indexOf(word, at + 1)) {
+            const insideCommonWord = POST_BAIT_IGNORED.some((common) => {
+                const offset = common.indexOf(word);
+                return offset !== -1 && at - offset >= 0 && text.startsWith(common, at - offset);
+            });
+            if (!insideCommonWord) return word;
+        }
+    }
+    return null;
 }
 
 /** 연락처나 외부 링크로 이어지는 단어입니다. */

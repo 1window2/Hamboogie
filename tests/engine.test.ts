@@ -282,7 +282,12 @@ describe("Engine 본문 키워드 확인", () => {
 
 describe("Engine LLM 요청 묶기", () => {
     const many = (count: number) => Object.fromEntries(Array.from({length: count}, (_, i) => [i + 2, {title: `나눔 ${i + 2}`, body: ""}]));
-    const sizes = (calls: string[][]) => decided(calls).map((call) => call.length);
+    // 묶음 크기만 봅니다. 묶음에서 나눔이라는 판단은 남은 자리가 있으면 하나씩 다시 묻기 때문에 그 요청은 뺍니다.
+    const sizes = (calls: string[][]) => {
+        const all = decided(calls);
+        const batchedTitles = new Set(all.filter((call) => call.length > 1).flat());
+        return all.filter((call) => call.length > 1 || !batchedTitles.has(call[0]!)).map((call) => call.length);
+    };
     const unmatched = {99: {title: "잡담", body: ""}};
 
     it("감시 간격이 1분 이상이면 한도(5회) 안에서 글마다 따로 보낸다", async () => {
@@ -345,9 +350,9 @@ describe("Engine LLM 요청 묶기", () => {
             {2: {title: "치킨 나눔", body: ""}, 3: {title: "오늘 3시까지 ㄱㄱ", body: "고닉만"}, 4: {title: "잡담", body: "오늘 날씨"}},
             {screen: (titles) => titles.flatMap((title, index) => title.includes("3시") ? [index] : [])}
         );
-        await run({...gallery, keywords: ["나눔"], scanBody: true, bodyReadLimit: 1});
-        // 상한 1이라 최근 글(4)만 먼저 본문을 열고, 3은 제목만으로 골라내기에 들어갔다가 골라진 뒤 본문을 읽습니다.
-        expect(reads).toEqual([2, 4, 3]);
+        await run({...gallery, keywords: ["나눔"], scanBody: false});
+        // 본문 확인을 꺼 두면 키워드에 걸린 글(2)만 먼저 열고, 3은 제목만으로 골라내기에 들어갔다가 골라진 뒤 본문을 읽습니다.
+        expect(reads).toEqual([2, 3]);
         expect(calls.find((call) => call[0] === "골라내기")).toEqual(["골라내기", "오늘 3시까지 ㄱㄱ", "잡담"]);
         expect(decided(calls).flat().sort()).toEqual(["오늘 3시까지 ㄱㄱ", "치킨 나눔"]);
     });
@@ -359,6 +364,44 @@ describe("Engine LLM 요청 묶기", () => {
         await check(noScan, [2]);
         await check(noScan, [2, 3]);
         expect(calls).toEqual([["골라내기", "잡담"], ["골라내기", "잡담", "잡담 2"]]);
+    });
+});
+
+describe("Engine 보안 점검 반영", () => {
+    it("골라낸 글의 본문도 본문 요청 상한 안에서만 읽는다", async () => {
+        const posts = Object.fromEntries(Array.from({length: 5}, (_, i) => [i + 2, {title: `잡담 ${i + 2}`, body: ""}]));
+        // 글 하나가 LLM을 속여 모든 글을 고르게 만든 상황입니다.
+        const {run, reads, logger} = withGallery(posts, {screen: (titles) => titles.map((_, index) => index)});
+        await run({...gallery, scanBody: false, bodyReadLimit: 2});
+        expect(reads).toHaveLength(2);
+        expect(logged(logger, "본문 요청 상한(2개)을 넘어")).toBe(true);
+    });
+
+    it("본문을 읽지 못한 글은 줄 서라는 판단이 나와도 알림으로 넘긴다", async () => {
+        const {run, written, logger, engine} = withGallery({2: {title: "a", body: ""}, 3: {title: "b", body: ""}});
+        const deps = (engine as unknown as {deps: EngineDeps}).deps;
+        Object.assign(deps.accounts, {candidates: () => [{id: "a", memberType: "gonick", dccons: []}]});
+        await run({...gallery, keywords: [], bodyReadLimit: 1});
+        // 본문을 읽은 3번 글만 줄을 서고, 상한을 넘어 읽지 못한 2번 글은 알림으로 넘깁니다.
+        await vi.waitFor(() => expect(written).toEqual([["a", 3]]));
+        expect(logged(logger, "본문을 확인하지 못했습니다")).toBe(true);
+    });
+
+    it("묶어 판단한 글 중 나눔이라는 판단은 남은 자리가 있으면 따로 다시 묻고, 없으면 알림으로 넘긴다", async () => {
+        const many = Object.fromEntries(Array.from({length: 6}, (_, i) => [i + 2, {title: `나눔 ${i + 2}`, body: ""}]));
+        // 한도 10에 30초 간격이면 한 번에 5회만 써서 묶음이 생기고, 1분 한도에는 5자리가 남습니다.
+        const spare = withGallery(many, {paidRpm: 10});
+        await spare.run({...gallery, screenUnmatched: false, intervalSec: 30});
+        const batched = decided(spare.calls).filter((call) => call.length > 1).flat();
+        const single = decided(spare.calls).filter((call) => call.length === 1).flat();
+        expect(batched.length).toBeGreaterThan(0);
+        expect(batched.every((title) => single.includes(title))).toBe(true);
+
+        // 무료 등급(분당 5회)을 다 쓴 경우: 묶음 속 글은 다시 묻지 않고 알립니다.
+        const full = withGallery(many);
+        await full.run({...gallery, screenUnmatched: false});
+        expect(decided(full.calls)).toHaveLength(5);
+        expect(logged(full.logger, "묶어 판단한 결과라")).toBe(true);
     });
 });
 

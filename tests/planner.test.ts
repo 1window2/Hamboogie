@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {newGallery} from "@shared/settings";
 import type {Decision} from "../src/main/llm/decision";
-import {END_MARGIN_MS, isSafeCommentText, makePlan, resolveClock, START_MARGIN_MS, type CandidateAccount} from "../src/main/pipeline/planner";
+import {END_MARGIN_MS, findBaitWord, isSafeCommentText, makePlan, resolveClock, START_MARGIN_MS, type CandidateAccount} from "../src/main/pipeline/planner";
 
 /** 2026-10-23 14:00 (한국 시간) */
 const NOW = Date.UTC(2026, 9, 23, 5, 0);
@@ -160,5 +160,21 @@ describe("isSafeCommentText", () => {
             "가".repeat(21)
         ];
         for (const text of blocked) expect(isSafeCommentText(text), text).toBe(false);
+    });
+});
+
+describe("findBaitWord", () => {
+    it("봇 색출로 보이는 말을 찾고, 기호를 끼워 넣어도 찾는다", () => {
+        expect(findBaitWord("치킨 나눔\n댓글 다는 매크로 차단함")).toBe("매크로");
+        expect(findBaitWord("매.크.로 쓰면 컷")).toBe("매크로");
+        expect(findBaitWord("b-o-t 거름")).toBe("bot");
+    });
+
+    it("흔한 낱말 안에 든 것은 넘기되, 그 낱말과 붙어 있어도 다른 자리에서는 찾는다", () => {
+        expect(findBaitWord("로봇청소기 나눔합니다")).toBeNull();
+        expect(findBaitWord("robot vacuum 나눔")).toBeNull();
+        expect(findBaitWord("매크로봇 차단")).toBe("매크로");
+        expect(findBaitWord("macrobot 컷")).toBe("macro");
+        expect(findBaitWord("로봇 말고 봇은 차단")).toBe("봇");
     });
 });
