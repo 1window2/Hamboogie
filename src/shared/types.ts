@@ -32,7 +32,7 @@ export interface GalleryConfig {
      * 0이면 제한하지 않습니다.
      */
     bodyReadLimit: number;
-    /** 키워드에 걸리지 않은 새 글을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 골라냅니다. */
+    /** 키워드에 걸리지 않은 새 글을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 골라냅니다. LLM 요청 한 자리를 이 용도로 남겨 둡니다. */
     screenUnmatched: boolean;
     /** 대기 계정 ID 목록입니다. 앞에 있을수록 우선순위가 높습니다. */
     accountIds: string[];
@@ -60,7 +60,9 @@ export interface AccountConfig {
 export interface LlmConfig {
     provider: LlmProviderId;
     models: Record<LlmProviderId, string>;
-    /** 최근 1분 동안 보낼 수 있는 LLM 요청 수입니다. 넘으면 묶어 보내거나 기다립니다. 0이면 제한하지 않습니다. */
+    /** 유료 요금제를 쓰면 분당 요청 수를 직접 정합니다. 끄면 무료 등급 한도(분당 5회)를 따릅니다. */
+    paidPlan: boolean;
+    /** 유료 요금제일 때 최근 1분 동안 보낼 수 있는 LLM 요청 수입니다. 0이면 제한하지 않습니다. */
     requestsPerMinute: number;
 }
 
@@ -182,6 +184,11 @@ export interface HamboogieApi {
     onState(listener: (state: AppState) => void): () => void;
     /** 개발 모드 전용입니다. 배포 빌드에서는 호출하면 실패합니다. */
     devTestRun(input: DevTestInput): Promise<DevTestResult>;
-    /** 개발 모드 전용입니다. 목록을 한 번 읽어 앞쪽 글들의 원본 필드를 돌려줍니다. */
-    devListSample(gallery: string, thumbnail: boolean): Promise<Record<string, unknown>[]>;
+    /** 개발 모드 전용입니다. 테스트 갤러리의 목록·검색 결과나 글 하나를 읽습니다. */
+    devProbe(probe: DevProbe): Promise<unknown>;
 }
+
+/** 개발 모드에서 디시 응답을 직접 확인할 때 보내는 요청입니다. 테스트 갤러리에만 보냅니다. */
+export type DevProbe =
+    | {kind: "list"; search?: {keyword: string; type: "subject_m" | "subject" | "memo"}}
+    | {kind: "read"; no: number};

@@ -175,11 +175,11 @@ const GIVEAWAY = {
 };
 
 /** 목록, 본문, LLM을 가짜로 바꾼 감시 한 번을 돌립니다. 첫 확인으로 기준점을 잡은 뒤 `articles`의 글이 새로 올라온 것으로 봅니다. */
-function withGallery(articles: Record<number, {title: string; body: string}>, options: {screen?: (titles: string[]) => number[]; rpm?: number} = {}) {
+function withGallery(articles: Record<number, {title: string; body: string}>, options: {screen?: (titles: string[]) => number[]; paidRpm?: number} = {}) {
     const reads: number[] = [];
     const calls: string[][] = [];
     const env = setup();
-    env.update({llm: {...defaultSettings().llm, requestsPerMinute: options.rpm ?? 5}});
+    if (options.paidRpm !== undefined) env.update({llm: {...defaultSettings().llm, paidPlan: true, requestsPerMinute: options.paidRpm}});
     let listed: number[] = [];
     const engine = env.engine as unknown as {deps: EngineDeps; readGapMs: number; llm: () => unknown; checkGallery(gallery: GalleryConfig, runId: number): Promise<void>};
     engine.readGapMs = 0;
@@ -209,13 +209,17 @@ function withGallery(articles: Record<number, {title: string; body: string}>, op
             return options.screen?.(posts.map((post) => post.title)) ?? [];
         }
     });
-    const run = async (gallery: GalleryConfig) => {
-        listed = [1];
-        await engine.checkGallery(gallery, 0);
-        listed = [1, ...Object.keys(articles).map(Number)];
+    /** 목록에 이 글들이 보이는 상태로 한 번 확인합니다. 감시 간격 계산에 쓰도록 설정의 갤러리도 바꿉니다. */
+    const check = async (gallery: GalleryConfig, nos: number[]) => {
+        env.update({galleries: [gallery]});
+        listed = [1, ...nos];
         await engine.checkGallery(gallery, 0);
     };
-    return {...env, reads, calls, run};
+    const run = async (gallery: GalleryConfig) => {
+        await check(gallery, []);
+        await check(gallery, Object.keys(articles).map(Number));
+    };
+    return {...env, reads, calls, run, check};
 }
 
 const decided = (calls: string[][]) => calls.filter((call) => call[0] !== "골라내기");
@@ -225,13 +229,13 @@ describe("Engine 본문 키워드 확인", () => {
         const {run, reads, calls, logger} = withGallery({8: {title: "테스트", body: "햄버거 선착 3명 뿌림"}, 9: {title: "잡담", body: "오늘 날씨 좋다"}});
         await run({...gallery, scanBody: true});
         expect(reads).toEqual([8, 9]);
-        expect(calls).toEqual([["테스트"]]);
+        expect(decided(calls)).toEqual([["테스트"]]);
         expect(logged(logger, "본문 키워드")).toBe(true);
     });
 
     it("꺼져 있으면 제목에 키워드가 없는 글은 열지도 않는다", async () => {
         const {run, reads, calls} = withGallery({8: {title: "테스트", body: "햄버거 뿌림"}});
-        await run({...gallery, scanBody: false});
+        await run({...gallery, scanBody: false, screenUnmatched: false});
         expect(reads).toEqual([]);
         expect(calls).toEqual([]);
     });
@@ -260,20 +264,49 @@ describe("Engine 본문 키워드 확인", () => {
 
 describe("Engine LLM 요청 묶기", () => {
     const many = (count: number) => Object.fromEntries(Array.from({length: count}, (_, i) => [i + 2, {title: `나눔 ${i + 2}`, body: ""}]));
+    const sizes = (calls: string[][]) => decided(calls).map((call) => call.length);
 
-    it("분당 한도 이하면 글마다 따로 보낸다", async () => {
-        const {run, calls} = withGallery(many(3));
+    it("감시 간격이 1분 이상이면 골라내기 몫 1회를 빼고 4회 안이면 글마다 따로 보낸다", async () => {
+        const {run, calls} = withGallery(many(4));
         await run(gallery);
-        expect(calls).toHaveLength(3);
-        expect(calls.every((call) => call.length === 1)).toBe(true);
+        expect(sizes(calls)).toEqual([1, 1, 1, 1]);
     });
 
-    it("한도를 넘으면 한도만큼의 요청으로 묶는다", async () => {
+    it("넘으면 4회로 묶는다", async () => {
         const {run, calls, ledger} = withGallery(many(12));
         await run(gallery);
-        expect(calls.map((call) => call.length)).toEqual([3, 3, 2, 2, 2]);
+        expect(sizes(calls)).toEqual([3, 3, 3, 3]);
         // 판단을 받은 글은 모두 처리한 글로 남습니다(로그인된 계정이 없어 알림으로 처리됩니다).
         expect(Array.from({length: 12}, (_, i) => ledger.has("gf2", i + 2)).every(Boolean)).toBe(true);
+    });
+
+    it("골라내기를 끄면 5회를 다 쓴다", async () => {
+        const {run, calls} = withGallery(many(12));
+        await run({...gallery, screenUnmatched: false});
+        expect(sizes(calls)).toEqual([3, 3, 2, 2, 2]);
+    });
+
+    it("감시 간격이 30초면 1분에 두 번 확인하므로 한 번에 2회(골라내기 1 + 판단 1)만 쓴다", async () => {
+        const {run, calls} = withGallery({...many(3), 9: {title: "잡담", body: ""}});
+        await run({...gallery, intervalSec: 30});
+        expect(calls.filter((call) => call[0] === "골라내기")).toHaveLength(1);
+        expect(sizes(calls)).toEqual([3]);
+    });
+
+    it("한 번에 1회뿐이면 키워드에 걸린 글을 먼저 판단하고, 골라내기는 다음 확인으로 미룬다", async () => {
+        const {check, calls} = withGallery({2: {title: "나눔 2", body: ""}, 3: {title: "잡담", body: ""}, 4: {title: "잡담 2", body: ""}});
+        const fast = {...gallery, intervalSec: 10, scanBody: false};
+        await check(fast, []);
+        await check(fast, [2, 3]);
+        expect(calls).toEqual([["나눔 2"]]);
+        await check(fast, [2, 3, 4]);
+        expect(calls.at(-1)).toEqual(["골라내기", "잡담", "잡담 2"]);
+    });
+
+    it("유료 요금제에서 0으로 두면 제한 없이 글마다 따로 보낸다", async () => {
+        const {run, calls} = withGallery(many(12), {paidRpm: 0});
+        await run(gallery);
+        expect(sizes(calls)).toEqual(Array(12).fill(1));
     });
 
     it("키워드에 안 걸린 글은 하나로 묶어 골라내고, 고른 글만 판단한다", async () => {
@@ -281,7 +314,7 @@ describe("Engine LLM 요청 묶기", () => {
             {2: {title: "치킨 나눔", body: ""}, 3: {title: "오늘 3시까지 ㄱㄱ", body: ""}, 4: {title: "잡담", body: "오늘 날씨"}},
             {screen: (titles) => titles.flatMap((title, index) => title.includes("3시") ? [index] : [])}
         );
-        await run({...gallery, keywords: ["나눔"], scanBody: true, bodyReadLimit: 1, screenUnmatched: true});
+        await run({...gallery, keywords: ["나눔"], scanBody: true, bodyReadLimit: 1});
         // 상한 1이라 최근 글(4)만 본문을 열고, 3은 제목만으로 골라내기에 들어갑니다.
         expect(reads).toEqual([2, 4]);
         expect(calls.find((call) => call[0] === "골라내기")).toEqual(["골라내기", "오늘 3시까지 ㄱㄱ", "잡담"]);

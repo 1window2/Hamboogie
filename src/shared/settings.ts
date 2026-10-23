@@ -7,9 +7,12 @@ export const KEYWORD_MAX = 30;
 export const DELAY_MAX_SEC = 60 * 60;
 export const DEFAULT_COMMENT_TEXT = "줄";
 export const BODY_READ_LIMIT_DEFAULT = 20;
+/** 이보다 많이 두거나 제한을 없애면 IP 차단 경고를 빨갛게 보여줍니다. 디시가 기준을 공개하지 않아 기본값을 기준으로 삼습니다. */
+export const BODY_READ_LIMIT_SAFE = 20;
 export const BODY_READ_LIMIT_MAX = 1000;
-/** Gemini 무료 등급의 분당 요청 한도에 맞춘 기본값입니다. */
-export const LLM_RPM_DEFAULT = 5;
+/** 무료 등급(예: Gemini 무료 키)의 분당 요청 한도입니다. 유료 요금제를 쓰지 않으면 이 값을 따릅니다. */
+export const FREE_LLM_RPM = 5;
+export const LLM_RPM_DEFAULT = FREE_LLM_RPM;
 export const LLM_RPM_MAX = 1000;
 
 export const DEFAULT_KEYWORDS = ["나눔", "뿌림", "뿌린다", "뿌려", "선착", "줄", "기프티콘", "쏜다", "추첨", "드림", "드립니다", "드려요", "쏩니다", "까지"];
@@ -30,7 +33,7 @@ export function defaultSettings(): Settings {
     return {
         galleries: [],
         accounts: [],
-        llm: {provider: "gemini", models: {...DEFAULT_MODELS}, requestsPerMinute: LLM_RPM_DEFAULT},
+        llm: {provider: "gemini", models: {...DEFAULT_MODELS}, paidPlan: false, requestsPerMinute: LLM_RPM_DEFAULT},
         discordWebhookUrl: "",
         notifyOnSuccess: false
     };
@@ -48,7 +51,7 @@ export function newGallery(id: string): GalleryConfig {
         excludeKeywords: [],
         scanBody: true,
         bodyReadLimit: BODY_READ_LIMIT_DEFAULT,
-        screenUnmatched: false,
+        screenUnmatched: true,
         accountIds: [],
         delaySec: 0
     };
@@ -87,7 +90,7 @@ export function normalizeGallery(gallery: GalleryConfig, accounts: AccountConfig
         // 이전 버전에서 저장한 설정에는 없으므로 기본(켜짐)으로 봅니다.
         scanBody: gallery.scanBody ?? true,
         bodyReadLimit: clamp(gallery.bodyReadLimit ?? BODY_READ_LIMIT_DEFAULT, 0, BODY_READ_LIMIT_MAX),
-        screenUnmatched: gallery.screenUnmatched === true,
+        screenUnmatched: gallery.screenUnmatched ?? true,
         accountIds: [...new Set(gallery.accountIds)].filter((id) => accountIds.has(id))
     };
 }
@@ -108,11 +111,17 @@ export function normalizeSettings(settings: Settings): Settings {
         llm: {
             provider: PROVIDERS.includes(settings.llm.provider) ? settings.llm.provider : "gemini",
             models: {...DEFAULT_MODELS, ...settings.llm.models},
+            paidPlan: settings.llm.paidPlan === true,
             requestsPerMinute: clamp(settings.llm.requestsPerMinute ?? LLM_RPM_DEFAULT, 0, LLM_RPM_MAX)
         },
         discordWebhookUrl: settings.discordWebhookUrl.trim(),
         notifyOnSuccess: settings.notifyOnSuccess === true
     };
+}
+
+/** 실제로 지킬 분당 LLM 요청 수입니다. 0이면 제한하지 않습니다. */
+export function effectiveRpm(llm: Settings["llm"]): number {
+    return llm.paidPlan ? llm.requestsPerMinute : FREE_LLM_RPM;
 }
 
 /** 감시를 시작하기 전에 갤러리 설정의 문제를 찾습니다. */

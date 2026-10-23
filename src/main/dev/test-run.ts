@@ -4,8 +4,9 @@
 // 디시에는 글을 쓰지 않으며, 댓글은 아래에 고정한 테스트 갤러리의 1번 글에만 답니다.
 import {ipcMain} from "electron";
 import type {DCInside} from "@green-1052/dcinside.js";
-import type {DevTestInput, DevTestResult, Settings} from "@shared/types";
+import type {DevProbe, DevTestInput, DevTestResult, Settings} from "@shared/types";
 import type {AccountManager} from "../dc/accounts";
+import {htmlToText} from "../dc/text";
 import type {Logger} from "../logger";
 import type {Engine} from "../pipeline/engine";
 import type {Plan} from "../pipeline/planner";
@@ -66,9 +67,15 @@ async function run(deps: Deps, input: DevTestInput): Promise<DevTestResult> {
 
 export function registerDevTestIpc(deps: Deps): void {
     ipcMain.handle("devTestRun", (_event, input: DevTestInput) => run(deps, input));
-    // 목록 응답에 어떤 필드가 오는지 확인하는 용도입니다. 목록을 한 번 읽어 앞쪽 몇 개 글의 필드를 돌려줍니다.
-    ipcMain.handle("devListSample", async (_event, gallery: string, thumbnail: boolean) => {
-        const response = await deps.reader().articles.list({gallery, thumbnail});
-        return (response.gall_list ?? []).slice(0, 5);
+    // 디시 응답을 직접 확인하는 용도입니다. 테스트 갤러리(asgeir)에만 요청하며, 부를 때마다 요청 한 번입니다.
+    ipcMain.handle("devProbe", async (_event, probe: DevProbe) => {
+        const articles = deps.reader().articles;
+        if (probe.kind === "read") {
+            const article = await articles.read(TEST_GALLERY_ID, probe.no);
+            return {title: article.view_info?.subject ?? "", body: htmlToText(article.view_main?.memo ?? "")};
+        }
+        const response = await articles.list({gallery: TEST_GALLERY_ID, ...(probe.search ? {search: probe.search} : {})});
+        return (response.gall_list ?? []).map((item) => ({no: item.no, subject: item.subject, date: item.date_time}));
     });
 }
+

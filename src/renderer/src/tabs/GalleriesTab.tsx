@@ -1,5 +1,5 @@
 import {useEffect, useState} from "react";
-import {INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
+import {BODY_READ_LIMIT_SAFE, INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
 import type {AccountView, GalleryConfig, GalleryStatus, Settings} from "@shared/types";
 import {NumberInput} from "../components/NumberInput";
 import {KeywordEditor} from "../components/KeywordEditor";
@@ -161,11 +161,9 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                             제목에 키워드가 없는 새 글은 최근 글부터 이 개수까지만 본문을 엽니다. 나머지는 제목으로만 판단합니다.
                             제목에 키워드가 있는 글은 상한과 상관없이 엽니다. 0이면 제한하지 않습니다.
                         </small>
-                        {gallery.bodyReadLimit === 0 && (
-                            <div className="banner danger">
-                                주의: 분당 글이 수십개씩 올라오는 초대형 갤러리에서는 본문 요청 상한을 제거할 시 IP 차단의 사유가 될 수도 있습니다.
-                            </div>
-                        )}
+                        <small className={gallery.bodyReadLimit === 0 || gallery.bodyReadLimit > BODY_READ_LIMIT_SAFE ? "error-text" : "muted"}>
+                            주의: 분당 글이 수십개씩 올라오는 초대형 갤러리에서는 본문 요청 상한을 제거하거나 {BODY_READ_LIMIT_SAFE}개보다 크게 둘 시 IP 차단의 사유가 될 수도 있습니다.
+                        </small>
                     </label>
                 )}
             </div>
@@ -176,8 +174,8 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                     키워드에 안 걸린 글도 LLM으로 골라내기
                 </label>
                 <small className="muted">
-                    키워드에 걸리지 않은 새 글을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 다시 판단합니다.
-                    확인할 때마다 LLM 요청이 하나 늘어납니다. 본문을 열지 않은 글은 제목만 보냅니다.
+                    키워드에 걸리지 않은 새 글의 제목을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 다시 판단합니다.
+                    LLM 요청 한 자리를 이 용도로 남겨 둡니다(무료 등급이면 분당 5회 중 1회). 본문을 연 글은 앞부분도 함께 보냅니다.
                 </small>
             </div>
 

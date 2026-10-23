@@ -1,5 +1,5 @@
 import type {DCInside, PostItem} from "@green-1052/dcinside.js";
-import {galleryProblems, PROVIDER_LABELS} from "@shared/settings";
+import {effectiveRpm, galleryProblems, PROVIDER_LABELS} from "@shared/settings";
 import type {GalleryConfig, GalleryStatus, HistoryEntry, Settings} from "@shared/types";
 import {isAppIdFailure, isDefiniteCommentFailure, type AccountManager} from "../dc/accounts";
 import type {AppIdBackoff} from "../dc/app-id-backoff";
@@ -15,6 +15,9 @@ import {eligible, END_MARGIN_MS, makePlan, type Plan} from "./planner";
 
 /** 한 번 확인할 때 최대로 넘겨볼 목록 페이지 수입니다. */
 const MAX_PAGES_PER_TICK = 3;
+
+/** 골라내기를 미뤄 둘 때 갤러리마다 쌓아 둘 최대 글 수입니다. 넘으면 오래된 글부터 버립니다. */
+const MAX_UNSCREENED = 200;
 
 /** 본문을 연달아 읽을 때 사이에 둘 간격입니다. 새 글이 많을 때 요청이 한꺼번에 몰리지 않게 합니다. */
 const BODY_READ_GAP_MS = 500;
@@ -89,7 +92,9 @@ export class Engine {
     /** 같은 서비스/모델/키라면 LLM 클라이언트를 다시 만들지 않습니다. */
     private provider: {key: string; instance: LlmProvider} | null = null;
     /** 갤러리와 상관없이 앱 전체의 LLM 요청 수를 셉니다. */
-    private readonly limiter = new RateLimiter(() => this.deps.settings().llm.requestsPerMinute);
+    private readonly limiter = new RateLimiter(() => effectiveRpm(this.deps.settings().llm));
+    /** 요청 자리가 모자라 아직 골라내지 못한 글입니다. 다음 확인 때 함께 보냅니다. */
+    private readonly unscreened = new Map<string, Candidate[]>();
     /** 다음 본문을 읽어도 되는 시각입니다. 갤러리 여러 개가 함께 읽어도 간격을 지킵니다. */
     private nextReadAt = 0;
     private readonly readGapMs = BODY_READ_GAP_MS;
@@ -149,6 +154,7 @@ export class Engine {
         for (const timer of this.watchers.values()) clearTimeout(timer);
         this.watchers.clear();
         this.lastSeen.clear();
+        this.unscreened.clear();
         this.statuses.clear();
     }
 
@@ -237,9 +243,24 @@ export class Engine {
             matched = found.notified;
             if (found.last !== null) this.lastSeen.set(key, found.last);
             const candidates = [...found.matched];
-            if (gallery.screenUnmatched && found.unmatched.length > 0) candidates.push(...await this.screen(gallery, found.unmatched));
+            const budget = this.tickBudget(gallery);
+            let decisionSlots = budget;
+            if (gallery.screenUnmatched) {
+                const pending = [...(this.unscreened.get(key) ?? []), ...found.unmatched].slice(-MAX_UNSCREENED);
+                this.unscreened.delete(key);
+                // 요청 한 자리는 골라내기 몫으로 남깁니다. 한 자리뿐이면 키워드에 걸린 글을 먼저 판단하고, 골라내기는 다음으로 미룹니다.
+                if (budget >= 2) decisionSlots = budget - 1;
+                if (pending.length > 0) {
+                    if (budget >= 2 || candidates.length === 0) {
+                        candidates.push(...await this.screen(gallery, pending));
+                        decisionSlots = Math.max(1, budget - 1);
+                    } else {
+                        this.unscreened.set(key, pending);
+                    }
+                }
+            }
             matched += candidates.length;
-            await this.decideAll(gallery, candidates.sort((a, b) => a.post.no - b.post.no), epoch);
+            await this.decideAll(gallery, candidates.sort((a, b) => a.post.no - b.post.no), epoch, decisionSlots);
         } finally {
             report(posts.length, matched);
         }
@@ -357,10 +378,10 @@ export class Engine {
     }
 
     /**
-     * 글들을 LLM으로 판단하고 바로 처리합니다. 지금 남은 분당 요청 수 안이면 글마다 따로 보내고,
-     * 넘으면 남은 요청 수만큼으로 묶어 보냅니다. 묶음마다 응답이 오는 대로 처리합니다.
+     * 글들을 LLM으로 판단하고 바로 처리합니다. 이번에 쓸 수 있는 요청 수(`slots`, 최근 1분 동안 남은 수를 넘지 않음) 안이면
+     * 글마다 따로 보내고, 넘으면 그 수만큼으로 묶어 보냅니다. 묶음마다 응답이 오는 대로 처리합니다.
      */
-    private async decideAll(gallery: GalleryConfig, candidates: Candidate[], epoch: number): Promise<void> {
+    private async decideAll(gallery: GalleryConfig, candidates: Candidate[], epoch: number, slots: number): Promise<void> {
         if (candidates.length === 0) return;
         let provider: LlmProvider;
         try {
@@ -371,8 +392,8 @@ export class Engine {
             }
             return;
         }
-        const slots = this.limiter.available();
-        const groups = chunkForLimit(candidates, Number.isFinite(slots) ? Math.max(1, slots) : 0);
+        const usable = Math.min(slots, this.limiter.available());
+        const groups = chunkForLimit(candidates, Number.isFinite(usable) ? Math.max(1, usable) : 0);
         if (groups.length < candidates.length) {
             this.deps.logger.info(`판단할 글 ${candidates.length}개를 LLM 요청 ${groups.length}번으로 묶어 보냅니다.`, {galleryId: gallery.galleryId});
         }
@@ -394,10 +415,24 @@ export class Engine {
         }));
     }
 
+    /**
+     * 한 번 확인할 때 쓸 LLM 요청 수입니다. 분당 한도를 감시 중인 갤러리들의 1분당 확인 횟수로 나눕니다.
+     * 감시 간격이 1분 이상인 갤러리 하나면 한도를 다 쓰고, 30초면 절반, 여러 갤러리면 그만큼 나눕니다. 최소 1입니다.
+     * 제한이 없으면 Infinity입니다.
+     */
+    private tickBudget(gallery: GalleryConfig): number {
+        const settings = this.deps.settings();
+        const rpm = effectiveRpm(settings.llm);
+        if (rpm <= 0) return Infinity;
+        const watched = settings.galleries.filter((item) => item.enabled && (this.watchers.has(item.id) || item.id === gallery.id));
+        const checksPerMinute = watched.reduce((sum, item) => sum + Math.max(1, 60 / item.intervalSec), 0);
+        return Math.max(1, Math.floor(rpm / Math.max(1, checksPerMinute)));
+    }
+
     /** 분당 요청 한도 안에서 LLM 요청 자리를 하나 받습니다. 한도에 닿았으면 로그를 남기고 기다립니다. */
     private async slot(gallery?: GalleryConfig): Promise<void> {
         if (this.limiter.available() === 0) {
-            const limit = this.deps.settings().llm.requestsPerMinute;
+            const limit = effectiveRpm(this.deps.settings().llm);
             this.deps.logger.info(`LLM 분당 요청 한도(${limit}회)에 닿아 잠시 기다립니다.`, gallery ? {galleryId: gallery.galleryId} : undefined);
         }
         await this.limiter.acquire();
