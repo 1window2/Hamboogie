@@ -3,7 +3,7 @@ import {rename, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import {safeStorage} from "electron";
 import {defaultSettings, normalizeSettings} from "@shared/settings";
-import type {SecretKey, Settings} from "@shared/types";
+import type {HistoryEntry, SecretKey, Settings} from "@shared/types";
 
 function readJson<T>(path: string, fallback: T): T {
     if (!existsSync(path)) return fallback;
@@ -147,5 +147,35 @@ export class Ledger {
         if (!this.set.delete(key)) return;
         this.keys.splice(this.keys.indexOf(key), 1);
         void writeJson(this.path, this.keys).catch(() => {});
+    }
+}
+
+const HISTORY_LIMIT = 500;
+
+/** 줄 서기 기록입니다. 최근 500건만 남깁니다. */
+export class HistoryStore {
+    private readonly path: string;
+    private readonly entries: HistoryEntry[];
+    private readonly listeners = new Set<(entry: HistoryEntry) => void>();
+
+    constructor(dir: string) {
+        this.path = join(dir, "history.json");
+        this.entries = readJson<HistoryEntry[]>(this.path, []);
+    }
+
+    add(entry: HistoryEntry): void {
+        this.entries.push(entry);
+        if (this.entries.length > HISTORY_LIMIT) this.entries.splice(0, this.entries.length - HISTORY_LIMIT);
+        void writeJson(this.path, this.entries).catch(() => {});
+        for (const listener of this.listeners) listener(entry);
+    }
+
+    all(): HistoryEntry[] {
+        return [...this.entries];
+    }
+
+    subscribe(listener: (entry: HistoryEntry) => void): () => void {
+        this.listeners.add(listener);
+        return () => this.listeners.delete(listener);
     }
 }

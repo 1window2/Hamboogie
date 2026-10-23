@@ -1,6 +1,6 @@
 import type {DCInside, PostItem} from "@green-1052/dcinside.js";
 import {galleryProblems, PROVIDER_LABELS} from "@shared/settings";
-import type {GalleryConfig, Settings} from "@shared/types";
+import type {GalleryConfig, HistoryEntry, Settings} from "@shared/types";
 import {isAppIdFailure, type AccountManager} from "../dc/accounts";
 import {AppIdBackoff} from "../dc/app-id-backoff";
 import {htmlToText} from "../dc/text";
@@ -34,6 +34,7 @@ export interface EngineDeps {
     resetReader(): Promise<void>;
     accounts: AccountManager;
     ledger: Ledger;
+    history: {add(entry: HistoryEntry): void};
     secrets: SecretStore;
     logger: Logger;
     settings(): Settings;
@@ -301,6 +302,7 @@ export class Engine {
                 await accounts.writeComment(attempt.accountId, gallery.galleryId, post.no, attempt.content);
                 const summary = `${accounts.nickname(attempt.accountId)} 계정으로 ${label}`;
                 logger.success(`${prefix}줄 서기 성공: ${summary}`, context);
+                this.record(gallery, post, "success", summary, prefix !== "");
                 if (this.deps.settings().notifyOnSuccess) await this.alert(`${prefix}줄 서기 성공: ${post.title}`, summary, context, true);
                 return;
             } catch (error) {
@@ -309,7 +311,20 @@ export class Engine {
                 logger.error(`${prefix}줄 서기 실패 (${message})`, context);
             }
         }
+        this.record(gallery, post, "failure", failures.join("\n"), prefix !== "");
         await this.notify(`${prefix}줄 서기 실패: ${post.title}`, failures.join("\n"), gallery.galleryId, post.no);
+    }
+
+    private record(gallery: GalleryConfig, post: NewPost, outcome: HistoryEntry["outcome"], detail: string, test: boolean): void {
+        this.deps.history.add({
+            time: Date.now(),
+            galleryId: gallery.galleryId,
+            postNo: post.no,
+            title: post.title,
+            outcome,
+            detail,
+            ...(test ? {test} : {})
+        });
     }
 
     private notify(title: string, description: string, galleryId: string, postNo: number): Promise<void> {

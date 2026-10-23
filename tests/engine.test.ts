@@ -12,8 +12,10 @@ function setup(notifyOnSuccess = false) {
     const ledger = new Ledger(dir);
     const logger = new Logger(join(dir, "test.log"));
     const written: number[] = [];
+    const recorded: unknown[] = [];
     const deps = {
         ledger,
+        history: {add: (entry: unknown) => recorded.push(entry)},
         logger,
         settings: () => ({...defaultSettings(), notifyOnSuccess}),
         accounts: {
@@ -25,7 +27,7 @@ function setup(notifyOnSuccess = false) {
             }
         }
     } as unknown as EngineDeps;
-    return {engine: new Engine(deps), ledger, logger, written};
+    return {engine: new Engine(deps), ledger, logger, written, recorded};
 }
 
 describe("Engine 예약된 줄 서기", () => {
@@ -46,11 +48,12 @@ describe("Engine 예약된 줄 서기", () => {
         expect(logger.recent().some((entry) => entry.message.includes("예약된 줄 서기를 취소"))).toBe(true);
     });
 
-    it("시각이 되면 줄을 서고 처리 기록은 남는다", async () => {
-        const {engine, ledger, written} = setup();
+    it("시각이 되면 줄을 서고 처리 기록과 줄 서기 기록이 남는다", async () => {
+        const {engine, ledger, written, recorded} = setup();
         await engine.dispatch(gallery, {no: 11, title: "나눔"}, plan(0));
         await new Promise((resolve) => setTimeout(resolve, 50));
         expect(written).toEqual([11]);
+        expect(recorded).toEqual([expect.objectContaining({galleryId: "gf2", postNo: 11, title: "나눔", outcome: "success", detail: "테스터 계정으로 \"줄\""})]);
         engine.stop();
         expect(ledger.has("gf2", 11)).toBe(true);
     });

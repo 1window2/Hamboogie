@@ -6,7 +6,7 @@ import {checkGallery} from "./dc/gallery-check";
 import {Logger} from "./logger";
 import {sendDiscordNotice} from "./notify/discord";
 import {Engine} from "./pipeline/engine";
-import {Ledger, SecretStore, SettingsStore} from "./store";
+import {HistoryStore, Ledger, SecretStore, SettingsStore} from "./store";
 import {createTray} from "./tray";
 
 const PROVIDERS: LlmProviderId[] = ["gemini", "openai", "claude"];
@@ -25,6 +25,7 @@ async function main(): Promise<void> {
     const settingsStore = new SettingsStore(dataDir);
     const secrets = new SecretStore(dataDir);
     const ledger = new Ledger(dataDir);
+    const history = new HistoryStore(dataDir);
     const accounts = new AccountManager(secrets);
     let reader = createReader(secrets);
     const engine = new Engine({
@@ -35,6 +36,7 @@ async function main(): Promise<void> {
         },
         accounts,
         ledger,
+        history,
         secrets,
         logger,
         settings: () => settingsStore.get(),
@@ -68,6 +70,7 @@ async function main(): Promise<void> {
     }
 
     logger.subscribe((entry) => window?.webContents.send("log", entry));
+    history.subscribe((entry) => window?.webContents.send("history", entry));
 
     // 개발 모드 전용 테스트 실행입니다. 배포 빌드에서는 이 분기와 모듈이 통째로 빠집니다.
     if (import.meta.env.DEV) {
@@ -77,6 +80,7 @@ async function main(): Promise<void> {
 
     ipcMain.handle("getState", () => state());
     ipcMain.handle("getLogs", () => logger.recent());
+    ipcMain.handle("getHistory", () => history.all());
     ipcMain.handle("saveSettings", async (_event, next: Settings) => {
         const removed = settingsStore.get().accounts.filter((account) => !next.accounts.some((item) => item.id === account.id));
         for (const account of removed) await accounts.remove(account.id);

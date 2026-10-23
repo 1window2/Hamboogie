@@ -93,6 +93,19 @@ export interface AppState {
     watching: number;
 }
 
+/** 줄 서기 기록 한 건입니다. */
+export interface HistoryEntry {
+    time: number;
+    galleryId: string;
+    postNo: number;
+    title: string;
+    outcome: "success" | "failure";
+    /** 성공이면 "너구리국밥 계정으로 \"줄\"" 같은 내용, 실패면 계정별 실패 사유입니다. */
+    detail: string;
+    /** 개발 모드 가짜 글 테스트로 남은 기록입니다. */
+    test?: boolean;
+}
+
 /** 개발 모드 전용 테스트 실행 입력입니다. */
 export interface DevTestInput {
     title: string;
@@ -124,6 +137,8 @@ export interface HamboogieApi {
     stop(): Promise<AppState>;
     testWebhook(): Promise<{ok: boolean; message: string}>;
     getLogs(): Promise<LogEntry[]>;
+    getHistory(): Promise<HistoryEntry[]>;
+    onHistory(listener: (entry: HistoryEntry) => void): () => void;
     onLog(listener: (entry: LogEntry) => void): () => void;
     onState(listener: (state: AppState) => void): () => void;
     /** 개발 모드 전용입니다. 배포 빌드에서는 호출하면 실패합니다. */
