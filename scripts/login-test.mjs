@@ -1,7 +1,7 @@
 // dcinside.js 로그인 테스트: 로그인, 고닉 여부, 보유 디시콘 확인 후 원하면 댓글 1개를 직접 달아봅니다.
 // 아이디와 비밀번호는 저장하지 않습니다.
 import readline from "node:readline";
-import {DCInside, OtpRequiredError, CaptchaRequiredError} from "@green-1052/dcinside.js";
+import {APP, DCInside, OtpRequiredError, CaptchaRequiredError} from "@green-1052/dcinside.js";
 
 function ask(question, {hidden = false} = {}) {
     return new Promise((resolve) => {
@@ -19,6 +19,8 @@ function ask(question, {hidden = false} = {}) {
     });
 }
 
+// 디시가 요구하는 앱 버전입니다. src/main/dc/app-version.ts와 같은 값을 씁니다.
+Object.assign(APP, {versionName: "5.3.20", versionCode: "100190"});
 const dc = new DCInside();
 
 const id = await ask("디시 아이디: ");

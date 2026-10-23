@@ -1,6 +1,7 @@
 import type {DCInside} from "@green-1052/dcinside.js";
 import type {GalleryCheckResult} from "@shared/types";
 import {isAppIdFailure} from "./accounts";
+import {isOutdatedAppError, OUTDATED_APP_MESSAGE} from "./app-version";
 
 /** 갤러리 목록을 한 번 불러와 실제로 있는 갤러리인지 확인하고, 이름과 마이너 여부를 돌려줍니다. */
 export async function checkGallery(reader: DCInside, galleryId: string): Promise<GalleryCheckResult> {
@@ -10,6 +11,7 @@ export async function checkGallery(reader: DCInside, galleryId: string): Promise
     try {
         response = await reader.articles.list({gallery: id});
     } catch (error) {
+        if (isOutdatedAppError(error)) throw new Error(OUTDATED_APP_MESSAGE);
         if (isAppIdFailure(error)) throw new Error("디시 앱 인증이 일시적으로 거절되어 확인하지 못했습니다. 잠시 후 다시 시도하세요.");
         throw new Error(`갤러리를 찾을 수 없습니다. (${error instanceof Error ? error.message : String(error)})`);
     }

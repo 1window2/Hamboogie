@@ -5,6 +5,7 @@ import type {AccountConfig, AppState, LlmProviderId, SecretKey, Settings} from "
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
 import {AccountManager, createReader, persistReader} from "./dc/accounts";
 import {AppIdBackoff} from "./dc/app-id-backoff";
+import {applyDcAppVersion} from "./dc/app-version";
 import {checkGallery} from "./dc/gallery-check";
 import {Logger} from "./logger";
 import {sendDiscordNotice} from "./notify/discord";
@@ -64,6 +65,8 @@ async function main(): Promise<void> {
         fakeClient = createFakeClientFactory((message) => logger.info(`[오프라인] ${message}`));
         logger.warn("오프라인 모드입니다. 디시 대신 가짜 글과 가짜 계정을 씁니다.");
     }
+    // 디시가 요구하는 앱 버전으로 맞춥니다. 디시 클라이언트를 만들기 전이어야 합니다.
+    applyDcAppVersion();
     // app_id 발급 거절은 IP 단위라 읽기용 클라이언트와 계정들이 대기 상태를 함께 씁니다.
     const appId = new AppIdBackoff();
     const accounts = new AccountManager(secrets, fakeClient, appId);

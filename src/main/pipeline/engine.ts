@@ -3,6 +3,7 @@ import {effectiveRpm, galleryProblems, PROVIDER_LABELS} from "@shared/settings";
 import type {GalleryConfig, GalleryStatus, HistoryEntry, Settings} from "@shared/types";
 import {isAppIdFailure, isDefiniteCommentFailure, type AccountManager} from "../dc/accounts";
 import type {AppIdBackoff} from "../dc/app-id-backoff";
+import {isOutdatedAppError, OUTDATED_APP_MESSAGE} from "../dc/app-version";
 import {htmlToText} from "../dc/text";
 import type {Decision} from "../llm/decision";
 import {createProvider, type LlmProvider} from "../llm/providers";
@@ -98,6 +99,8 @@ export class Engine {
     /** 다음 본문을 읽어도 되는 시각입니다. 갤러리 여러 개가 함께 읽어도 간격을 지킵니다. */
     private nextReadAt = 0;
     private readonly readGapMs = BODY_READ_GAP_MS;
+    /** 앱 버전이 낮아 접속이 거절됐다고 이미 알렸는지입니다. */
+    private outdatedNotified = false;
 
     constructor(private readonly deps: EngineDeps) {}
 
@@ -451,7 +454,17 @@ export class Engine {
     private async recoverReader(error: unknown): Promise<void> {
         if (!isAppIdFailure(error)) return;
         const minutes = Math.round(this.deps.appId.pauseMs / 60000);
-        if (!this.deps.appId.fail()) {
+        const needsFreshDevice = this.deps.appId.fail();
+        // 앱 버전이 낮아 거절된 것이면 기기 정보를 새로 받아도 풀리지 않습니다. 쉬면서 한 번만 알립니다.
+        if (isOutdatedAppError(error)) {
+            this.deps.logger.error(`${OUTDATED_APP_MESSAGE} ${minutes}분 뒤 다시 확인합니다.`);
+            if (!this.outdatedNotified) {
+                this.outdatedNotified = true;
+                await this.alert("디시 접속 불가: Hamboogie 업데이트 필요", OUTDATED_APP_MESSAGE);
+            }
+            return;
+        }
+        if (!needsFreshDevice) {
             this.deps.logger.warn(`디시 앱 인증(app_id) 발급이 거절되어 ${minutes}분 동안 목록 확인을 쉽니다.`);
             return;
         }

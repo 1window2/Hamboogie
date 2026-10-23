@@ -1,6 +1,7 @@
 import {describe, expect, it} from "vitest";
-import {AuthExpiredError, DCInsideError, OtpRequiredError, type DCInside, type DeviceCredentials, type LoginOptions} from "@green-1052/dcinside.js";
+import {APP, AuthExpiredError, DCInsideError, OtpRequiredError, type DCInside, type DeviceCredentials, type LoginOptions} from "@green-1052/dcinside.js";
 import {AccountManager} from "../src/main/dc/accounts";
+import {applyDcAppVersion, DC_APP_VERSION} from "../src/main/dc/app-version";
 import {AppIdBackoff} from "../src/main/dc/app-id-backoff";
 import type {AccountConfig} from "@shared/types";
 
@@ -182,6 +183,26 @@ describe("AccountManager app_id 거절 대응", () => {
         await manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"});
         expect(server.written).toEqual(["줄"]);
         expect(server.clientsCreated).toBe(2);
+    });
+    it("앱 버전이 낮아 거절되면 30분이 지나도 기기 정보를 새로 받지 않고 업데이트가 필요하다고 알린다", async () => {
+        const {server, manager, advance} = setupWithClock({"otp:acc1": "token-abc", "device:acc1": JSON.stringify({androidId: "old"})});
+        await manager.login(ACCOUNT);
+        const client = (manager as unknown as {sessions: Map<string, {client: DCInside}>}).sessions.get("acc1")!.client;
+        (client.comments as unknown as {write: () => Promise<never>}).write = async () => {
+            throw new DCInsideError('app_id 발급 실패: {"result":false,"cause":"앱을 계속 이용하시려면 스토어에서 최신 버전으로 업데이트해 주세요."}');
+        };
+        await expect(manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"})).rejects.toThrow("업데이트");
+        advance(31 * MINUTE);
+        await expect(manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"})).rejects.toThrow("업데이트");
+        expect(server.clientsCreated).toBe(1);
+    });
+});
+
+describe("디시 앱 버전", () => {
+    it("클라이언트를 만들기 전에 디시가 요구하는 버전으로 맞춘다", () => {
+        applyDcAppVersion();
+        expect(APP.versionName).toBe(DC_APP_VERSION.name);
+        expect(APP.versionCode).toBe(DC_APP_VERSION.code);
     });
 });
 
