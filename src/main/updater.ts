@@ -1,6 +1,6 @@
 import {app} from "electron";
-import electronUpdater from "electron-updater";
 import type {UpdateState} from "@shared/types";
+import type {AppUpdater} from "electron-updater";
 
 const RELEASES_API = "https://api.github.com/repos/1window2/Hamboogie/releases/latest";
 const RELEASES_PAGE = "https://github.com/1window2/Hamboogie/releases/latest";
@@ -26,7 +26,7 @@ export interface Updater {
 /**
  * 새 버전을 확인합니다. 배포 빌드에서만 동작합니다.
  *
- * - Windows: GitHub Release의 latest.yml로 새 버전을 백그라운드에서 받아 두고, 재시작하거나 종료할 때 설치합니다.
+ * - Windows: `startWindowsUpdater`를 봅니다.
  * - macOS: 서명되지 않은 앱은 자동 설치를 할 수 없어서, 최신 릴리스를 확인해 다운로드 페이지만 알려줍니다.
  */
 export function startUpdater(onChange: (state: UpdateState) => void, beforeInstall: () => void): Updater {
@@ -35,29 +35,24 @@ export function startUpdater(onChange: (state: UpdateState) => void, beforeInsta
         current = next;
         onChange(next);
     };
+    // electron-updater는 Windows 배포 빌드에서만 불러옵니다. macOS와 개발 모드에서는 쓰지 않아 싣지 않습니다.
+    let windowsUpdater: Promise<AppUpdater> | null = null;
     const updater: Updater = {
         state: () => current,
         install: () => {
-            if (current.state !== "ready" || process.platform !== "win32") return;
+            if (current.state !== "ready" || !windowsUpdater) return;
             beforeInstall();
-            electronUpdater.autoUpdater.quitAndInstall();
+            void windowsUpdater.then((autoUpdater) => autoUpdater.quitAndInstall());
         }
     };
     if (!app.isPackaged) return updater;
 
     if (process.platform === "win32") {
-        const {autoUpdater} = electronUpdater;
-        autoUpdater.autoDownload = true;
-        autoUpdater.autoInstallOnAppQuit = true;
-        autoUpdater.on("update-available", (info) => set({state: "downloading", version: info.version, percent: 0}));
-        autoUpdater.on("download-progress", (progress) => {
-            if (current.state === "downloading") set({...current, percent: Math.round(progress.percent)});
-        });
-        autoUpdater.on("update-downloaded", (info) => set({state: "ready", version: info.version}));
-        autoUpdater.on("error", (error) => set({state: "error", message: error.message}));
-        const check = () => void autoUpdater.checkForUpdates().catch((error: unknown) => set({state: "error", message: String(error)}));
-        check();
-        setInterval(check, CHECK_INTERVAL_MS);
+        // CommonJS 모듈이라 ESM에서 불러오면 default 아래에 들어 있습니다.
+        windowsUpdater = import("electron-updater").then((module) => module.default.autoUpdater);
+        windowsUpdater
+            .then((autoUpdater) => startWindowsUpdater(autoUpdater, () => current, set))
+            .catch((error: unknown) => set({state: "error", message: String(error)}));
         return updater;
     }
 
@@ -78,4 +73,24 @@ export function startUpdater(onChange: (state: UpdateState) => void, beforeInsta
     void check();
     setInterval(() => void check(), CHECK_INTERVAL_MS);
     return updater;
+}
+
+/** Windows: GitHub Release의 latest.yml로 새 버전을 백그라운드에서 받아 두고, 재시작하거나 종료할 때 설치합니다. */
+function startWindowsUpdater(
+    autoUpdater: AppUpdater,
+    current: () => UpdateState,
+    set: (next: UpdateState) => void
+): void {
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on("update-available", (info) => set({state: "downloading", version: info.version, percent: 0}));
+    autoUpdater.on("download-progress", (progress) => {
+        const now = current();
+        if (now.state === "downloading") set({...now, percent: Math.round(progress.percent)});
+    });
+    autoUpdater.on("update-downloaded", (info) => set({state: "ready", version: info.version}));
+    autoUpdater.on("error", (error) => set({state: "error", message: error.message}));
+    const check = () => void autoUpdater.checkForUpdates().catch((error: unknown) => set({state: "error", message: String(error)}));
+    check();
+    setInterval(check, CHECK_INTERVAL_MS);
 }

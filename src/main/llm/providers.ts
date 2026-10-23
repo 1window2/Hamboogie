@@ -1,9 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
-import {zodOutputFormat} from "@anthropic-ai/sdk/helpers/zod";
-import OpenAI from "openai";
-import {zodTextFormat} from "openai/helpers/zod";
-import {ApiError as GeminiApiError, GoogleGenAI, ThinkingLevel} from "@google/genai";
+import type {ThinkingLevel} from "@google/genai";
 import {z} from "zod";
+import {PROVIDER_LABELS} from "@shared/settings";
 import type {LlmProviderId} from "@shared/types";
 import {
     BATCH_SYSTEM_PROMPT,
@@ -17,6 +14,7 @@ import {
     SYSTEM_PROMPT,
     type Decision
 } from "./decision";
+import {errorMessage} from "@shared/errors";
 
 export interface PostInput {
     title: string;
@@ -54,7 +52,7 @@ const STATUS_MESSAGES: Record<number, string> = {
 export function describeLlmError(provider: string, error: unknown): string {
     if (error instanceof LlmError) return error.message;
     const status = typeof (error as {status?: unknown})?.status === "number" ? (error as {status: number}).status : null;
-    let detail = error instanceof Error ? error.message : String(error);
+    let detail = errorMessage(error);
     // Gemini는 오류 응답 JSON 전체를 메시지에 담아 보냅니다. 그 안의 message만 꺼냅니다.
     try {
         const parsed = JSON.parse(detail) as {error?: {message?: string}};
@@ -68,13 +66,25 @@ export function describeLlmError(provider: string, error: unknown): string {
     return `${provider} ${STATUS_MESSAGES[status] ?? "오류"} (${status}): ${detail}`;
 }
 
-/** 다시 시도할 만한 오류면 기다릴 시간을 돌려줍니다. 429는 응답의 "Please retry in 6.8s"를, 503(일시적 과부하)은 2초를 씁니다. */
+/** Gemini 오류가 다시 시도할 만하면 기다릴 시간을 돌려줍니다. 429는 응답의 "Please retry in 6.8s"를, 503(일시적 과부하)은 2초를 씁니다. */
 function retryDelayMs(error: unknown): number | null {
-    if (!(error instanceof GeminiApiError)) return null;
-    if (error.status === 503) return 2000;
-    if (error.status !== 429) return null;
+    const status = (error as {status?: unknown} | null)?.status;
+    if (status === 503) return 2000;
+    if (status !== 429 || !(error instanceof Error)) return null;
     const match = /retry in ([\d.]+)s/i.exec(error.message);
     return match ? Math.ceil(Number(match[1]) * 1000) : null;
+}
+
+/** 처음 쓸 때 한 번만 만듭니다. 고른 서비스의 SDK만 불러와서, 쓰지 않는 SDK는 메모리에 올리지 않습니다. */
+function lazy<T>(create: () => Promise<T>): () => Promise<T> {
+    let created: Promise<T> | null = null;
+    return () => {
+        created ??= create().catch((error: unknown) => {
+            created = null;
+            throw error;
+        });
+        return created;
+    };
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -91,8 +101,12 @@ interface StructuredRequest<S extends z.ZodType> {
 type Structured = <S extends z.ZodType>(request: StructuredRequest<S>) => Promise<z.infer<S>>;
 
 function claudeStructured(apiKey: string, model: string): Structured {
-    const client = new Anthropic({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 1});
+    const sdk = lazy(async () => {
+        const [{default: Anthropic}, {zodOutputFormat}] = await Promise.all([import("@anthropic-ai/sdk"), import("@anthropic-ai/sdk/helpers/zod")]);
+        return {client: new Anthropic({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 1}), zodOutputFormat};
+    });
     return async ({schema, system, user}) => {
+        const {client, zodOutputFormat} = await sdk();
         const response = await client.messages.parse({
             model,
             max_tokens: 8000,
@@ -108,8 +122,12 @@ function claudeStructured(apiKey: string, model: string): Structured {
 }
 
 function openaiStructured(apiKey: string, model: string): Structured {
-    const client = new OpenAI({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 1});
+    const sdk = lazy(async () => {
+        const [{default: OpenAI}, {zodTextFormat}] = await Promise.all([import("openai"), import("openai/helpers/zod")]);
+        return {client: new OpenAI({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 1}), zodTextFormat};
+    });
     return async <S extends z.ZodType>({schema, name, system, user}: StructuredRequest<S>) => {
+        const {client, zodTextFormat} = await sdk();
         const response = await client.responses.parse({
             model,
             instructions: system,
@@ -122,12 +140,17 @@ function openaiStructured(apiKey: string, model: string): Structured {
 }
 
 function geminiStructured(apiKey: string, model: string): Structured {
-    const client = new GoogleGenAI({apiKey, httpOptions: {timeout: LLM_TIMEOUT_MS}});
+    const sdk = lazy(async () => {
+        const {GoogleGenAI, ThinkingLevel} = await import("@google/genai");
+        return {client: new GoogleGenAI({apiKey, httpOptions: {timeout: LLM_TIMEOUT_MS}}), minimal: ThinkingLevel.MINIMAL};
+    });
     // 단순 분류라 깊게 생각할 필요가 없습니다. 생각을 줄이면 응답이 훨씬 빨라집니다.
     // 모델에 따라 MINIMAL을 지원하지 않으면 그 뒤로는 생각 설정 없이 보냅니다.
-    let thinkingConfig: {thinkingLevel: ThinkingLevel} | undefined = {thinkingLevel: ThinkingLevel.MINIMAL};
+    let thinkingSupported = true;
 
     return async ({schema, system, user}) => {
+        const {client, minimal} = await sdk();
+        let thinkingConfig: {thinkingLevel: ThinkingLevel} | undefined = thinkingSupported ? {thinkingLevel: minimal} : undefined;
         const generate = () => client.models.generateContent({
             model,
             contents: user,
@@ -147,7 +170,8 @@ function geminiStructured(apiKey: string, model: string): Structured {
             if (wait !== null && wait <= RATE_LIMIT_MAX_WAIT_MS) {
                 await sleep(wait);
                 response = await generate();
-            } else if (thinkingConfig && /thinking level/i.test(error instanceof Error ? error.message : String(error))) {
+            } else if (thinkingConfig && /thinking level/i.test(errorMessage(error))) {
+                thinkingSupported = false;
                 thinkingConfig = undefined;
                 response = await generate();
             } else {
@@ -187,7 +211,7 @@ export function createProvider(provider: LlmProviderId, apiKey: string, model: s
     const structured = provider === "claude" ? claudeStructured(apiKey, model)
         : provider === "openai" ? openaiStructured(apiKey, model)
             : geminiStructured(apiKey, model);
-    const label = provider === "claude" ? "Claude" : provider === "openai" ? "ChatGPT" : "Gemini";
+    const label = PROVIDER_LABELS[provider];
     return providerFrom(async (request) => {
         try {
             return await structured(request);

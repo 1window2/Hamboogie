@@ -12,10 +12,12 @@ export function isDiscordWebhookUrl(url: string): boolean {
     return WEBHOOK_PATTERN.test(url);
 }
 
-/** Discord 웹훅으로 알림을 보냅니다. 실패하면 예외를 던집니다. */
-/** 글 제목이나 LLM 판단처럼 남이 쓴 내용이 링크나 서식으로 보이지 않게 마크다운 기호를 무력화합니다. */
+/**
+ * 글 제목이나 LLM 판단처럼 남이 쓴 내용이 링크나 서식으로 보이지 않게 마크다운 기호를 무력화합니다.
+ * 주소는 Discord가 그대로 링크로 만들어서, `://` 사이에 보이지 않는 문자를 넣어 링크가 되지 않게 합니다.
+ */
 export function escapeMarkdown(text: string): string {
-    return text.replace(/([\\`*_~|[\]()<>#>-])/g, "\\$1");
+    return text.replace(/([\\`*_~|[\]()<>#>-])/g, "\\$1").replace(/:\/\//g, ":\u200b//");
 }
 
 /** 글자(서로게이트 쌍 포함) 단위로 자릅니다. */
@@ -26,6 +28,7 @@ function truncate(text: string, max: number): string {
 
 const WEBHOOK_TIMEOUT_MS = 10_000;
 
+/** Discord 웹훅으로 알림을 보냅니다. 실패하면 예외를 던집니다. */
 export async function sendDiscordNotice(webhookUrl: string, notice: DiscordNotice): Promise<void> {
     if (!isDiscordWebhookUrl(webhookUrl)) throw new Error("Discord 웹훅 주소가 올바르지 않습니다.");
     const response = await fetch(webhookUrl, {
@@ -38,7 +41,7 @@ export async function sendDiscordNotice(webhookUrl: string, notice: DiscordNotic
             // @everyone 등 멘션은 울리지 않게 합니다.
             allowed_mentions: {parse: []},
             embeds: [{
-                title: truncate(notice.title, 256),
+                title: truncate(escapeMarkdown(notice.title), 256),
                 description: truncate(escapeMarkdown(notice.description), 4000),
                 url: notice.url,
                 color: notice.success ? 0x3fa45b : 0xe0442e,

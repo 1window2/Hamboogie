@@ -231,8 +231,10 @@ fieldset {
     gap: 6px;
 }
 
-.field > span {
+.field > span,
+.field > legend {
     font-weight: 600;
+    padding: 0;
 }
 
 .field.inline {

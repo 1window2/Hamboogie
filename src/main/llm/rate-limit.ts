@@ -30,7 +30,8 @@ export class RateLimiter {
     /** 요청 하나를 보낼 자리가 날 때까지 기다린 뒤 자리를 차지합니다. */
     async acquire(): Promise<void> {
         while (this.available() === 0) await this.sleep(this.sent[0]! + WINDOW_MS - this.now());
-        this.sent.push(this.now());
+        // 제한이 없으면 기록할 필요가 없습니다(기록만 쌓입니다).
+        if (this.limit() > 0) this.sent.push(this.now());
     }
 }
 

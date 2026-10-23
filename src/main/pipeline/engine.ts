@@ -1,4 +1,5 @@
 import type {DCInside, PostItem} from "@green-1052/dcinside.js";
+import {errorMessage} from "@shared/errors";
 import {effectiveRpm, galleryProblems, PROVIDER_LABELS} from "@shared/settings";
 import type {GalleryConfig, GalleryStatus, HistoryEntry, Settings} from "@shared/types";
 import {isAppIdFailure, isDefiniteCommentFailure, type AccountManager} from "../dc/accounts";
@@ -19,6 +20,9 @@ const MAX_PAGES_PER_TICK = 3;
 
 /** 골라내기를 미뤄 둘 때 갤러리마다 쌓아 둘 최대 글 수입니다. 넘으면 오래된 글부터 버립니다. */
 const MAX_UNSCREENED = 200;
+
+/** 골라내기를 이보다 오래 미루지 않습니다. 요청 자리가 모자라도 이만큼 기다린 글이 있으면 골라냅니다. */
+const MAX_SCREEN_DEFER_MS = 2 * 60 * 1000;
 
 /** 본문을 연달아 읽을 때 사이에 둘 간격입니다. 새 글이 많을 때 요청이 한꺼번에 몰리지 않게 합니다. */
 const BODY_READ_GAP_MS = 500;
@@ -73,9 +77,6 @@ function postUrl(galleryId: string, postNo: number): string {
     return `https://m.dcinside.com/board/${galleryId}/${postNo}`;
 }
 
-function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-}
 
 /** 갤러리 감시, 글 분석, 줄 서기를 실행합니다. */
 export class Engine {
@@ -101,6 +102,8 @@ export class Engine {
     private readonly readGapMs = BODY_READ_GAP_MS;
     /** 앱 버전이 낮아 접속이 거절됐다고 이미 알렸는지입니다. */
     private outdatedNotified = false;
+    /** 진행 중인 LLM 판단입니다. 목록 확인이 판단을 기다리지 않도록 따로 돌립니다. */
+    private readonly inflight = new Set<Promise<void>>();
 
     constructor(private readonly deps: EngineDeps) {}
 
@@ -117,9 +120,16 @@ export class Engine {
         return Object.fromEntries(this.statuses);
     }
 
-    /** 감시를 (다시) 시작합니다. 예약해 둔 줄 서기는 그대로 둡니다. 시작할 수 없는 갤러리는 로그에 이유를 남기고 건너뜁니다. */
+    /**
+     * 감시를 (다시) 시작합니다. 예약해 둔 줄 서기와, 계속 감시하는 갤러리의 기준 글은 그대로 둡니다.
+     * 그래서 감시 중에 다시 시작해도 그사이 올라온 글을 건너뛰지 않습니다. 시작할 수 없는 갤러리는 로그에 이유를 남기고 건너뜁니다.
+     */
     start(): void {
-        this.haltWatchers();
+        this.haltWatchers(false);
+        const keys = new Set(this.deps.settings().galleries.map((gallery) => this.seenKey(gallery)));
+        for (const map of [this.lastSeen, this.unscreened]) {
+            for (const key of map.keys()) if (!keys.has(key)) map.delete(key);
+        }
         const runId = this.runId;
         const {logger} = this.deps;
         for (const gallery of this.deps.settings().galleries) {
@@ -141,7 +151,7 @@ export class Engine {
     /** 감시를 멈추고 예약해 둔 줄 서기도 취소합니다. 분석 중이던 글에도 댓글을 달지 않습니다. */
     stop(): void {
         const wasRunning = this.watchers.size > 0;
-        this.haltWatchers();
+        this.haltWatchers(true);
         this.epoch++;
         for (const [timer, pending] of this.scheduled) {
             clearTimeout(timer);
@@ -152,13 +162,26 @@ export class Engine {
         if (wasRunning) this.deps.logger.info("감시를 멈췄습니다.");
     }
 
-    private haltWatchers(): void {
+    /** @param forget 기준 글과 미뤄 둔 골라내기까지 잊습니다. 사용자가 감시를 멈출 때만 씁니다. */
+    private haltWatchers(forget: boolean): void {
         this.runId++;
         for (const timer of this.watchers.values()) clearTimeout(timer);
         this.watchers.clear();
-        this.lastSeen.clear();
-        this.unscreened.clear();
         this.statuses.clear();
+        if (forget) {
+            this.lastSeen.clear();
+            this.unscreened.clear();
+        }
+    }
+
+    /** 진행 중인 LLM 판단이 모두 끝날 때까지 기다립니다. */
+    async idle(): Promise<void> {
+        while (this.inflight.size > 0) await Promise.allSettled([...this.inflight]);
+    }
+
+    private track(work: Promise<void>): void {
+        const tracked = work.catch((error) => this.deps.logger.error(`글 판단 중 오류: ${errorMessage(error)}`)).finally(() => this.inflight.delete(tracked));
+        this.inflight.add(tracked);
     }
 
     private schedule(configId: string, runId: number, delayMs: number): void {
@@ -215,6 +238,7 @@ export class Engine {
         const key = this.seenKey(gallery);
         const lastSeen = this.lastSeen.get(key);
         const collected = new Map<number, NewPost>();
+        let reachedLastSeen = false;
 
         for (let page = 1; page <= MAX_PAGES_PER_TICK; page++) {
             const response = await reader().articles.list({gallery: gallery.galleryId, page});
@@ -223,7 +247,15 @@ export class Engine {
             const items = (response.gall_list ?? []).filter((item: PostItem) => typeof item.no === "number" && !item.fixtop);
             for (const item of items) collected.set(item.no!, {no: item.no!, title: item.subject ?? ""});
             // 첫 확인이거나, 이번 페이지에 이미 본 글이 있으면 더 넘기지 않습니다.
-            if (lastSeen === undefined || items.length === 0 || items.some((item) => item.no! <= lastSeen)) break;
+            reachedLastSeen = items.length === 0 || (lastSeen !== undefined && items.some((item) => item.no! <= lastSeen));
+            if (lastSeen === undefined || reachedLastSeen) break;
+        }
+        if (runId !== this.runId) return;
+        if (lastSeen !== undefined && !reachedLastSeen && collected.size > 0) {
+            const oldest = Math.min(...collected.keys());
+            if (oldest > lastSeen + 1) {
+                logger.warn(`새 글이 너무 많아 ${MAX_PAGES_PER_TICK}페이지 밖의 글(#${lastSeen + 1}~#${oldest - 1})은 확인하지 못했습니다. 감시 간격을 줄여 보세요.`, {galleryId: gallery.galleryId});
+            }
         }
 
         const report = (newPosts: number, matched: number) => {
@@ -242,31 +274,78 @@ export class Engine {
         let matched = 0;
         try {
             const found = await this.collect(gallery, posts, runId, epoch);
-            if (!found) return;
+            // 확인하는 사이 감시가 다시 시작됐으면 이 결과는 버립니다. 다음 확인에서 다시 봅니다.
+            if (!found || runId !== this.runId) return;
             matched = found.notified;
             if (found.last !== null) this.lastSeen.set(key, found.last);
             const candidates = [...found.matched];
             const budget = this.tickBudget(gallery);
             let decisionSlots = budget;
             if (gallery.screenUnmatched) {
-                const pending = [...(this.unscreened.get(key) ?? []), ...found.unmatched].slice(-MAX_UNSCREENED);
-                this.unscreened.delete(key);
-                // 요청 한 자리는 골라내기 몫으로 남깁니다. 한 자리뿐이면 키워드에 걸린 글을 먼저 판단하고, 골라내기는 다음으로 미룹니다.
-                if (budget >= 2) decisionSlots = budget - 1;
-                if (pending.length > 0) {
-                    if (budget >= 2 || candidates.length === 0) {
-                        candidates.push(...await this.screen(gallery, pending));
-                        decisionSlots = Math.max(1, budget - 1);
-                    } else {
-                        this.unscreened.set(key, pending);
-                    }
+                const pending = this.queueForScreening(gallery, key, found.unmatched);
+                const waitedTooLong = pending.length > 0 && Date.now() - pending[0]!.detectedAt > MAX_SCREEN_DEFER_MS;
+                // 요청 한 자리는 골라내기 몫입니다. 한 번에 한 자리뿐이면 키워드에 걸린 글을 먼저 판단하고 골라내기는 미루되,
+                // 너무 오래 미룬 글이 있으면 골라냅니다.
+                if (pending.length > 0 && (budget >= 2 || candidates.length === 0 || waitedTooLong)) {
+                    this.unscreened.delete(key);
+                    decisionSlots = Math.max(1, budget - 1);
+                    const picked = await this.screen(gallery, pending);
+                    if (runId !== this.runId) return;
+                    if (picked) candidates.push(...await this.withBodies(gallery, picked));
+                    // 골라내기가 실패하면 다음 확인 때 다시 보냅니다.
+                    else this.queueForScreening(gallery, key, pending);
                 }
             }
             matched += candidates.length;
-            await this.decideAll(gallery, candidates.sort((a, b) => a.post.no - b.post.no), epoch, decisionSlots);
+            // 판단은 따로 돌려, 분당 요청 한도를 기다리는 동안에도 목록 확인이 멈추지 않게 합니다.
+            if (candidates.length > 0) this.track(this.decideAll(gallery, candidates.sort((a, b) => a.post.no - b.post.no), epoch, decisionSlots));
         } finally {
             report(posts.length, matched);
         }
+    }
+
+    /** 골라낼 글을 미뤄 둔 글 뒤에 붙여 두고 전체를 돌려줍니다. 너무 많으면 오래된 글부터 버리고 로그를 남깁니다. */
+    private queueForScreening(gallery: GalleryConfig, key: string, posts: Candidate[]): Candidate[] {
+        const merged = [...(this.unscreened.get(key) ?? []), ...posts];
+        const dropped = merged.length - MAX_UNSCREENED;
+        if (dropped > 0) this.deps.logger.warn(`골라내기를 기다리는 글이 너무 많아 오래된 글 ${dropped}개는 골라내지 않고 넘깁니다.`, {galleryId: gallery.galleryId});
+        const kept = merged.slice(-MAX_UNSCREENED);
+        if (kept.length > 0) this.unscreened.set(key, kept);
+        return kept;
+    }
+
+    /**
+     * 골라낸 글 가운데 본문을 읽지 않은 글은 판단 전에 본문을 읽습니다. 제목만 보고 판단하면 본문의 줄 조건을 놓칩니다.
+     * 지금 읽을 수 없거나, 지워졌거나, 본문에 제외 키워드가 있는 글은 뺍니다.
+     */
+    private async withBodies(gallery: GalleryConfig, picked: Candidate[]): Promise<Candidate[]> {
+        const result: Candidate[] = [];
+        for (const candidate of picked) {
+            if (candidate.body) {
+                result.push(candidate);
+                continue;
+            }
+            const context = {galleryId: gallery.galleryId, postNo: candidate.post.no};
+            if (!this.deps.appId.canTry()) {
+                this.deps.logger.warn("앱 인증 대기 중이라 골라낸 글의 본문을 읽지 못해 넘어감", context);
+                continue;
+            }
+            try {
+                await this.paceRead();
+                const article = await this.deps.reader().articles.read(gallery.galleryId, candidate.post.no);
+                const body = htmlToText(article.view_main?.memo ?? "");
+                const excluded = this.excludedBy(gallery, body);
+                if (excluded) {
+                    this.deps.logger.info(`넘어감: 본문에 제외 키워드 "${excluded}"`, context);
+                    continue;
+                }
+                result.push({...candidate, title: article.view_info?.subject ?? candidate.title, body});
+            } catch (error) {
+                if (isAppIdFailure(error)) await this.recoverReader(error);
+                this.deps.logger.warn(`골라낸 글의 본문을 읽지 못해 넘어감: ${errorMessage(error)}`, context);
+            }
+        }
+        return result;
     }
 
     /**
@@ -277,19 +356,24 @@ export class Engine {
         const {ledger, logger} = this.deps;
         const fresh = posts.filter((post) => !ledger.has(gallery.galleryId, post.no));
         const titleMatched = new Set(fresh.filter((post) => matchesKeywords(post.title, gallery.keywords)).map((post) => post.no));
-        const others = fresh.filter((post) => !titleMatched.has(post.no) && !this.excludedBy(gallery, post.title));
+        // 키워드가 비어 있으면 모든 글이 판단 대상이라, 본문 요청 상한을 모든 글에 적용합니다.
+        // 그렇지 않으면 제목에 키워드가 있는 글은 늘 열고, 상한은 나머지 글에만 적용합니다.
+        const noKeywords = gallery.keywords.length === 0;
+        const others = fresh.filter((post) => (noKeywords || !titleMatched.has(post.no)) && !this.excludedBy(gallery, post.title));
         // 상한을 넘으면 최근 글부터 본문을 엽니다. 오래된 글일수록 이미 마감됐을 가능성이 큽니다.
         const limit = gallery.bodyReadLimit;
-        const scanned = !gallery.scanBody ? [] : limit === 0 ? others : others.slice(-limit);
+        const scanning = gallery.scanBody || noKeywords;
+        const scanned = !scanning ? [] : limit === 0 ? others : others.slice(-limit);
         const scan = new Set(scanned.map((post) => post.no));
-        if (scanned.length < others.length && gallery.scanBody) {
+        if (scanning && scanned.length < others.length) {
             logger.info(`새 글 ${others.length}개 중 최근 ${scanned.length}개만 본문을 확인하고, 나머지는 제목으로만 판단합니다. (본문 요청 상한 ${limit}개)`, {galleryId: gallery.galleryId});
         }
 
         const result = {matched: [] as Candidate[], unmatched: [] as Candidate[], last: null as number | null, notified: 0};
         for (const post of posts) {
             if (runId !== this.runId) return null;
-            const outcome = await this.inspect(gallery, post, titleMatched.has(post.no), scan.has(post.no), epoch);
+            const matchedByTitle = titleMatched.has(post.no);
+            const outcome = await this.inspect(gallery, post, matchedByTitle, noKeywords ? scan.has(post.no) : matchedByTitle || scan.has(post.no), epoch);
             if (outcome === "retry") break;
             if (outcome === "notified") result.notified++;
             else if (outcome !== "done") result[outcome.kind].push(outcome.candidate);
@@ -299,10 +383,10 @@ export class Engine {
     }
 
     /**
-     * 글 하나를 봅니다. 제목에 키워드가 있거나 본문 확인 대상이면 본문을 읽습니다.
+     * 글 하나를 봅니다. `read`이면 본문을 읽고, 아니면 제목으로만 봅니다.
      * 지금은 읽을 수 없어 다음에 다시 봐야 하면 "retry", 읽지 못해 바로 알렸으면 "notified"입니다.
      */
-    private async inspect(gallery: GalleryConfig, post: NewPost, titleMatched: boolean, scan: boolean, epoch: number):
+    private async inspect(gallery: GalleryConfig, post: NewPost, titleMatched: boolean, read: boolean, epoch: number):
         Promise<"done" | "retry" | "notified" | {kind: "matched" | "unmatched"; candidate: Candidate}> {
         const {ledger, logger} = this.deps;
         if (ledger.has(gallery.galleryId, post.no)) return "done";
@@ -313,8 +397,13 @@ export class Engine {
             return "done";
         }
         const detectedAt = Date.now();
-        if (!titleMatched && !scan) {
-            return gallery.screenUnmatched ? {kind: "unmatched", candidate: {post, title: post.title, body: "", detectedAt}} : "done";
+        if (!read) {
+            const candidate = {post, title: post.title, body: "", detectedAt};
+            if (titleMatched) {
+                logger.info(`키워드 일치(본문 요청 상한을 넘어 제목으로만 판단): "${post.title}"`, context);
+                return {kind: "matched", candidate};
+            }
+            return gallery.screenUnmatched ? {kind: "unmatched", candidate} : "done";
         }
         if (!this.deps.appId.canTry()) return "retry";
 
@@ -365,8 +454,8 @@ export class Engine {
         if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
     }
 
-    /** 키워드에 걸리지 않은 글을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것만 돌려줍니다. 실패하면 로그만 남깁니다. */
-    private async screen(gallery: GalleryConfig, candidates: Candidate[]): Promise<Candidate[]> {
+    /** 키워드에 걸리지 않은 글을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것만 돌려줍니다. 실패하면 로그를 남기고 null입니다. */
+    private async screen(gallery: GalleryConfig, candidates: Candidate[]): Promise<Candidate[] | null> {
         const {logger} = this.deps;
         try {
             const provider = this.llm();
@@ -375,8 +464,8 @@ export class Engine {
             for (const candidate of picked) logger.info(`LLM이 키워드 없는 글을 나눔 글로 골라냄: "${candidate.title}"`, {galleryId: gallery.galleryId, postNo: candidate.post.no});
             return picked;
         } catch (error) {
-            logger.warn(`키워드에 걸리지 않은 글 ${candidates.length}개를 골라내지 못했습니다: ${errorMessage(error)}`, {galleryId: gallery.galleryId});
-            return [];
+            logger.warn(`키워드에 걸리지 않은 글 ${candidates.length}개를 골라내지 못해 다음 확인 때 다시 보냅니다: ${errorMessage(error)}`, {galleryId: gallery.galleryId});
+            return null;
         }
     }
 
@@ -400,18 +489,35 @@ export class Engine {
         if (groups.length < candidates.length) {
             this.deps.logger.info(`판단할 글 ${candidates.length}개를 LLM 요청 ${groups.length}번으로 묶어 보냅니다.`, {galleryId: gallery.galleryId});
         }
-        await Promise.all(groups.map(async (group) => {
-            let decisions: (Decision | null)[];
-            let failure = "LLM 응답에 이 글의 판단이 빠져 있음";
+        const decideOne = async (candidate: Candidate): Promise<{decision: Decision | null; failure: string}> => {
             try {
                 await this.slot(gallery);
-                decisions = group.length === 1 ? [await provider.decide(group[0]!)] : await provider.decideMany(group);
+                return {decision: await provider.decide(candidate), failure: ""};
             } catch (error) {
-                decisions = group.map(() => null);
-                failure = errorMessage(error);
+                return {decision: null, failure: errorMessage(error)};
+            }
+        };
+        await Promise.all(groups.map(async (group) => {
+            let results: {decision: Decision | null; failure: string}[];
+            if (group.length === 1) {
+                results = [await decideOne(group[0]!)];
+            } else {
+                try {
+                    await this.slot(gallery);
+                    results = (await provider.decideMany(group)).map((decision) => ({decision, failure: "LLM 응답에 이 글의 판단이 빠져 있음"}));
+                } catch (error) {
+                    results = group.map(() => ({decision: null, failure: errorMessage(error)}));
+                }
+                // 묶음 응답이 실패했거나 빠진 글은, 지금 남은 요청 수로 감당되면 하나씩 다시 물어봅니다.
+                const missing = group.filter((_, index) => !results[index]!.decision);
+                if (missing.length > 0 && missing.length <= this.limiter.available()) {
+                    for (const [index, candidate] of group.entries()) {
+                        if (!results[index]!.decision) results[index] = await decideOne(candidate);
+                    }
+                }
             }
             for (const [index, candidate] of group.entries()) {
-                const decision = decisions[index] ?? null;
+                const {decision, failure} = results[index]!;
                 const plan: Plan = decision ? this.planFor(gallery, decision, candidate) : {kind: "notify", reason: `글 분석 실패: ${failure}`};
                 await this.dispatch(gallery, candidate.post, plan, {live: {epoch}});
             }

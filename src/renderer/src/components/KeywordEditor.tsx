@@ -36,7 +36,7 @@ export function KeywordEditor({label, keywords, onChange, placeholder, notice}: 
                 </div>
             )}
             <div className="row">
-                <input value={input} disabled={full} placeholder={full ? `최대 ${KEYWORD_MAX}개입니다` : placeholder}
+                <input aria-label={label} value={input} disabled={full} placeholder={full ? `최대 ${KEYWORD_MAX}개입니다` : placeholder}
                        onChange={(event) => setInput(event.target.value)}
                        onKeyDown={(event) => event.key === "Enter" && add()}/>
                 <button className="button small" disabled={full || !input.trim()} onClick={add}>추가</button>

@@ -1,7 +1,8 @@
 import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
 import {app, BrowserWindow, ipcMain, Notification, shell, type IpcMainInvokeEvent} from "electron";
-import type {AccountConfig, AppState, LlmProviderId, SecretKey, Settings} from "@shared/types";
+import {PROVIDERS} from "@shared/settings";
+import type {AccountConfig, AppState, SecretKey, Settings} from "@shared/types";
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
 import {AccountManager, createReader, persistReader} from "./dc/accounts";
 import {AppIdBackoff} from "./dc/app-id-backoff";
@@ -10,11 +11,23 @@ import {checkGallery} from "./dc/gallery-check";
 import {Logger} from "./logger";
 import {sendDiscordNotice} from "./notify/discord";
 import {Engine} from "./pipeline/engine";
-import {HistoryStore, Ledger, SecretStore, SettingsStore} from "./store";
+import {flushAllJson, HistoryStore, Ledger, SecretStore, SettingsStore} from "./store";
 import {createTray} from "./tray";
 import {startUpdater, type Updater} from "./updater";
+import {errorMessage} from "@shared/errors";
 
-const PROVIDERS: LlmProviderId[] = ["gemini", "openai", "claude"];
+
+/** 앱 화면에서 온 IPC만 받는 등록 함수입니다. */
+export type TrustedHandle = (channel: string, listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown) => void;
+
+/** 두 주소의 출처(프로토콜, 호스트, 포트)가 같은지 봅니다. 앞부분만 비교하면 `localhost:51730`이 `localhost:5173`을 통과합니다. */
+function sameOrigin(a: string, b: string): boolean {
+    try {
+        return new URL(a).origin === new URL(b).origin;
+    } catch {
+        return false;
+    }
+}
 
 /** 기본 브라우저로 열어도 되는 주소입니다: 디시 글과 갤러리, 이 저장소의 GitHub 페이지. */
 function isAllowedExternalUrl(raw: string): boolean {
@@ -136,25 +149,26 @@ async function main(): Promise<void> {
     logger.subscribe((entry) => window?.webContents.send("log", entry));
     history.subscribe((entry) => window?.webContents.send("history", entry));
 
+    // 앱 화면(개발 서버 또는 앱에 들어 있는 index.html)에서 온 요청만 받습니다.
+    // 창이 다른 페이지로 넘어가는 것은 아래에서 막지만, 혹시 다른 페이지가 preload API를 쓰려 해도 거절합니다.
+    // 배포 빌드는 환경 변수로 다른 페이지를 띄울 수 없게, 개발 서버 주소를 개발 모드에서만 씁니다.
+    const rendererUrl = app.isPackaged ? undefined : process.env["ELECTRON_RENDERER_URL"];
+    const fromApp = (event: IpcMainInvokeEvent): boolean => {
+        const url = event.senderFrame?.url ?? "";
+        return rendererUrl ? sameOrigin(url, rendererUrl) : url.startsWith("file://") && url.includes("/renderer/index.html");
+    };
+    const handle: TrustedHandle = (channel, listener) => {
+        ipcMain.handle(channel, (event, ...args) => {
+            if (!fromApp(event)) throw new Error("허용되지 않은 화면에서 온 요청입니다.");
+            return listener(event, ...args);
+        });
+    };
+
     // 개발 모드 전용 테스트 실행입니다. 배포 빌드에서는 이 분기와 모듈이 통째로 빠집니다.
     if (import.meta.env.DEV) {
         const {registerDevTestIpc} = await import("./dev/test-run");
-        registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get(), reader: () => readingAccount()?.client ?? reader});
+        registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get(), reader: () => readingAccount()?.client ?? reader}, handle);
     }
-
-    // 앱 화면(개발 서버 또는 앱에 들어 있는 index.html)에서 온 요청만 받습니다.
-    // 창이 다른 페이지로 넘어가는 것은 아래에서 막지만, 혹시 다른 페이지가 preload API를 쓰려 해도 거절합니다.
-    const rendererUrl = process.env["ELECTRON_RENDERER_URL"];
-    const fromApp = (event: IpcMainInvokeEvent): boolean => {
-        const url = event.senderFrame?.url ?? "";
-        return rendererUrl ? url.startsWith(rendererUrl) : url.startsWith("file://") && url.includes("/renderer/index.html");
-    };
-    const handle = <A extends unknown[], R>(channel: string, listener: (event: IpcMainInvokeEvent, ...args: A) => R) => {
-        ipcMain.handle(channel, (event, ...args) => {
-            if (!fromApp(event)) throw new Error("허용되지 않은 화면에서 온 요청입니다.");
-            return listener(event, ...(args as A));
-        });
-    };
 
     handle("getState", () => state());
     handle("getLogs", () => logger.recent());
@@ -212,7 +226,7 @@ async function main(): Promise<void> {
             });
             return {ok: true, message: "테스트 알림을 보냈습니다."};
         } catch (error) {
-            return {ok: false, message: error instanceof Error ? error.message : String(error)};
+            return {ok: false, message: errorMessage(error)};
         }
     });
 
@@ -246,17 +260,16 @@ async function main(): Promise<void> {
                 new Notification({title: "Hamboogie", body: "창을 닫아도 트레이에서 계속 실행됩니다. 끄려면 트레이 메뉴에서 종료를 누르세요."}).show();
             }
         });
-        // 외부 링크는 앱 안이 아니라 기본 브라우저로 엽니다.
-        // 정해진 사이트(디시 글, 이 저장소의 릴리스)만 기본 브라우저로 엽니다.
+        // 외부 링크는 앱 안이 아니라, 정해진 사이트(디시 글, 이 저장소의 릴리스)만 기본 브라우저로 엽니다.
         created.webContents.setWindowOpenHandler(({url}) => {
             if (isAllowedExternalUrl(url)) void shell.openExternal(url);
             return {action: "deny"};
         });
         // 앱 화면이 다른 페이지(창에 끌어다 놓은 파일 등)로 넘어가지 않게 합니다.
         created.webContents.on("will-navigate", (event, url) => {
-            if (!rendererUrl || !url.startsWith(rendererUrl)) event.preventDefault();
+            if (!rendererUrl || !sameOrigin(url, rendererUrl)) event.preventDefault();
         });
-        if (process.env["ELECTRON_RENDERER_URL"]) await created.loadURL(process.env["ELECTRON_RENDERER_URL"]);
+        if (rendererUrl) await created.loadURL(rendererUrl);
         else await created.loadFile(join(import.meta.dirname, "../renderer/index.html"));
         return created;
     }
@@ -274,9 +287,17 @@ async function main(): Promise<void> {
         window.focus();
     }
 
-    app.on("before-quit", () => {
+    // 끄기 전에 밀린 파일 쓰기(처리한 글 기록 등)를 마칩니다. 처리한 글 기록을 잃으면 다시 켰을 때 같은 글에 또 댓글을 달 수 있습니다.
+    let flushed = false;
+    app.on("before-quit", (event) => {
         quitting = true;
         engine.stop();
+        if (flushed) return;
+        event.preventDefault();
+        void flushAllJson().finally(() => {
+            flushed = true;
+            app.quit();
+        });
     });
     // 창이 모두 없어져도 트레이에서 계속 실행합니다. (리스너가 없으면 Electron이 앱을 끕니다)
     app.on("window-all-closed", () => {});

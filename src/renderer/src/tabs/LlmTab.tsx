@@ -1,16 +1,16 @@
 import {useState} from "react";
-import {DEFAULT_MODELS, FREE_LLM_RPM, PROVIDER_LABELS} from "@shared/settings";
+import {DEFAULT_MODELS, FREE_LLM_RPM, PROVIDER_LABELS, PROVIDERS} from "@shared/settings";
+import type {DraftSetter} from "../App";
 import {NumberInput} from "../components/NumberInput";
 import type {AppState, LlmProviderId, Settings} from "@shared/types";
 
 interface Props {
     draft: Settings;
-    setDraft(settings: Settings): void;
+    setDraft: DraftSetter;
     state: AppState;
     run(action: () => Promise<AppState>, keepDraft?: boolean): Promise<void>;
 }
 
-const PROVIDERS: LlmProviderId[] = ["gemini", "openai", "claude"];
 
 export function LlmTab({draft, setDraft, state, run}: Props) {
     const [webhookResult, setWebhookResult] = useState<{ok: boolean; message: string} | null>(null);

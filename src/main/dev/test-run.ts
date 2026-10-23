@@ -2,7 +2,6 @@
 //
 // 입력한 제목/본문을 테스트 갤러리 1번 글의 내용인 것처럼 LLM 판단 → 줄 서기 계획 → 실제 댓글까지 돌립니다.
 // 디시에는 글을 쓰지 않으며, 댓글은 아래에 고정한 테스트 갤러리의 1번 글에만 답니다.
-import {ipcMain} from "electron";
 import type {DCInside} from "@green-1052/dcinside.js";
 import type {DevProbe, DevTestInput, DevTestResult, Settings} from "@shared/types";
 import type {AccountManager} from "../dc/accounts";
@@ -10,6 +9,7 @@ import {htmlToText} from "../dc/text";
 import type {Logger} from "../logger";
 import type {Engine} from "../pipeline/engine";
 import type {Plan} from "../pipeline/planner";
+import type {TrustedHandle} from "../index";
 
 /** 사람이 없는 테스트용 갤러리와 글입니다. 다른 갤러리에는 테스트 댓글을 달지 않습니다. */
 export const TEST_GALLERY_ID = "asgeir";
@@ -65,10 +65,10 @@ async function run(deps: Deps, input: DevTestInput): Promise<DevTestResult> {
     return {elapsedMs, decision: decision as Record<string, unknown> | null, plan: summary};
 }
 
-export function registerDevTestIpc(deps: Deps): void {
-    ipcMain.handle("devTestRun", (_event, input: DevTestInput) => run(deps, input));
+export function registerDevTestIpc(deps: Deps, handle: TrustedHandle): void {
+    handle("devTestRun", (_event, input: DevTestInput) => run(deps, input));
     // 디시 응답을 직접 확인하는 용도입니다. 테스트 갤러리(asgeir)에만 요청하며, 부를 때마다 요청 한 번입니다.
-    ipcMain.handle("devProbe", async (_event, probe: DevProbe) => {
+    handle("devProbe", async (_event, probe: DevProbe) => {
         const articles = deps.reader().articles;
         if (probe.kind === "read") {
             const article = await articles.read(TEST_GALLERY_ID, probe.no);

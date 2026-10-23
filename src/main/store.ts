@@ -45,7 +45,8 @@ async function drain(path: string, writer: FileWriter): Promise<void> {
             const content = writer.pending;
             writer.pending = null;
             const temp = `${path}.tmp`;
-            await writeFile(temp, content, "utf8");
+            // 계정 비밀번호(암호화됨), 웹훅 주소, 처리 기록이 들어 있어 이 사용자만 읽을 수 있게 둡니다.
+            await writeFile(temp, content, {encoding: "utf8", mode: 0o600});
             await rename(temp, path);
         }
     } finally {
@@ -56,6 +57,11 @@ async function drain(path: string, writer: FileWriter): Promise<void> {
 /** 이 파일에 밀린 쓰기가 모두 끝날 때까지 기다립니다. */
 function flushJson(path: string): Promise<void> {
     return writers.get(path)?.writing?.catch(() => {}) ?? Promise.resolve();
+}
+
+/** 모든 파일에 밀린 쓰기가 끝날 때까지 기다립니다. 앱을 끄기 전에 부릅니다. */
+export function flushAllJson(): Promise<void> {
+    return Promise.all([...writers.keys()].map(flushJson)).then(() => {});
 }
 
 /** 일반 설정입니다. 비밀 정보는 들어 있지 않습니다. */
@@ -92,7 +98,9 @@ export class SecretStore {
 
     constructor(dir: string) {
         this.path = join(dir, "secrets.json");
-        this.data = readJson<Record<string, string> | null>(this.path, {}) ?? {};
+        const loaded = readJson<unknown>(this.path, {});
+        // 객체가 아니면(배열 등) 깨진 것으로 보고 비웁니다. 아래에서 백업합니다.
+        this.data = loaded && typeof loaded === "object" && !Array.isArray(loaded) ? loaded as Record<string, string> : {};
         // 파일이 깨져서 읽지 못했다면, 다음 저장 때 덮어써서 남은 내용까지 잃지 않도록 백업해 둡니다.
         if (existsSync(this.path) && Object.keys(this.data).length === 0) {
             try {

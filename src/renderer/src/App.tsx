@@ -7,6 +7,10 @@ import {LogsTab} from "./tabs/LogsTab";
 import {HistoryTab} from "./tabs/HistoryTab";
 import {DevTestTab} from "./tabs/DevTestTab";
 import iconUrl from "./assets/icon.svg";
+import {errorMessage} from "@shared/errors";
+
+/** 설정 초안 갱신 함수입니다. 값이나, 이전 초안을 받아 새 초안을 돌려주는 함수를 받습니다. */
+export type DraftSetter = (next: Settings | ((prev: Settings) => Settings)) => void;
 
 type TabId = "galleries" | "accounts" | "llm" | "history" | "logs" | "devTest";
 
@@ -36,6 +40,10 @@ export function App() {
 
     if (!state || !draft) return <div className="loading">불러오는 중…</div>;
 
+    // 탭에는 항상 최신 초안을 기준으로 고치도록 함수형 갱신을 넘깁니다. 비동기 작업(갤러리 확인 등)이 끝난 뒤
+    // 그사이 고친 내용을 옛 초안으로 덮어쓰지 않게 하기 위해서입니다.
+    const updateDraft: DraftSetter = (next) => setDraft((prev) => prev && (typeof next === "function" ? next(prev) : next));
+
     const dirty = JSON.stringify(draft) !== JSON.stringify(state.settings);
 
     async function run(action: () => Promise<AppState>, keepDraft = false) {
@@ -45,7 +53,7 @@ export function App() {
             setState(next);
             if (!keepDraft) setDraft(next.settings);
         } catch (caught) {
-            setError(caught instanceof Error ? caught.message : String(caught));
+            setError(errorMessage(caught));
         }
     }
 
@@ -102,9 +110,9 @@ export function App() {
             )}
 
             <main className="content">
-                {tab === "galleries" && <GalleriesTab draft={draft} setDraft={setDraft} accounts={state.accounts} status={state.galleryStatus}/>}
-                {tab === "accounts" && <AccountsTab draft={draft} setDraft={setDraft} state={state} run={run}/>}
-                {tab === "llm" && <LlmTab draft={draft} setDraft={setDraft} state={state} run={run}/>}
+                {tab === "galleries" && <GalleriesTab draft={draft} setDraft={updateDraft} accounts={state.accounts} status={state.galleryStatus}/>}
+                {tab === "accounts" && <AccountsTab draft={draft} setDraft={updateDraft} state={state} run={run}/>}
+                {tab === "llm" && <LlmTab draft={draft} setDraft={updateDraft} state={state} run={run}/>}
                 {tab === "history" && <HistoryTab/>}
                 {tab === "logs" && <LogsTab/>}
                 {import.meta.env.DEV && tab === "devTest" && <DevTestTab/>}

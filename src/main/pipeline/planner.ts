@@ -82,6 +82,20 @@ export function normalizeForMatch(text: string): string {
 
 /** 봇 색출용 낚시 문구에 자주 쓰이는 단어입니다. 이런 문구를 요구하면 자동으로 달지 않고 알립니다. */
 const BAIT_WORDS = ["봇", "매크로", "자동", "bot", "macro", "프로그램", "크롤"];
+/**
+ * 글 자체에 이런 말이 있으면 봇을 걸러내려는 글일 수 있어 자동으로 줄을 서지 않고 알립니다.
+ * ("댓글 단 매크로 차단" 같은 글). "로봇"처럼 흔한 낱말에 걸리지 않게 그 낱말은 먼저 지웁니다.
+ */
+const POST_BAIT_WORDS = ["봇", "매크로", "bot", "macro", "크롤", "자동댓글", "자동으로댓글"];
+const POST_BAIT_IGNORED = ["로봇", "robot"];
+
+/** 글에 봇 색출로 보이는 말이 있으면 그 말을 돌려줍니다. */
+export function findBaitWord(postText: string): string | null {
+    let text = normalizeForMatch(postText);
+    for (const word of POST_BAIT_IGNORED) text = text.replaceAll(word, "");
+    return POST_BAIT_WORDS.find((word) => text.includes(word)) ?? null;
+}
+
 /** 연락처나 외부 링크로 이어지는 단어입니다. */
 const CONTACT_WORDS = ["카톡", "카카오", "오픈채팅", "텔레", "telegram", "디코", "discord", "라인", "연락", "전화", "번호", "계좌", "주소", "링크"];
 
@@ -138,6 +152,8 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     if (qualified.length === 0) return {kind: "skip", reason: "참여 자격에 맞는 대기 계정이 없음"};
 
     if (decision.needs_extra_action) return {kind: "notify", reason: `댓글 외의 행동이 필요함: ${decision.reason}`};
+    const bait = findBaitWord(postText);
+    if (bait) return {kind: "notify", reason: `글에 봇을 걸러내려는 듯한 말("${bait}")이 있어 직접 확인이 필요함`};
     if (decision.line_method === "unclear") return {kind: "notify", reason: `줄 서는 방법을 판단할 수 없음: ${decision.reason}`};
 
     let notBefore = detectedAt;

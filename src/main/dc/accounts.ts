@@ -4,6 +4,7 @@ import type {SecretStore} from "../store";
 import {AppIdBackoff} from "./app-id-backoff";
 import {DC_APP_VERSION, isOutdatedAppError, OUTDATED_APP_MESSAGE, OUTDATED_PAUSE_MS} from "./app-version";
 import type {CandidateAccount, CommentContent, OwnedDccon} from "../pipeline/planner";
+import {errorMessage} from "@shared/errors";
 
 interface LoggedIn {
     /** 세션 만료 시 다시 로그인할 때 씁니다. */
@@ -154,6 +155,8 @@ export class AccountManager {
         this.awaitingOtp.delete(account.id);
         try {
             const session = await client.login(account.loginId, password, otp ? {otp} : {otpToken});
+            // 로그인하는 사이 계정이 삭제됐으면 결과를 버립니다. 비밀 정보도 다시 저장하지 않습니다.
+            if (this.removed.has(account.id)) return {state: "logged_out"};
             // OTP로 로그인하면 다음부터 OTP 없이 통과할 수 있는 토큰을 줍니다.
             if (session.result.otp_token) await this.secrets.set(otpKey, session.result.otp_token);
             const isGonick = session.result.is_gonick;
@@ -174,6 +177,7 @@ export class AccountManager {
             return this.setStatus(account.id, this.loggedInStatus(account, loggedIn));
         } catch (error) {
             this.sessions.delete(account.id);
+            if (this.removed.has(account.id)) return {state: "logged_out"};
             if (error instanceof OtpRequiredError) {
                 this.awaitingOtp.set(account.id, client);
                 await saveDevice(this.secrets, deviceKey, client);
@@ -186,7 +190,7 @@ export class AccountManager {
             }
             const message = error instanceof CaptchaRequiredError
                 ? "로그인에 캡차 입력이 필요합니다. 디시 앱이나 웹에서 한 번 로그인한 뒤 다시 시도하세요."
-                : `로그인 실패: ${error instanceof Error ? error.message : String(error)}`;
+                : `로그인 실패: ${errorMessage(error)}`;
             return this.setStatus(account.id, {state: "error", message});
         }
     }

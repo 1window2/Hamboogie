@@ -12,10 +12,12 @@ export const BODY_READ_LIMIT_SAFE = 20;
 export const BODY_READ_LIMIT_MAX = 1000;
 /** 무료 등급(예: Gemini 무료 키)의 분당 요청 한도입니다. 유료 요금제를 쓰지 않으면 이 값을 따릅니다. */
 export const FREE_LLM_RPM = 5;
-export const LLM_RPM_DEFAULT = FREE_LLM_RPM;
 export const LLM_RPM_MAX = 1000;
 
 export const DEFAULT_KEYWORDS = ["나눔", "뿌림", "뿌린다", "뿌려", "선착", "줄", "기프티콘", "쏜다", "추첨", "드림", "드립니다", "드려요", "쏩니다", "까지"];
+
+/** 고를 수 있는 LLM 서비스입니다. 화면에 이 순서로 보입니다. */
+export const PROVIDERS: readonly LlmProviderId[] = ["gemini", "openai", "claude"];
 
 export const DEFAULT_MODELS: Record<LlmProviderId, string> = {
     gemini: "gemini-3.6-flash",
@@ -33,7 +35,7 @@ export function defaultSettings(): Settings {
     return {
         galleries: [],
         accounts: [],
-        llm: {provider: "gemini", models: {...DEFAULT_MODELS}, paidPlan: false, requestsPerMinute: LLM_RPM_DEFAULT},
+        llm: {provider: "gemini", models: {...DEFAULT_MODELS}, paidPlan: false, requestsPerMinute: FREE_LLM_RPM},
         discordWebhookUrl: "",
         notifyOnSuccess: false
     };
@@ -57,8 +59,9 @@ export function newGallery(id: string): GalleryConfig {
     };
 }
 
-function clamp(value: number, min: number, max: number): number {
-    if (!Number.isFinite(value)) return min;
+/** 범위 안으로 맞춥니다. 숫자가 아니면 `fallback`(없으면 최솟값)을 씁니다. 0이 "제한 없음"인 값은 꼭 기본값을 넘겨야 합니다. */
+function clamp(value: number, min: number, max: number, fallback = min): number {
+    if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
     return Math.min(max, Math.max(min, Math.round(value)));
 }
 
@@ -89,17 +92,16 @@ export function normalizeGallery(gallery: GalleryConfig, accounts: AccountConfig
         excludeKeywords: normalizeKeywords(gallery.excludeKeywords ?? []),
         // 이전 버전에서 저장한 설정에는 없으므로 기본(켜짐)으로 봅니다.
         scanBody: gallery.scanBody ?? true,
-        bodyReadLimit: clamp(gallery.bodyReadLimit ?? BODY_READ_LIMIT_DEFAULT, 0, BODY_READ_LIMIT_MAX),
+        bodyReadLimit: clamp(gallery.bodyReadLimit, 0, BODY_READ_LIMIT_MAX, BODY_READ_LIMIT_DEFAULT),
         screenUnmatched: gallery.screenUnmatched ?? true,
         accountIds: [...new Set(gallery.accountIds)].filter((id) => accountIds.has(id))
     };
 }
 
-/** 저장 전에 설정값을 허용 범위로 맞춥니다. */
-const PROVIDERS = ["gemini", "openai", "claude"] as const;
 /** 계정 ID는 앱이 만든 UUID입니다. 비밀 정보 키에 쓰이므로 다른 형식은 받지 않습니다. */
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** 저장 전에 설정값을 허용 범위로 맞춥니다. */
 export function normalizeSettings(settings: Settings): Settings {
     const accounts = settings.accounts
         .filter((account) => ACCOUNT_ID_PATTERN.test(account.id))
@@ -110,9 +112,10 @@ export function normalizeSettings(settings: Settings): Settings {
         galleries: settings.galleries.map((gallery) => normalizeGallery(gallery, accounts)),
         llm: {
             provider: PROVIDERS.includes(settings.llm.provider) ? settings.llm.provider : "gemini",
-            models: {...DEFAULT_MODELS, ...settings.llm.models},
+            // 모델 이름을 비우면 기본 모델을 씁니다. 화면에도 기본 모델이 안내 문구로 보입니다.
+            models: Object.fromEntries(PROVIDERS.map((id) => [id, settings.llm.models?.[id]?.trim() || DEFAULT_MODELS[id]])) as Record<LlmProviderId, string>,
             paidPlan: settings.llm.paidPlan === true,
-            requestsPerMinute: clamp(settings.llm.requestsPerMinute ?? LLM_RPM_DEFAULT, 0, LLM_RPM_MAX)
+            requestsPerMinute: clamp(settings.llm.requestsPerMinute, 0, LLM_RPM_MAX, FREE_LLM_RPM)
         },
         discordWebhookUrl: settings.discordWebhookUrl.trim(),
         notifyOnSuccess: settings.notifyOnSuccess === true

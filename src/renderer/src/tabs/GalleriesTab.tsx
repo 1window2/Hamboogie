@@ -1,29 +1,34 @@
 import {useEffect, useState} from "react";
 import {BODY_READ_LIMIT_SAFE, INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
 import type {AccountView, GalleryConfig, GalleryStatus, Settings} from "@shared/types";
+import type {DraftSetter} from "../App";
 import {NumberInput} from "../components/NumberInput";
 import {KeywordEditor} from "../components/KeywordEditor";
 
 interface Props {
     draft: Settings;
-    setDraft(settings: Settings): void;
+    setDraft: DraftSetter;
     accounts: AccountView[];
     status: Record<string, GalleryStatus>;
 }
 
 export function GalleriesTab({draft, setDraft, accounts, status}: Props) {
-    function update(id: string, patch: Partial<GalleryConfig>) {
-        setDraft({...draft, galleries: draft.galleries.map((gallery) => gallery.id === id ? {...gallery, ...patch} : gallery)});
+    /** `when`이 있으면 그 시점의 최신 갤러리 설정이 조건에 맞을 때만 고칩니다. */
+    function update(id: string, patch: Partial<GalleryConfig>, when?: (current: GalleryConfig) => boolean) {
+        setDraft((prev) => ({
+            ...prev,
+            galleries: prev.galleries.map((gallery) => gallery.id === id && (!when || when(gallery)) ? {...gallery, ...patch} : gallery)
+        }));
     }
 
     return (
         <div className="stack">
             {draft.galleries.length === 0 && <p className="muted">감시할 갤러리를 추가하세요.</p>}
             {draft.galleries.map((gallery) => (
-                <GalleryCard key={gallery.id} gallery={gallery} accounts={accounts} status={status[gallery.id]} onChange={(patch) => update(gallery.id, patch)}
-                             onRemove={() => setDraft({...draft, galleries: draft.galleries.filter((item) => item.id !== gallery.id)})}/>
+                <GalleryCard key={gallery.id} gallery={gallery} accounts={accounts} status={status[gallery.id]} onChange={(patch, when) => update(gallery.id, patch, when)}
+                             onRemove={() => setDraft((prev) => ({...prev, galleries: prev.galleries.filter((item) => item.id !== gallery.id)}))}/>
             ))}
-            <button className="button add" onClick={() => setDraft({...draft, galleries: [...draft.galleries, newGallery(crypto.randomUUID())]})}>
+            <button className="button add" onClick={() => setDraft((prev) => ({...prev, galleries: [...prev.galleries, newGallery(crypto.randomUUID())]}))}>
                 + 갤러리 추가
             </button>
         </div>
@@ -43,7 +48,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
     gallery: GalleryConfig;
     accounts: AccountView[];
     status: GalleryStatus | undefined;
-    onChange(patch: Partial<GalleryConfig>): void;
+    onChange(patch: Partial<GalleryConfig>, when?: (current: GalleryConfig) => boolean): void;
     onRemove(): void;
 }) {
     const [checking, setChecking] = useState(false);
@@ -57,7 +62,8 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
         setCheckError(null);
         try {
             const result = await window.hamboogie.checkGallery(id);
-            onChange({galleryId: id, checkedId: id, title: result.title, isMinor: result.isMinor});
+            // 확인하는 사이 ID를 또 바꿨으면 이 결과는 버립니다.
+            onChange({galleryId: id, checkedId: id, title: result.title, isMinor: result.isMinor}, (current) => current.galleryId.trim() === id);
         } catch (caught) {
             setCheckError(caught instanceof Error ? caught.message.replace(/^Error invoking remote method '\w+': (Error: )?/, "") : String(caught));
         } finally {
@@ -124,7 +130,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                 </label>
 
                 <fieldset className="field">
-                    <span>나눔 종류</span>
+                    <legend>나눔 종류</legend>
                     <div className="row">
                         <label className="check">
                             <input type="radio" name={`category-${gallery.id}`} checked={gallery.category === "food"} onChange={() => onChange({category: "food"})}/>
@@ -174,8 +180,9 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                     키워드에 안 걸린 글도 LLM으로 골라내기
                 </label>
                 <small className="muted">
-                    키워드에 걸리지 않은 새 글의 제목을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 다시 판단합니다.
-                    LLM 요청 한 자리를 이 용도로 남겨 둡니다(무료 등급이면 분당 5회 중 1회). 본문을 연 글은 앞부분도 함께 보냅니다.
+                    키워드에 걸리지 않은 새 글의 제목을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 골라 다시 판단합니다(본문을 연 글은 앞부분도 함께).
+                    골라낼 글이 있으면 확인할 때마다 LLM 요청 1회를 여기에 씁니다. 한 번에 쓸 수 있는 요청이 1회뿐이면
+                    키워드에 걸린 글을 먼저 판단하고, 골라내기는 다음 확인으로 미룹니다(2분 넘게 미루지는 않습니다).
                 </small>
             </div>
 
@@ -190,8 +197,8 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                     {gallery.accountIds.map((id, index) => (
                         <li key={id}>
                             <span>{index + 1}. {accountLabel(id)}</span>
-                            <button className="button small" disabled={index === 0} onClick={() => moveAccount(index, -1)}>▲</button>
-                            <button className="button small" disabled={index === gallery.accountIds.length - 1} onClick={() => moveAccount(index, 1)}>▼</button>
+                            <button className="button small" disabled={index === 0} aria-label={`${accountLabel(id)} 우선순위 올리기`} onClick={() => moveAccount(index, -1)}>▲</button>
+                            <button className="button small" disabled={index === gallery.accountIds.length - 1} aria-label={`${accountLabel(id)} 우선순위 내리기`} onClick={() => moveAccount(index, 1)}>▼</button>
                             <button className="button small" onClick={() => toggleAccount(id, false)}>빼기</button>
                         </li>
                     ))}
@@ -211,6 +218,10 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
 
 function IntervalField({value, onChange}: {value: number; onChange(value: number): void}) {
     const [unit, setUnit] = useState<"sec" | "min">(value % 60 === 0 ? "min" : "sec");
+    // 되돌리기처럼 밖에서 값이 바뀌어 분으로 나눠떨어지지 않으면 초 단위로 바꿔 실제 값을 그대로 보여줍니다.
+    useEffect(() => {
+        if (unit === "min" && value % 60 !== 0) setUnit("sec");
+    }, [unit, value]);
     const factor = unit === "min" ? 60 : 1;
     const outOfRange = value < INTERVAL_MIN_SEC || value > INTERVAL_MAX_SEC;
     return (
