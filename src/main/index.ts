@@ -2,6 +2,7 @@ import {join} from "node:path";
 import {app, BrowserWindow, ipcMain, Notification, shell} from "electron";
 import type {AccountConfig, AppState, LlmProviderId, SecretKey, Settings} from "@shared/types";
 import {AccountManager, createReader, persistReader} from "./dc/accounts";
+import {checkGallery} from "./dc/gallery-check";
 import {Logger} from "./logger";
 import {sendDiscordNotice} from "./notify/discord";
 import {Engine} from "./pipeline/engine";
@@ -109,6 +110,7 @@ async function main(): Promise<void> {
         await loginAccount(account, otp);
         return state();
     });
+    ipcMain.handle("checkGallery", (_event, galleryId: string) => checkGallery(reader, galleryId));
     ipcMain.handle("start", () => {
         engine.start();
         tray?.update();

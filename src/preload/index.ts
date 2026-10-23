@@ -19,6 +19,7 @@ const api: HamboogieApi = {
     saveSettings: invoker("saveSettings"),
     setSecret: invoker("setSecret"),
     login: invoker("login"),
+    checkGallery: invoker("checkGallery"),
     start: invoker("start"),
     stop: invoker("stop"),
     testWebhook: invoker("testWebhook"),

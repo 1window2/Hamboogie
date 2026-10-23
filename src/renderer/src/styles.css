@@ -460,3 +460,7 @@ textarea {
     padding: 10px;
     overflow-x: auto;
 }
+
+.check-status {
+    margin-top: -6px;
+}

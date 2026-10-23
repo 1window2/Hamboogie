@@ -24,6 +24,15 @@ export interface GalleryConfig {
     accountIds: string[];
     /** 나눔 글을 감지한 뒤 줄을 서기까지 기다릴 시간(초)입니다. */
     delaySec: number;
+    /** 실제로 있는 갤러리인지 확인한 ID입니다. `galleryId`와 다르면 다시 확인해야 감시할 수 있습니다. */
+    checkedId?: string;
+    /** 확인할 때 받은 갤러리 이름입니다. */
+    title?: string;
+}
+
+export interface GalleryCheckResult {
+    title: string;
+    isMinor: boolean;
 }
 
 export interface AccountConfig {
@@ -107,6 +116,8 @@ export interface HamboogieApi {
     setSecret(key: SecretKey, value: string): Promise<AppState>;
     /** `otp`는 OTP 6자리입니다. 상태가 `otp_required`일 때만 넘깁니다. */
     login(accountId: string, otp?: string): Promise<AppState>;
+    /** 갤러리가 실제로 있는지 확인하고 이름과 마이너 여부를 돌려줍니다. 없으면 실패합니다. */
+    checkGallery(galleryId: string): Promise<GalleryCheckResult>;
     start(): Promise<AppState>;
     stop(): Promise<AppState>;
     testWebhook(): Promise<{ok: boolean; message: string}>;

@@ -97,6 +97,7 @@ export function normalizeSettings(settings: Settings): Settings {
 export function galleryProblems(gallery: GalleryConfig): string[] {
     const problems: string[] = [];
     if (!/^[A-Za-z0-9_$]+$/.test(gallery.galleryId)) problems.push("갤러리 ID가 올바르지 않습니다.");
+    else if (gallery.checkedId !== gallery.galleryId) problems.push("갤러리 탭에서 갤러리 ID를 확인해야 합니다.");
     if (gallery.accountIds.length === 0) problems.push("대기 계정을 하나 이상 지정해야 합니다.");
     return problems;
 }

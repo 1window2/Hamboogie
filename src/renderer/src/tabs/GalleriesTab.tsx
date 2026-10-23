@@ -1,4 +1,4 @@
-import {useState} from "react";
+import {useEffect, useState} from "react";
 import {INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, KEYWORD_MAX, newGallery} from "@shared/settings";
 import type {AccountView, GalleryConfig, Settings} from "@shared/types";
 import {NumberInput} from "../components/NumberInput";
@@ -40,6 +40,24 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
     onRemove(): void;
 }) {
     const [keywordInput, setKeywordInput] = useState("");
+    const [checking, setChecking] = useState(false);
+    const [checkError, setCheckError] = useState<string | null>(null);
+    const checked = Boolean(gallery.galleryId) && gallery.checkedId === gallery.galleryId;
+    useEffect(() => setCheckError(null), [gallery.galleryId]);
+
+    async function check() {
+        const id = gallery.galleryId.trim();
+        setChecking(true);
+        setCheckError(null);
+        try {
+            const result = await window.hamboogie.checkGallery(id);
+            onChange({galleryId: id, checkedId: id, title: result.title, isMinor: result.isMinor});
+        } catch (caught) {
+            setCheckError(caught instanceof Error ? caught.message.replace(/^Error invoking remote method '\w+': (Error: )?/, "") : String(caught));
+        } finally {
+            setChecking(false);
+        }
+    }
     const keywordsFull = gallery.keywords.length >= KEYWORD_MAX;
 
     function addKeywords() {
@@ -74,10 +92,10 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
                     <span>갤러리 ID</span>
                     <input value={gallery.galleryId} placeholder="예: gf2" onChange={(event) => onChange({galleryId: event.target.value})}/>
                 </label>
-                <label className="check">
-                    <input type="checkbox" checked={gallery.isMinor} onChange={(event) => onChange({isMinor: event.target.checked})}/>
-                    마이너 갤러리
-                </label>
+                <button className="button small" disabled={checking || !gallery.galleryId.trim() || checked} onClick={check}>
+                    {checking ? "확인 중…" : "확인"}
+                </button>
+
                 <label className="check">
                     <input type="checkbox" checked={gallery.enabled} onChange={(event) => onChange({enabled: event.target.checked})}/>
                     감시 사용
@@ -87,6 +105,10 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
                 )}
                 <button className={gallery.galleryId ? "button danger small" : "button danger small push-right"} onClick={onRemove}>삭제</button>
             </div>
+            {checked
+                ? <small className="ok-text check-status">✓ {gallery.title}{gallery.isMinor ? " (마이너 갤러리)" : ""}</small>
+                : checkError ? <small className="error-text check-status">{checkError}</small>
+                    : gallery.galleryId.trim() && <small className="error-text check-status">갤러리 ID를 확인해야 감시할 수 있습니다.</small>}
 
             <div className="grid">
                 <IntervalField value={gallery.intervalSec} onChange={(intervalSec) => onChange({intervalSec})}/>
