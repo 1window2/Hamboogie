@@ -20,6 +20,8 @@ export interface GalleryConfig {
     category: GiveawayCategory;
     /** 제목 키워드입니다. 비어 있으면 모든 새 글을 LLM으로 보냅니다. */
     keywords: string[];
+    /** 제외 키워드입니다. 제목이나 본문에 하나라도 있으면 LLM 판단 없이 넘깁니다. */
+    excludeKeywords: string[];
     /** 대기 계정 ID 목록입니다. 앞에 있을수록 우선순위가 높습니다. */
     accountIds: string[];
     /** 나눔 글을 감지한 뒤 줄을 서기까지 기다릴 시간(초)입니다. */

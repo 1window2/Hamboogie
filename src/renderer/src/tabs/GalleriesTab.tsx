@@ -1,7 +1,8 @@
 import {useEffect, useState} from "react";
-import {INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, KEYWORD_MAX, newGallery} from "@shared/settings";
+import {INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
 import type {AccountView, GalleryConfig, Settings} from "@shared/types";
 import {NumberInput} from "../components/NumberInput";
+import {KeywordEditor} from "../components/KeywordEditor";
 
 interface Props {
     draft: Settings;
@@ -39,7 +40,6 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
     onChange(patch: Partial<GalleryConfig>): void;
     onRemove(): void;
 }) {
-    const [keywordInput, setKeywordInput] = useState("");
     const [checking, setChecking] = useState(false);
     const [checkError, setCheckError] = useState<string | null>(null);
     const checked = Boolean(gallery.galleryId) && gallery.checkedId === gallery.galleryId;
@@ -58,14 +58,7 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
             setChecking(false);
         }
     }
-    const keywordsFull = gallery.keywords.length >= KEYWORD_MAX;
 
-    function addKeywords() {
-        const added = keywordInput.split(/[,\n]/).map((keyword) => keyword.trim()).filter(Boolean);
-        const merged = [...new Set([...gallery.keywords, ...added])].slice(0, KEYWORD_MAX);
-        onChange({keywords: merged});
-        setKeywordInput("");
-    }
 
     function toggleAccount(accountId: string, checked: boolean) {
         onChange({accountIds: checked ? [...gallery.accountIds, accountId] : gallery.accountIds.filter((id) => id !== accountId)});
@@ -134,29 +127,18 @@ function GalleryCard({gallery, accounts, onChange, onRemove}: {
                 </fieldset>
             </div>
 
-            <div className="field">
-                <span>제목 키워드 ({gallery.keywords.length}/{KEYWORD_MAX})</span>
-                {gallery.keywords.length === 0 && (
-                    <div className="banner danger">
-                        ⚠ 키워드가 비어 있습니다. 갤러리의 모든 새 글이 LLM으로 전송되어, API 토큰이 매우 빠르게 소모되고 요금이 크게 나올 수 있습니다.
-                        나눔 글에 자주 쓰이는 키워드를 설정하는 것을 강력히 권장합니다.
-                    </div>
-                )}
-                <div className="chips">
-                    {gallery.keywords.map((keyword) => (
-                        <span key={keyword} className="chip">
-                            {keyword}
-                            <button aria-label={`${keyword} 삭제`} onClick={() => onChange({keywords: gallery.keywords.filter((item) => item !== keyword)})}>×</button>
-                        </span>
-                    ))}
-                </div>
-                <div className="row">
-                    <input value={keywordInput} disabled={keywordsFull} placeholder={keywordsFull ? "키워드는 최대 30개입니다" : "키워드 입력 (쉼표로 여러 개)"}
-                           onChange={(event) => setKeywordInput(event.target.value)}
-                           onKeyDown={(event) => event.key === "Enter" && addKeywords()}/>
-                    <button className="button small" disabled={keywordsFull || !keywordInput.trim()} onClick={addKeywords}>추가</button>
-                </div>
-            </div>
+            <KeywordEditor label="제목 키워드" keywords={gallery.keywords} onChange={(keywords) => onChange({keywords})}
+                           placeholder="키워드 입력 (쉼표로 여러 개)"
+                           notice={gallery.keywords.length === 0 && (
+                               <div className="banner danger">
+                                   ⚠ 키워드가 비어 있습니다. 갤러리의 모든 새 글이 LLM으로 전송되어, API 토큰이 매우 빠르게 소모되고 요금이 크게 나올 수 있습니다.
+                                   나눔 글에 자주 쓰이는 키워드를 설정하는 것을 강력히 권장합니다.
+                               </div>
+                           )}/>
+
+            <KeywordEditor label="제외 키워드" keywords={gallery.excludeKeywords} onChange={(excludeKeywords) => onChange({excludeKeywords})}
+                           placeholder="제목이나 본문에 있으면 넘길 단어 (쉼표로 여러 개)"
+                           notice={<small className="muted">제목이나 본문에 하나라도 있으면 LLM 판단 없이 넘깁니다. 예: 인증, 구매, 이벤트</small>}/>
 
             <div className="field">
                 <span>대기 계정 (위에 있을수록 먼저 줄을 섭니다)</span>

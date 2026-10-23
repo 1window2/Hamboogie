@@ -42,6 +42,12 @@ async function run(deps: Deps, input: DevTestInput): Promise<DevTestResult> {
 
     const context = {galleryId: TEST_GALLERY_ID, postNo: TEST_POST_NO};
     deps.logger.info(`${LABEL} 가짜 글 분석: "${title}"`, context);
+    // 실제 감시와 같이 제외 키워드부터 봅니다.
+    const excluded = deps.engine.excludedBy(gallery, title) ?? deps.engine.excludedBy(gallery, input.body);
+    if (excluded) {
+        deps.logger.info(`${LABEL} 넘어감: 제외 키워드 "${excluded}"`, context);
+        return {elapsedMs: 0, decision: null, plan: {kind: "skip", reason: `제외 키워드 "${excluded}"`}};
+    }
     const startedAt = Date.now();
     const {decision, plan} = await deps.engine.analyze(gallery, title, input.body, startedAt);
     const elapsedMs = Date.now() - startedAt;

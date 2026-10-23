@@ -9,7 +9,7 @@ import {createProvider, type LlmProvider} from "../llm/providers";
 import type {Logger} from "../logger";
 import {sendDiscordNotice} from "../notify/discord";
 import type {Ledger, SecretStore} from "../store";
-import {matchesKeywords} from "./keyword-filter";
+import {findKeyword, matchesKeywords} from "./keyword-filter";
 import {makePlan, type Plan} from "./planner";
 
 /** 한 번 확인할 때 최대로 넘겨볼 목록 페이지 수입니다. */
@@ -180,14 +180,25 @@ export class Engine {
         const {ledger, logger} = this.deps;
         if (ledger.has(gallery.galleryId, post.no)) return;
         if (!matchesKeywords(post.title, gallery.keywords)) return;
+        const context = {galleryId: gallery.galleryId, postNo: post.no};
+        const excludedByTitle = this.excludedBy(gallery, post.title);
+        if (excludedByTitle) {
+            logger.info(`넘어감: 제목에 제외 키워드 "${excludedByTitle}"`, context);
+            return;
+        }
 
-        logger.info(`키워드 일치: "${post.title}"`, {galleryId: gallery.galleryId, postNo: post.no});
+        logger.info(`키워드 일치: "${post.title}"`, context);
         const detectedAt = Date.now();
         let analysis: Analysis;
         try {
             const article = await this.deps.reader().articles.read(gallery.galleryId, post.no);
             const title = article.view_info?.subject ?? post.title;
             const body = htmlToText(article.view_main?.memo ?? "");
+            const excludedByBody = this.excludedBy(gallery, body);
+            if (excludedByBody) {
+                logger.info(`넘어감: 본문에 제외 키워드 "${excludedByBody}"`, context);
+                return;
+            }
             analysis = await this.analyze(gallery, title, body, detectedAt);
         } catch (error) {
             // 금방 지워진 글은 알릴 필요가 없습니다.
@@ -215,6 +226,11 @@ export class Engine {
         this.deps.logger.warn(`디시 앱 인증(app_id) 거절이 오래 이어져 읽기용 기기 정보를 새로 받습니다. ${minutes}분 뒤 다시 확인합니다.`);
         this.readerReady = false;
         await this.deps.resetReader();
+    }
+
+    /** 제외 키워드가 들어 있으면 그 키워드를 돌려줍니다. */
+    excludedBy(gallery: GalleryConfig, text: string): string | null {
+        return findKeyword(text, gallery.excludeKeywords ?? []);
     }
 
     /** 글 내용을 LLM으로 판단하고 행동 계획을 세웁니다. LLM 호출이 실패하면 알림 계획을 돌려줍니다. */

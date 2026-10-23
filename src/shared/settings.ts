@@ -40,6 +40,7 @@ export function newGallery(id: string): GalleryConfig {
         intervalSec: INTERVAL_DEFAULT_SEC,
         category: "food",
         keywords: [...DEFAULT_KEYWORDS],
+        excludeKeywords: [],
         accountIds: [],
         delaySec: 0
     };
@@ -73,6 +74,8 @@ export function normalizeGallery(gallery: GalleryConfig, accounts: AccountConfig
         delaySec: clamp(gallery.delaySec, 0, DELAY_MAX_SEC),
         category: gallery.category === "all" ? "all" : "food",
         keywords: normalizeKeywords(gallery.keywords),
+        // 이전 버전에서 저장한 설정에는 제외 키워드가 없습니다.
+        excludeKeywords: normalizeKeywords(gallery.excludeKeywords ?? []),
         accountIds: [...new Set(gallery.accountIds)].filter((id) => accountIds.has(id))
     };
 }
