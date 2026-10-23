@@ -10,7 +10,7 @@ describe("Ledger", () => {
         const ledger = new Ledger(dir);
         for (let no = 1; no <= 300; no++) expect(ledger.claim("gf2", no)).toBe(true);
         expect(ledger.claim("gf2", 1)).toBe(false);
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await ledger.flush();
 
         const saved = JSON.parse(readFileSync(join(dir, "ledger.json"), "utf8")) as string[];
         expect(saved).toHaveLength(300);
@@ -28,7 +28,7 @@ describe("Ledger.release", () => {
         ledger.claim("gf2", 2);
         ledger.release("gf2", 1);
         expect(ledger.has("gf2", 1)).toBe(false);
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await ledger.flush();
         expect(new Ledger(dir).has("gf2", 1)).toBe(false);
         expect(new Ledger(dir).has("gf2", 2)).toBe(true);
         expect(ledger.claim("gf2", 1)).toBe(true);
@@ -44,7 +44,7 @@ describe("HistoryStore", () => {
         store.subscribe((entry) => seen.push(entry.postNo));
         store.add({time: 1, galleryId: "gf2", postNo: 5, title: "햄버거 나눔", outcome: "success", detail: "테스터 계정으로 \"줄\""});
         store.add({time: 2, galleryId: "gf2", postNo: 6, title: "치킨 나눔", outcome: "failure", detail: "테스터: 오류"});
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await store.flush();
         expect(seen).toEqual([5, 6]);
         expect(new HistoryStore(dir).all().map((entry) => entry.outcome)).toEqual(["success", "failure"]);
     });

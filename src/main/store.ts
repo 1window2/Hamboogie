@@ -14,22 +14,48 @@ function readJson<T>(path: string, fallback: T): T {
     }
 }
 
-const writeQueues = new Map<string, Promise<void>>();
+interface FileWriter {
+    /** 아직 쓰지 않은 최신 내용입니다. */
+    pending: string | null;
+    /** 진행 중인 쓰기입니다. 끝나면 pending까지 모두 쓴 상태입니다. */
+    writing: Promise<void> | null;
+}
+
+const writers = new Map<string, FileWriter>();
 
 /**
- * 임시 파일에 쓴 뒤 바꿔치기합니다. 같은 파일에 대한 쓰기는 순서대로 하나씩 처리해서,
- * 동시에 저장할 때 임시 파일이 겹쳐 써져 내용이 깨지는 일을 막습니다.
+ * 임시 파일에 쓴 뒤 바꿔치기합니다. 같은 파일에 대한 쓰기는 하나씩 처리하고, 쓰는 동안 밀린 요청은
+ * 최신 내용 하나로 합칩니다. 동시에 저장해도 내용이 깨지지 않고, 연달아 기록해도 파일을 매번 다시 쓰지 않습니다.
+ * 돌려준 Promise는 이 호출의 내용(또는 그보다 최신 내용)이 디스크에 쓰였을 때 끝납니다.
  */
 function writeJson(path: string, value: unknown): Promise<void> {
-    const content = JSON.stringify(value, null, 2);
-    const write = async () => {
-        const temp = `${path}.tmp`;
-        await writeFile(temp, content, "utf8");
-        await rename(temp, path);
-    };
-    const next = (writeQueues.get(path) ?? Promise.resolve()).catch(() => {}).then(write);
-    writeQueues.set(path, next);
-    return next;
+    let writer = writers.get(path);
+    if (!writer) {
+        writer = {pending: null, writing: null};
+        writers.set(path, writer);
+    }
+    writer.pending = JSON.stringify(value, null, 2);
+    writer.writing ??= drain(path, writer);
+    return writer.writing;
+}
+
+async function drain(path: string, writer: FileWriter): Promise<void> {
+    try {
+        while (writer.pending !== null) {
+            const content = writer.pending;
+            writer.pending = null;
+            const temp = `${path}.tmp`;
+            await writeFile(temp, content, "utf8");
+            await rename(temp, path);
+        }
+    } finally {
+        writer.writing = null;
+    }
+}
+
+/** 이 파일에 밀린 쓰기가 모두 끝날 때까지 기다립니다. */
+function flushJson(path: string): Promise<void> {
+    return writers.get(path)?.writing?.catch(() => {}) ?? Promise.resolve();
 }
 
 /** 일반 설정입니다. 비밀 정보는 들어 있지 않습니다. */
@@ -141,6 +167,11 @@ export class Ledger {
         return true;
     }
 
+    /** 밀린 저장이 끝날 때까지 기다립니다. */
+    flush(): Promise<void> {
+        return flushJson(this.path);
+    }
+
     /** 기록을 되돌립니다. 예약한 줄 서기가 실행되지 못하고 취소됐을 때 씁니다. */
     release(galleryId: string, postNo: number): void {
         const key = Ledger.key(galleryId, postNo);
@@ -168,6 +199,11 @@ export class HistoryStore {
         if (this.entries.length > HISTORY_LIMIT) this.entries.splice(0, this.entries.length - HISTORY_LIMIT);
         void writeJson(this.path, this.entries).catch(() => {});
         for (const listener of this.listeners) listener(entry);
+    }
+
+    /** 밀린 저장이 끝날 때까지 기다립니다. */
+    flush(): Promise<void> {
+        return flushJson(this.path);
     }
 
     all(): HistoryEntry[] {
