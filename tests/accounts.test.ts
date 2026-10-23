@@ -140,26 +140,46 @@ describe("AccountManager 댓글 작성", () => {
     });
 });
 
-describe("AccountManager app_id 거절 복구", () => {
-    it("로그인 후 app_id가 거절되면 기기 정보를 새로 받아 OTP 없이 다시 로그인한다", async () => {
-        const {server, secrets, manager} = setup({"otp:acc1": "token-abc", "device:acc1": JSON.stringify({androidId: "old"})});
+describe("AccountManager app_id 거절 대응", () => {
+    function setupWithClock(secretsInit: Record<string, string>) {
+        let now = 1_000_000;
+        const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0, savedDeviceBroken: false};
+        const secrets = memorySecrets({"account:acc1": "pw", ...secretsInit});
+        const manager = new AccountManager(secrets, fakeClientFactory(server), () => now);
+        return {server, secrets, manager, advance: (ms: number) => (now += ms)};
+    }
+    const MINUTE = 60 * 1000;
+
+    it("로그인 직후 app_id가 거절돼도 로그인은 유지하고 기기 정보를 새로 받지 않는다. 쉬고 나면 디시콘을 다시 불러온다", async () => {
+        const {server, manager, advance} = setupWithClock({"otp:acc1": "token-abc", "device:acc1": JSON.stringify({androidId: "old"})});
         server.savedDeviceBroken = true;
         const status = await manager.login(ACCOUNT);
-        expect(status).toMatchObject({state: "logged_in", dcconCount: 1});
-        expect(status.state === "logged_in" && status.dcconError).toBeUndefined();
-        expect(server.clientsCreated).toBe(2);
-        expect(server.loginCalls).toEqual([{otpToken: "token-abc"}, {otpToken: "token-abc"}]);
-        expect(secrets.data["device:acc1"]).toBe(JSON.stringify({androidId: "1"}));
+        expect(status).toMatchObject({state: "logged_in", dcconCount: 0, dcconError: expect.stringContaining("일시적으로 거절")});
+        expect(server.clientsCreated).toBe(1);
+
+        // 쉬는 동안에는 다시 시도하지 않습니다.
+        server.savedDeviceBroken = false;
+        expect(await manager.maintain([ACCOUNT])).toBe(false);
+        advance(5 * MINUTE);
+        expect(await manager.maintain([ACCOUNT])).toBe(true);
+        expect(manager.status("acc1")).toMatchObject({state: "logged_in", dcconCount: 1});
+        expect(server.clientsCreated).toBe(1);
     });
 
-    it("댓글 작성 중 app_id가 거절되면 기기 정보를 새로 받아 다시 로그인한 뒤 한 번 더 시도한다", async () => {
-        const {server, manager} = setup({"otp:acc1": "token-abc", "device:acc1": JSON.stringify({androidId: "old"})});
+    it("댓글 작성 중 app_id가 거절되면 바로 실패로 처리하고, 30분 넘게 이어질 때만 기기 정보를 새로 받아 다시 시도한다", async () => {
+        const {server, manager, advance} = setupWithClock({"otp:acc1": "token-abc", "device:acc1": JSON.stringify({androidId: "old"})});
         await manager.login(ACCOUNT);
-        // 로그인 때는 멀쩡하던 기기 정보가 나중에(11시간 뒤 재발급 등) 거절되는 상황입니다.
-        const sessionClient = (manager as unknown as {sessions: Map<string, {client: DCInside}>}).sessions.get("acc1")!.client;
-        (sessionClient.comments as unknown as {write: () => Promise<never>}).write = async () => {
-            throw APP_ID_REFUSED();
+        const refuse = () => {
+            const client = (manager as unknown as {sessions: Map<string, {client: DCInside}>}).sessions.get("acc1")!.client;
+            (client.comments as unknown as {write: () => Promise<never>}).write = async () => {
+                throw APP_ID_REFUSED();
+            };
         };
+        refuse();
+        await expect(manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"})).rejects.toThrow("일시적으로 거절");
+        expect(server.clientsCreated).toBe(1);
+
+        advance(31 * MINUTE);
         await manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"});
         expect(server.written).toEqual(["줄"]);
         expect(server.clientsCreated).toBe(2);

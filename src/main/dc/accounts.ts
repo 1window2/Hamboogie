@@ -1,6 +1,7 @@
 import {AuthExpiredError, CaptchaRequiredError, DCInside, OtpRequiredError, type DeviceCredentials} from "@green-1052/dcinside.js";
 import type {AccountConfig, AccountStatus, MemberType} from "@shared/types";
 import type {SecretStore} from "../store";
+import {AppIdBackoff} from "./app-id-backoff";
 import type {CandidateAccount, CommentContent, OwnedDccon} from "../pipeline/planner";
 
 interface LoggedIn {
@@ -11,7 +12,12 @@ interface LoggedIn {
     /** 로그인 응답으로 판별한 계정 종류입니다. 알 수 없으면 null입니다. */
     detectedMemberType: MemberType | null;
     dccons: OwnedDccon[];
+    /** 보유 디시콘을 아직 못 불러왔으면 그 이유입니다. */
+    dcconError?: string;
+    appId: AppIdBackoff;
 }
+
+const APP_ID_REFUSED_MESSAGE = "디시 앱 인증(app_id) 발급이 일시적으로 거절되었습니다. 같은 IP에서 짧은 시간에 여러 번 발급받으면 한동안 막히며, 잠시 후 다시 시도합니다.";
 
 function describe(error: unknown): string {
     return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -32,8 +38,8 @@ async function saveDevice(secrets: Pick<SecretStore, "set">, key: `device:${stri
 }
 
 /**
- * `app_id` 발급이 거절된 오류인지 확인합니다. 같은 기기 정보(client_token)로 `app_id`를 반복 발급하면
- * 서버가 `service id mismatched`로 거절하므로, 이때는 기기 정보를 새로 받아야 합니다.
+ * `app_id` 발급이 거절된 오류인지 확인합니다. 같은 IP에서 짧은 시간에 여러 번 발급받으면
+ * 서버가 한동안 `service id mismatched`로 거절합니다. 대응 규칙은 `AppIdBackoff`에 있습니다.
  */
 export function isAppIdFailure(error: unknown): boolean {
     if (error instanceof AuthExpiredError && error.kind === "appId") return true;
@@ -61,7 +67,8 @@ export class AccountManager {
 
     constructor(
         private readonly secrets: Pick<SecretStore, "get" | "has" | "set" | "removeByPrefix">,
-        private readonly createClient: (credentials?: DeviceCredentials) => DCInside = (credentials) => new DCInside({credentials})
+        private readonly createClient: (credentials?: DeviceCredentials) => DCInside = (credentials) => new DCInside({credentials}),
+        private readonly now: () => number = Date.now
     ) {}
 
     status(accountId: string): AccountStatus {
@@ -71,7 +78,7 @@ export class AccountManager {
     /**
      * 로그인합니다. 저장된 OTP 토큰이 있으면 OTP 없이 통과하고, 없거나 만료됐으면 `otp_required` 상태가 됩니다.
      *
-     * 로그인 직후 보유 디시콘을 불러오며 `app_id`를 받아 두고, 발급이 거절되면 기기 정보를 새로 받아 한 번 다시 로그인합니다.
+     * 로그인 직후 보유 디시콘을 불러오며 `app_id`를 받아 둡니다. 발급이 거절돼도 로그인은 유지하고 디시콘은 나중에 다시 불러옵니다.
      *
      * @param otp 사용자가 입력한 OTP 6자리입니다.
      * @param freshDevice 저장된 기기 정보를 버리고 새로 받습니다.
@@ -115,22 +122,15 @@ export class AccountManager {
                 client,
                 nickname: session.result.name ?? account.loginId,
                 detectedMemberType: isGonick === 1 ? "gonick" : isGonick === 0 ? "semi" : null,
-                dccons: []
+                dccons: [],
+                appId: new AppIdBackoff(this.now)
             };
-            const dccons = await this.loadDccons(client);
-            // OTP를 썼더라도 위에서 OTP 토큰을 저장했으므로, 다시 로그인할 때는 OTP를 묻지 않습니다.
-            if (dccons.error !== undefined && isAppIdFailure(dccons.error) && !freshDevice) return this.doLogin(account, undefined, true);
+            // 보유 디시콘을 불러오면서 app_id도 받아 둡니다. 거절되면 로그인은 그대로 두고 디시콘만 나중에 다시 불러옵니다.
+            await this.loadDccons(loggedIn);
             // app_id를 받은 뒤에 저장해야 앱을 다시 켰을 때 app_id를 또 발급받지 않습니다.
             await saveDevice(this.secrets, deviceKey, client);
-            loggedIn.dccons = dccons.items;
             this.sessions.set(account.id, loggedIn);
-            return this.setStatus(account.id, {
-                state: "logged_in",
-                nickname: loggedIn.nickname,
-                memberType: this.memberType(account, loggedIn),
-                dcconCount: loggedIn.dccons.length,
-                ...(dccons.error !== undefined ? {dcconError: describe(dccons.error)} : {})
-            });
+            return this.setStatus(account.id, this.loggedInStatus(account, loggedIn));
         } catch (error) {
             this.sessions.delete(account.id);
             if (error instanceof OtpRequiredError) {
@@ -155,11 +155,21 @@ export class AccountManager {
         return status;
     }
 
-    private async loadDccons(client: DCInside): Promise<{items: OwnedDccon[]; error?: unknown}> {
+    private loggedInStatus(account: AccountConfig, loggedIn: LoggedIn): AccountStatus {
+        return {
+            state: "logged_in",
+            nickname: loggedIn.nickname,
+            memberType: this.memberType(account, loggedIn),
+            dcconCount: loggedIn.dccons.length,
+            ...(loggedIn.dcconError ? {dcconError: loggedIn.dcconError} : {})
+        };
+    }
+
+    private async loadDccons(loggedIn: LoggedIn): Promise<void> {
         try {
-            const response = await client.dccons.list();
+            const response = await loggedIn.client.dccons.list();
             const tabs = response.tab ?? [];
-            const items = (response.list ?? []).flatMap((list, index) => list.flatMap((item) =>
+            loggedIn.dccons = (response.list ?? []).flatMap((list, index) => list.flatMap((item) =>
                 item.package_idx !== undefined && item.detail_idx !== undefined
                     ? [{
                         packageIdx: item.package_idx,
@@ -168,10 +178,32 @@ export class AccountManager {
                         packageTitle: tabs[index]?.title ?? ""
                     }]
                     : []));
-            return {items};
+            loggedIn.dcconError = undefined;
+            loggedIn.appId.succeed();
         } catch (error) {
-            return {items: [], error};
+            if (isAppIdFailure(error)) {
+                loggedIn.appId.fail();
+                loggedIn.dcconError = APP_ID_REFUSED_MESSAGE;
+            } else {
+                loggedIn.dcconError = describe(error);
+            }
         }
+    }
+
+    /**
+     * 보유 디시콘을 못 불러온 계정은 잠시 쉰 뒤 다시 불러옵니다. 감시 중에 주기적으로 부릅니다.
+     * 상태가 바뀐 계정이 있으면 true를 돌려줍니다.
+     */
+    async maintain(accounts: AccountConfig[]): Promise<boolean> {
+        let changed = false;
+        for (const [id, loggedIn] of this.sessions) {
+            if (!loggedIn.dcconError || !loggedIn.appId.canTry()) continue;
+            await this.loadDccons(loggedIn);
+            const account = accounts.find((item) => item.id === id) ?? loggedIn.account;
+            this.setStatus(id, this.loggedInStatus(account, loggedIn));
+            changed = true;
+        }
+        return changed;
     }
 
     private memberType(account: AccountConfig, loggedIn: LoggedIn): MemberType | null {
@@ -189,21 +221,28 @@ export class AccountManager {
     }
 
     /**
-     * 댓글을 답니다. 로그인 세션이 만료됐거나 `app_id` 발급이 거절되면 다시 로그인한 뒤 한 번 더 시도합니다.
-     * `app_id` 문제일 때는 기기 정보도 새로 받습니다.
+     * 댓글을 답니다. 로그인 세션이 만료됐으면 다시 로그인한 뒤 한 번 더 시도합니다.
+     * app_id 발급이 거절되면 잠시 쉬어야 하므로 바로 실패로 처리하고, 거절이 오래 이어졌을 때만
+     * 기기 정보를 새로 받아 다시 로그인한 뒤 한 번 더 시도합니다.
      */
     async writeComment(accountId: string, galleryId: string, postNo: number, content: CommentContent): Promise<void> {
         const loggedIn = this.sessions.get(accountId);
         if (!loggedIn) throw new Error("로그인되지 않은 계정입니다.");
         try {
             await this.write(loggedIn.client, galleryId, postNo, content);
+            loggedIn.appId.succeed();
+            return;
         } catch (error) {
-            const appIdFailure = isAppIdFailure(error);
-            if (!(error instanceof AuthExpiredError) && !appIdFailure) throw error;
-            const status = await this.login(loggedIn.account, undefined, appIdFailure);
+            if (isAppIdFailure(error)) {
+                if (!loggedIn.appId.fail()) throw new Error(APP_ID_REFUSED_MESSAGE);
+            } else if (!(error instanceof AuthExpiredError)) {
+                throw error;
+            }
+            const freshDevice = isAppIdFailure(error);
+            const status = await this.login(loggedIn.account, undefined, freshDevice);
             const renewed = this.sessions.get(accountId);
             if (status.state !== "logged_in" || !renewed) {
-                throw new Error(`${appIdFailure ? "앱 인증(app_id)이 거절되어" : "세션이 만료되어"} 다시 로그인했지만 실패했습니다: ${"message" in status ? status.message : status.state}`);
+                throw new Error(`${freshDevice ? "앱 인증(app_id) 거절이 계속되어" : "세션이 만료되어"} 다시 로그인했지만 실패했습니다: ${"message" in status ? status.message : status.state}`);
             }
             await this.write(renewed.client, galleryId, postNo, content);
         }

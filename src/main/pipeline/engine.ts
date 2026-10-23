@@ -2,6 +2,7 @@ import type {DCInside, PostItem} from "@green-1052/dcinside.js";
 import {galleryProblems, PROVIDER_LABELS} from "@shared/settings";
 import type {GalleryConfig, Settings} from "@shared/types";
 import {isAppIdFailure, type AccountManager} from "../dc/accounts";
+import {AppIdBackoff} from "../dc/app-id-backoff";
 import {htmlToText} from "../dc/text";
 import type {Decision} from "../llm/decision";
 import {createProvider, type LlmProvider} from "../llm/providers";
@@ -36,6 +37,8 @@ export interface EngineDeps {
     secrets: SecretStore;
     logger: Logger;
     settings(): Settings;
+    /** 계정 상태가 바뀌었을 때(디시콘을 다시 불러온 경우 등) 화면을 갱신합니다. */
+    onAccountsChanged?(): void;
 }
 
 function postUrl(galleryId: string, postNo: number): string {
@@ -53,11 +56,15 @@ export class Engine {
     private readonly scheduled = new Map<ReturnType<typeof setTimeout>, {galleryId: string; postNo: number; useLedger: boolean}>();
     private readonly lastSeen = new Map<string, number>();
     private readerReady = false;
+    /** 읽기용 클라이언트의 app_id 발급이 거절됐을 때 목록 확인을 쉬는 규칙입니다. */
+    private readonly readerAppId: AppIdBackoff;
     private runId = 0;
     /** 같은 서비스/모델/키라면 LLM 클라이언트를 다시 만들지 않습니다. */
     private provider: {key: string; instance: LlmProvider} | null = null;
 
-    constructor(private readonly deps: EngineDeps) {}
+    constructor(private readonly deps: EngineDeps, now: () => number = Date.now) {
+        this.readerAppId = new AppIdBackoff(now);
+    }
 
     get running(): boolean {
         return this.watchers.size > 0;
@@ -121,8 +128,15 @@ export class Engine {
             this.watchers.delete(configId);
             return;
         }
+        if (await this.deps.accounts.maintain(this.deps.settings().accounts)) this.deps.onAccountsChanged?.();
+        // app_id 발급이 거절된 뒤에는 잠시 목록 확인을 쉽니다. 다시 시도해 봐야 거절만 늘어납니다.
+        if (!this.readerAppId.canTry()) {
+            this.schedule(configId, runId, (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
+            return;
+        }
         try {
             const posts = await this.fetchNewPosts(gallery);
+            this.readerAppId.succeed();
             for (const post of posts) {
                 if (runId !== this.runId) return;
                 await this.handlePost(gallery, post);
@@ -187,10 +201,18 @@ export class Engine {
         await this.dispatch(gallery, post, analysis.plan);
     }
 
-    /** 읽기용 클라이언트의 app_id 발급이 거절됐으면 기기 정보를 새로 받습니다. 다음 확인부터 새 클라이언트를 씁니다. */
+    /**
+     * 읽기용 클라이언트의 app_id 발급이 거절됐으면 잠시 목록 확인을 쉽니다.
+     * 거절이 오래 이어질 때만 기기 정보를 새로 받습니다.
+     */
     private async recoverReader(error: unknown): Promise<void> {
         if (!isAppIdFailure(error)) return;
-        this.deps.logger.warn("읽기용 앱 인증(app_id)이 거절되어 기기 정보를 새로 받습니다.");
+        const minutes = Math.round(this.readerAppId.pauseMs / 60000);
+        if (!this.readerAppId.fail()) {
+            this.deps.logger.warn(`디시 앱 인증(app_id) 발급이 거절되어 ${minutes}분 동안 목록 확인을 쉽니다.`);
+            return;
+        }
+        this.deps.logger.warn(`디시 앱 인증(app_id) 거절이 오래 이어져 읽기용 기기 정보를 새로 받습니다. ${minutes}분 뒤 다시 확인합니다.`);
         this.readerReady = false;
         await this.deps.resetReader();
     }

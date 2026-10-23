@@ -18,6 +18,7 @@ function setup(notifyOnSuccess = false) {
         settings: () => ({...defaultSettings(), notifyOnSuccess}),
         accounts: {
             candidates: () => [],
+            maintain: async () => false,
             nickname: () => "테스터",
             writeComment: async (_accountId: string, _galleryId: string, postNo: number) => {
                 written.push(postNo);

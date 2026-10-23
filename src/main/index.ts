@@ -36,7 +36,8 @@ async function main(): Promise<void> {
         ledger,
         secrets,
         logger,
-        settings: () => settingsStore.get()
+        settings: () => settingsStore.get(),
+        onAccountsChanged: () => pushState()
     });
 
     let window: BrowserWindow | null = null;
