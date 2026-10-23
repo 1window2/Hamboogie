@@ -2,12 +2,14 @@
 //
 // 입력한 제목/본문을 테스트 갤러리 1번 글의 내용인 것처럼 LLM 판단 → 줄 서기 계획 → 실제 댓글까지 돌립니다.
 // 디시에는 글을 쓰지 않으며, 댓글은 아래에 고정한 테스트 갤러리의 1번 글에만 답니다.
-import {ipcMain} from "electron";
-import type {DevTestInput, DevTestResult, Settings} from "@shared/types";
+import type {DCInside} from "@green-1052/dcinside.js";
+import type {DevProbe, DevTestInput, DevTestResult, Settings} from "@shared/types";
 import type {AccountManager} from "../dc/accounts";
+import {htmlToText} from "../dc/text";
 import type {Logger} from "../logger";
 import type {Engine} from "../pipeline/engine";
 import type {Plan} from "../pipeline/planner";
+import type {TrustedHandle} from "../index";
 
 /** 사람이 없는 테스트용 갤러리와 글입니다. 다른 갤러리에는 테스트 댓글을 달지 않습니다. */
 export const TEST_GALLERY_ID = "asgeir";
@@ -17,6 +19,8 @@ const LABEL = "[테스트]";
 
 interface Deps {
     engine: Engine;
+    /** 글을 읽을 클라이언트(로그인된 계정 또는 읽기용)입니다. */
+    reader(): DCInside;
     accounts: AccountManager;
     logger: Logger;
     settings(): Settings;
@@ -42,19 +46,36 @@ async function run(deps: Deps, input: DevTestInput): Promise<DevTestResult> {
 
     const context = {galleryId: TEST_GALLERY_ID, postNo: TEST_POST_NO};
     deps.logger.info(`${LABEL} 가짜 글 분석: "${title}"`, context);
+    // 실제 감시와 같이 제외 키워드부터 봅니다.
+    const excluded = deps.engine.excludedBy(gallery, title) ?? deps.engine.excludedBy(gallery, input.body);
+    if (excluded) {
+        deps.logger.info(`${LABEL} 넘어감: 제외 키워드 "${excluded}"`, context);
+        return {elapsedMs: 0, decision: null, plan: {kind: "skip", reason: `제외 키워드 "${excluded}"`}};
+    }
     const startedAt = Date.now();
     const {decision, plan} = await deps.engine.analyze(gallery, title, input.body, startedAt);
     const elapsedMs = Date.now() - startedAt;
     const summary = summarize(plan, deps.accounts);
 
     if (input.act) {
-        await deps.engine.dispatch(gallery, {no: TEST_POST_NO, title}, plan, {useLedger: false, label: LABEL});
+        await deps.engine.dispatch(gallery, {no: TEST_POST_NO, title}, plan, {label: LABEL});
     } else {
         deps.logger.info(`${LABEL} 판단만 했습니다 (${plan.kind}). 댓글과 알림은 보내지 않았습니다.`, context);
     }
     return {elapsedMs, decision: decision as Record<string, unknown> | null, plan: summary};
 }
 
-export function registerDevTestIpc(deps: Deps): void {
-    ipcMain.handle("devTestRun", (_event, input: DevTestInput) => run(deps, input));
+export function registerDevTestIpc(deps: Deps, handle: TrustedHandle): void {
+    handle("devTestRun", (_event, input: DevTestInput) => run(deps, input));
+    // 디시 응답을 직접 확인하는 용도입니다. 테스트 갤러리(asgeir)에만 요청하며, 부를 때마다 요청 한 번입니다.
+    handle("devProbe", async (_event, probe: DevProbe) => {
+        const articles = deps.reader().articles;
+        if (probe.kind === "read") {
+            const article = await articles.read(TEST_GALLERY_ID, probe.no);
+            return {title: article.view_info?.subject ?? "", body: htmlToText(article.view_main?.memo ?? "")};
+        }
+        const response = await articles.list({gallery: TEST_GALLERY_ID, ...(probe.search ? {search: probe.search} : {})});
+        return (response.gall_list ?? []).map((item) => ({no: item.no, subject: item.subject, date: item.date_time}));
+    });
 }
+

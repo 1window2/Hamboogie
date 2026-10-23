@@ -1,9 +1,10 @@
 import {useState} from "react";
 import type {AccountConfig, AccountStatus, AccountView, AppState, Settings} from "@shared/types";
+import type {DraftSetter} from "../App";
 
 interface Props {
     draft: Settings;
-    setDraft(settings: Settings): void;
+    setDraft: DraftSetter;
     state: AppState;
     run(action: () => Promise<AppState>, keepDraft?: boolean): Promise<void>;
 }

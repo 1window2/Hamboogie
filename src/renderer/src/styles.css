@@ -231,8 +231,10 @@ fieldset {
     gap: 6px;
 }
 
-.field > span {
+.field > span,
+.field > legend {
     font-weight: 600;
+    padding: 0;
 }
 
 .field.inline {
@@ -459,4 +461,60 @@ textarea {
     border-radius: 6px;
     padding: 10px;
     overflow-x: auto;
+}
+
+.check-status {
+    margin-top: -6px;
+}
+
+.badge.failure {
+    background: var(--danger-bg);
+    color: var(--error);
+}
+
+.history {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.history li {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+}
+
+.history li:last-child {
+    border-bottom: none;
+}
+
+.history-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.history-head a {
+    color: var(--text);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.history-detail {
+    margin-top: 4px;
+    font-size: 13px;
+    color: var(--muted);
+    white-space: pre-line;
+}
+
+.version {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--muted);
+    align-self: flex-end;
+    margin-bottom: 2px;
 }
