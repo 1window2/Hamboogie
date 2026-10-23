@@ -7,7 +7,7 @@ import {Engine, type EngineDeps} from "../src/main/pipeline/engine";
 import {Logger} from "../src/main/logger";
 import {Ledger} from "../src/main/store";
 
-function setup() {
+function setup(notifyOnSuccess = false) {
     const dir = mkdtempSync(join(tmpdir(), "hamboogie-engine-"));
     const ledger = new Ledger(dir);
     const logger = new Logger(join(dir, "test.log"));
@@ -15,7 +15,7 @@ function setup() {
     const deps = {
         ledger,
         logger,
-        settings: () => defaultSettings(),
+        settings: () => ({...defaultSettings(), notifyOnSuccess}),
         accounts: {
             candidates: () => [],
             nickname: () => "테스터",
@@ -52,5 +52,25 @@ describe("Engine 예약된 줄 서기", () => {
         expect(written).toEqual([11]);
         engine.stop();
         expect(ledger.has("gf2", 11)).toBe(true);
+    });
+});
+
+describe("Engine 성공 알림", () => {
+    const gallery = {...newGallery("g"), galleryId: "gf2"};
+    const plan = {kind: "comment" as const, notBefore: Date.now(), attempts: [{accountId: "a", content: {type: "text" as const, text: "줄"}}]};
+    const triedToNotify = (logger: Logger) => logger.recent().some((entry) => entry.message.includes("Discord 웹훅이 설정되지 않아"));
+
+    it("기본값(꺼짐)이면 성공해도 알리지 않는다", async () => {
+        const {engine, logger} = setup(false);
+        await engine.dispatch(gallery, {no: 20, title: "나눔"}, plan);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(triedToNotify(logger)).toBe(false);
+    });
+
+    it("켜면 성공했을 때도 알린다", async () => {
+        const {engine, logger} = setup(true);
+        await engine.dispatch(gallery, {no: 21, title: "나눔"}, plan);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(triedToNotify(logger)).toBe(true);
     });
 });

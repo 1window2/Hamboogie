@@ -261,7 +261,9 @@ export class Engine {
             const label = attempt.content.type === "text" ? `"${attempt.content.text}"` : `디시콘 "${attempt.content.dccon.title}"`;
             try {
                 await accounts.writeComment(attempt.accountId, gallery.galleryId, post.no, attempt.content);
-                logger.success(`${prefix}줄 서기 성공: ${accounts.nickname(attempt.accountId)} 계정으로 ${label}`, context);
+                const summary = `${accounts.nickname(attempt.accountId)} 계정으로 ${label}`;
+                logger.success(`${prefix}줄 서기 성공: ${summary}`, context);
+                if (this.deps.settings().notifyOnSuccess) await this.alert(`${prefix}줄 서기 성공: ${post.title}`, summary, context, true);
                 return;
             } catch (error) {
                 const message = `${accounts.nickname(attempt.accountId)}: ${errorMessage(error)}`;
@@ -277,7 +279,7 @@ export class Engine {
     }
 
     /** Discord로 알립니다. 글과 관련된 알림이면 글 링크를 붙입니다. */
-    async alert(title: string, description: string, post?: {galleryId: string; postNo: number}): Promise<void> {
+    async alert(title: string, description: string, post?: {galleryId: string; postNo: number}, success = false): Promise<void> {
         const {logger} = this.deps;
         const webhookUrl = this.deps.settings().discordWebhookUrl;
         if (!webhookUrl) {
@@ -285,7 +287,7 @@ export class Engine {
             return;
         }
         try {
-            await sendDiscordNotice(webhookUrl, {title, description, ...(post ? {url: postUrl(post.galleryId, post.postNo)} : {})});
+            await sendDiscordNotice(webhookUrl, {title, description, success, ...(post ? {url: postUrl(post.galleryId, post.postNo)} : {})});
         } catch (error) {
             logger.error(`Discord 알림 전송 실패: ${errorMessage(error)}`, post);
         }

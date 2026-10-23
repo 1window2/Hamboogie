@@ -41,7 +41,12 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
 
             <section className="card">
                 <h2>Discord 알림</h2>
-                <p className="muted">줄 서기에 실패했거나 자동으로 판단할 수 없는 글이 있을 때만 알림을 보냅니다.</p>
+                <p className="muted">줄 서기에 실패했거나 자동으로 판단할 수 없는 글이 있을 때 알림을 보냅니다.</p>
+                <label className="check">
+                    <input type="checkbox" checked={draft.notifyOnSuccess}
+                           onChange={(event) => setDraft({...draft, notifyOnSuccess: event.target.checked})}/>
+                    줄 서기에 성공했을 때도 알림 받기
+                </label>
                 <label className="field">
                     <span>웹훅 주소</span>
                     <div className="row">

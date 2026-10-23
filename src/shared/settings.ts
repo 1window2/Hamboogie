@@ -26,7 +26,8 @@ export function defaultSettings(): Settings {
         galleries: [],
         accounts: [],
         llm: {provider: "gemini", models: {...DEFAULT_MODELS}},
-        discordWebhookUrl: ""
+        discordWebhookUrl: "",
+        notifyOnSuccess: false
     };
 }
 
@@ -87,7 +88,8 @@ export function normalizeSettings(settings: Settings): Settings {
             provider: settings.llm.provider,
             models: {...DEFAULT_MODELS, ...settings.llm.models}
         },
-        discordWebhookUrl: settings.discordWebhookUrl.trim()
+        discordWebhookUrl: settings.discordWebhookUrl.trim(),
+        notifyOnSuccess: settings.notifyOnSuccess === true
     };
 }
 

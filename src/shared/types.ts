@@ -44,6 +44,8 @@ export interface Settings {
     accounts: AccountConfig[];
     llm: LlmConfig;
     discordWebhookUrl: string;
+    /** 줄 서기에 성공했을 때도 Discord로 알립니다. 기본은 꺼짐(실패와 판단 불가만 알림)입니다. */
+    notifyOnSuccess: boolean;
 }
 
 /** 비밀 정보 종류입니다. 값은 renderer로 절대 보내지 않습니다. */
