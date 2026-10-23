@@ -1,11 +1,12 @@
 import {join} from "node:path";
-import {app, BrowserWindow, ipcMain, shell} from "electron";
+import {app, BrowserWindow, ipcMain, Notification, shell} from "electron";
 import type {AccountConfig, AppState, LlmProviderId, SecretKey, Settings} from "@shared/types";
 import {AccountManager, createReader, persistReader} from "./dc/accounts";
 import {Logger} from "./logger";
 import {sendDiscordNotice} from "./notify/discord";
 import {Engine} from "./pipeline/engine";
 import {Ledger, SecretStore, SettingsStore} from "./store";
+import {createTray} from "./tray";
 
 const PROVIDERS: LlmProviderId[] = ["gemini", "openai", "claude"];
 
@@ -57,8 +58,11 @@ async function main(): Promise<void> {
         };
     }
 
+    let tray: {update(): void} | null = null;
+
     function pushState(): void {
         window?.webContents.send("state", state());
+        tray?.update();
     }
 
     logger.subscribe((entry) => window?.webContents.send("log", entry));
@@ -106,10 +110,12 @@ async function main(): Promise<void> {
     });
     ipcMain.handle("start", () => {
         engine.start();
+        tray?.update();
         return state();
     });
     ipcMain.handle("stop", () => {
         engine.stop();
+        tray?.update();
         return state();
     });
     ipcMain.handle("testWebhook", async () => {
@@ -124,40 +130,84 @@ async function main(): Promise<void> {
         }
     });
 
-    window = new BrowserWindow({
-        width: 1100,
-        height: 780,
-        minWidth: 860,
-        minHeight: 600,
-        title: "Hamboogie",
-        webPreferences: {
-            preload: join(import.meta.dirname, "../preload/index.cjs"),
-            contextIsolation: true,
-            sandbox: true,
-            nodeIntegration: false
+    // 창을 닫으면 앱을 끄지 않고 트레이로 내려 감시를 계속합니다. 끄려면 트레이 메뉴의 "종료"를 씁니다.
+    let quitting = false;
+    let toldAboutTray = false;
+
+    async function createWindow(): Promise<BrowserWindow> {
+        const created = new BrowserWindow({
+            width: 1100,
+            height: 780,
+            minWidth: 860,
+            minHeight: 600,
+            title: "Hamboogie",
+            webPreferences: {
+                preload: join(import.meta.dirname, "../preload/index.cjs"),
+                contextIsolation: true,
+                sandbox: true,
+                nodeIntegration: false
+            }
+        });
+        created.on("closed", () => {
+            if (window === created) window = null;
+        });
+        created.on("close", (event) => {
+            if (quitting) return;
+            event.preventDefault();
+            created.hide();
+            if (!toldAboutTray && Notification.isSupported()) {
+                toldAboutTray = true;
+                new Notification({title: "Hamboogie", body: "창을 닫아도 트레이에서 계속 실행됩니다. 끄려면 트레이 메뉴에서 종료를 누르세요."}).show();
+            }
+        });
+        // 외부 링크는 앱 안이 아니라 기본 브라우저로 엽니다.
+        created.webContents.setWindowOpenHandler(({url}) => {
+            if (url.startsWith("https://")) void shell.openExternal(url);
+            return {action: "deny"};
+        });
+        if (process.env["ELECTRON_RENDERER_URL"]) await created.loadURL(process.env["ELECTRON_RENDERER_URL"]);
+        else await created.loadFile(join(import.meta.dirname, "../renderer/index.html"));
+        return created;
+    }
+
+    function showWindow(): void {
+        // 창이 어떤 이유로든 없어졌으면 새로 만듭니다.
+        if (!window) {
+            void createWindow().then((created) => {
+                window = created;
+            });
+            return;
         }
-    });
-    window.on("closed", () => {
-        window = null;
-    });
-    app.on("second-instance", () => {
-        if (!window) return;
         if (window.isMinimized()) window.restore();
+        window.show();
         window.focus();
-    });
-    // 외부 링크는 앱 안이 아니라 기본 브라우저로 엽니다.
-    window.webContents.setWindowOpenHandler(({url}) => {
-        if (url.startsWith("https://")) void shell.openExternal(url);
-        return {action: "deny"};
-    });
+    }
 
-    if (process.env["ELECTRON_RENDERER_URL"]) await window.loadURL(process.env["ELECTRON_RENDERER_URL"]);
-    else await window.loadFile(join(import.meta.dirname, "../renderer/index.html"));
-
-    app.on("window-all-closed", () => {
+    app.on("before-quit", () => {
+        quitting = true;
         engine.stop();
-        app.quit();
     });
+    // 창이 모두 없어져도 트레이에서 계속 실행합니다. (리스너가 없으면 Electron이 앱을 끕니다)
+    app.on("window-all-closed", () => {});
+    app.on("second-instance", showWindow);
+    app.on("activate", showWindow);
+
+    tray = createTray({
+        showWindow,
+        running: () => engine.running,
+        watching: () => engine.watching,
+        start: () => {
+            engine.start();
+            pushState();
+        },
+        stop: () => {
+            engine.stop();
+            pushState();
+        },
+        quit: () => app.quit()
+    });
+
+    window = await createWindow();
 
     // 비밀번호가 저장된 계정은 앱을 켤 때 자동으로 로그인합니다. OTP 토큰이 없으면 OTP 입력을 기다립니다.
     // 실패하면 줄을 설 수 없으니 Discord로도 알립니다.
