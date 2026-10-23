@@ -84,6 +84,14 @@ export interface LogEntry {
     postNo?: number;
 }
 
+/** 새 버전 상태입니다. Windows는 받아서 설치하고, macOS는 다운로드 페이지만 알려줍니다. */
+export type UpdateState =
+    | {state: "idle"}
+    | {state: "downloading"; version: string; percent: number}
+    | {state: "ready"; version: string}
+    | {state: "available"; version: string; url: string}
+    | {state: "error"; message: string};
+
 export interface AppState {
     settings: Settings;
     accounts: AccountView[];
@@ -91,6 +99,8 @@ export interface AppState {
     running: boolean;
     /** 감시 중인 갤러리 수입니다. */
     watching: number;
+    version: string;
+    update: UpdateState;
 }
 
 /** 줄 서기 기록 한 건입니다. */
@@ -138,6 +148,8 @@ export interface HamboogieApi {
     testWebhook(): Promise<{ok: boolean; message: string}>;
     getLogs(): Promise<LogEntry[]>;
     getHistory(): Promise<HistoryEntry[]>;
+    /** 받아 둔 업데이트를 설치하고 다시 켭니다(Windows). */
+    installUpdate(): Promise<void>;
     onHistory(listener: (entry: HistoryEntry) => void): () => void;
     onLog(listener: (entry: LogEntry) => void): () => void;
     onState(listener: (state: AppState) => void): () => void;

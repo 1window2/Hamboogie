@@ -16,3 +16,7 @@ mac:
   target: dmg
   category: public.app-category.utilities
   artifactName: ${productName}-${version}-${arch}.${ext}
+publish:
+  provider: github
+  owner: 1window2
+  repo: Hamboogie

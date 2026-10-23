@@ -1,6 +1,6 @@
 {
   "name": "hamboogie",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "디시인사이드 나눔 글 자동 줄서기 데스크톱 프로그램",
   "license": "GPL-3.0-only",
@@ -17,7 +17,6 @@
     "dist:mac": "electron-vite build && electron-builder --mac",
     "login-test": "node scripts/login-test.mjs"
   },
-  "dependencies": {},
   "devDependencies": {
     "@anthropic-ai/sdk": "^1.1.0",
     "@google/genai": "^2.30.0",
@@ -28,6 +27,7 @@
     "@vitejs/plugin-react": "^6.1.2",
     "electron": "^44.9.3",
     "electron-builder": "^26.15.3",
+    "electron-updater": "^6.8.9",
     "electron-vite": "^6.0.0",
     "openai": "^7.42.0",
     "react": "^19.3.1",

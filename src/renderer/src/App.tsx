@@ -54,7 +54,7 @@ export function App() {
     return (
         <div className="app">
             <header className="header">
-                <h1 className="brand"><img src={iconUrl} alt="" width={26} height={26}/>Hamboogie</h1>
+                <h1 className="brand"><img src={iconUrl} alt="" width={26} height={26}/>Hamboogie<small className="version">v{state.version}</small></h1>
                 <nav className="tabs">
                     {TABS.map((item) => (
                         <button key={item.id} className={tab === item.id ? "tab active" : "tab"} onClick={() => setTab(item.id)}>
@@ -73,6 +73,21 @@ export function App() {
                 </div>
             </header>
 
+            {state.update.state === "ready" && (
+                <div className="banner info">
+                    새 버전 {state.update.version}을 받아 두었습니다. 지금 다시 시작하거나, 앱을 종료할 때 자동으로 설치됩니다.
+                    <button className="button primary small" onClick={() => void window.hamboogie.installUpdate()}>다시 시작해서 업데이트</button>
+                </div>
+            )}
+            {state.update.state === "downloading" && (
+                <div className="banner info">새 버전 {state.update.version}을 받는 중입니다… {state.update.percent}%</div>
+            )}
+            {state.update.state === "available" && (
+                <div className="banner info">
+                    새 버전 {state.update.version}이 나왔습니다.
+                    <a className="button primary small" href={state.update.url} target="_blank" rel="noreferrer">다운로드 페이지 열기</a>
+                </div>
+            )}
             {error && <div className="banner error">{error}</div>}
             {dirty && !["history", "logs", "devTest"].includes(tab) && (
                 <div className="banner unsaved">

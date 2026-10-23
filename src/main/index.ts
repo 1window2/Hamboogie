@@ -8,6 +8,7 @@ import {sendDiscordNotice} from "./notify/discord";
 import {Engine} from "./pipeline/engine";
 import {HistoryStore, Ledger, SecretStore, SettingsStore} from "./store";
 import {createTray} from "./tray";
+import {startUpdater, type Updater} from "./updater";
 
 const PROVIDERS: LlmProviderId[] = ["gemini", "openai", "claude"];
 
@@ -58,11 +59,14 @@ async function main(): Promise<void> {
             })),
             secretsSet,
             running: engine.running,
-            watching: engine.watching
+            watching: engine.watching,
+            version: app.getVersion(),
+            update: updater?.state() ?? {state: "idle"}
         };
     }
 
     let tray: {update(): void} | null = null;
+    let updater: Updater | null = null;
 
     function pushState(): void {
         window?.webContents.send("state", state());
@@ -81,6 +85,7 @@ async function main(): Promise<void> {
     ipcMain.handle("getState", () => state());
     ipcMain.handle("getLogs", () => logger.recent());
     ipcMain.handle("getHistory", () => history.all());
+    ipcMain.handle("installUpdate", () => updater?.install());
     ipcMain.handle("saveSettings", async (_event, next: Settings) => {
         const removed = settingsStore.get().accounts.filter((account) => !next.accounts.some((item) => item.id === account.id));
         for (const account of removed) await accounts.remove(account.id);
@@ -215,6 +220,10 @@ async function main(): Promise<void> {
     });
 
     window = await createWindow();
+    // 업데이트 설치는 창을 먼저 닫으므로, 트레이로 숨기지 않고 실제로 종료하도록 표시합니다.
+    updater = startUpdater(() => pushState(), () => {
+        quitting = true;
+    });
 
     // 비밀번호가 저장된 계정은 앱을 켤 때 자동으로 로그인합니다. OTP 토큰이 없으면 OTP 입력을 기다립니다.
     // 실패하면 줄을 설 수 없으니 Discord로도 알립니다.
