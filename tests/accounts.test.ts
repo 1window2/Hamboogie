@@ -1,6 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {AuthExpiredError, DCInsideError, OtpRequiredError, type DCInside, type DeviceCredentials, type LoginOptions} from "@green-1052/dcinside.js";
 import {AccountManager} from "../src/main/dc/accounts";
+import {AppIdBackoff} from "../src/main/dc/app-id-backoff";
 import type {AccountConfig} from "@shared/types";
 
 const ACCOUNT: AccountConfig = {id: "acc1", loginId: "tester", memberTypeOverride: "auto"};
@@ -16,9 +17,6 @@ function memorySecrets(initial: Record<string, string> = {}) {
             if (value) data[key] = value;
             else delete data[key];
         },
-        removeByPrefix: async (prefix: string) => {
-            for (const key of Object.keys(data)) if (key.startsWith(prefix)) delete data[key];
-        }
     };
 }
 
@@ -145,7 +143,8 @@ describe("AccountManager app_id 거절 대응", () => {
         let now = 1_000_000;
         const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0, savedDeviceBroken: false};
         const secrets = memorySecrets({"account:acc1": "pw", ...secretsInit});
-        const manager = new AccountManager(secrets, fakeClientFactory(server), () => now);
+        const clock = () => now;
+        const manager = new AccountManager(secrets, fakeClientFactory(server), new AppIdBackoff(clock), clock);
         return {server, secrets, manager, advance: (ms: number) => (now += ms)};
     }
     const MINUTE = 60 * 1000;
@@ -183,5 +182,14 @@ describe("AccountManager app_id 거절 대응", () => {
         await manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"});
         expect(server.written).toEqual(["줄"]);
         expect(server.clientsCreated).toBe(2);
+    });
+});
+
+describe("AccountManager 계정 삭제", () => {
+    it("앞부분이 같은 다른 키는 지우지 않는다", async () => {
+        const {secrets, manager} = setup({"otp:acc1": "token-abc", "account:acc10": "other", "device:reader": "r"});
+        await manager.login(ACCOUNT);
+        await manager.remove("acc1");
+        expect(Object.keys(secrets.data).sort()).toEqual(["account:acc10", "device:reader"]);
     });
 });

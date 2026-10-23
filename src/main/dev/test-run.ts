@@ -54,7 +54,7 @@ async function run(deps: Deps, input: DevTestInput): Promise<DevTestResult> {
     const summary = summarize(plan, deps.accounts);
 
     if (input.act) {
-        await deps.engine.dispatch(gallery, {no: TEST_POST_NO, title}, plan, {useLedger: false, label: LABEL});
+        await deps.engine.dispatch(gallery, {no: TEST_POST_NO, title}, plan, {label: LABEL});
     } else {
         deps.logger.info(`${LABEL} 판단만 했습니다 (${plan.kind}). 댓글과 알림은 보내지 않았습니다.`, context);
     }

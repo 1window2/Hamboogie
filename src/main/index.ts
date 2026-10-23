@@ -1,9 +1,10 @@
 import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
-import {app, BrowserWindow, ipcMain, Notification, shell} from "electron";
+import {app, BrowserWindow, ipcMain, Notification, shell, type IpcMainInvokeEvent} from "electron";
 import type {AccountConfig, AppState, LlmProviderId, SecretKey, Settings} from "@shared/types";
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
 import {AccountManager, createReader, persistReader} from "./dc/accounts";
+import {AppIdBackoff} from "./dc/app-id-backoff";
 import {checkGallery} from "./dc/gallery-check";
 import {Logger} from "./logger";
 import {sendDiscordNotice} from "./notify/discord";
@@ -13,6 +14,18 @@ import {createTray} from "./tray";
 import {startUpdater, type Updater} from "./updater";
 
 const PROVIDERS: LlmProviderId[] = ["gemini", "openai", "claude"];
+
+/** 기본 브라우저로 열어도 되는 주소입니다: 디시 글과 갤러리, 이 저장소의 GitHub 페이지. */
+function isAllowedExternalUrl(raw: string): boolean {
+    try {
+        const url = new URL(raw);
+        if (url.protocol !== "https:") return false;
+        if (/(^|\.)dcinside\.com$/.test(url.hostname)) return true;
+        return url.hostname === "github.com" && url.pathname.startsWith("/1window2/Hamboogie/");
+    } catch {
+        return false;
+    }
+}
 
 async function main(): Promise<void> {
     // 앱이 두 개 뜨면 감시 엔진도 두 개가 되어 같은 글에 댓글이 두 번 달릴 수 있으므로 하나만 실행합니다.
@@ -50,7 +63,9 @@ async function main(): Promise<void> {
         fakeClient = createFakeClientFactory((message) => logger.info(`[오프라인] ${message}`));
         logger.warn("오프라인 모드입니다. 디시 대신 가짜 글과 가짜 계정을 씁니다.");
     }
-    const accounts = new AccountManager(secrets, fakeClient);
+    // app_id 발급 거절은 IP 단위라 읽기용 클라이언트와 계정들이 대기 상태를 함께 씁니다.
+    const appId = new AppIdBackoff();
+    const accounts = new AccountManager(secrets, fakeClient, appId);
     let reader = fakeClient ? fakeClient() : createReader(secrets);
     const engine = new Engine({
         reader: () => reader,
@@ -58,6 +73,7 @@ async function main(): Promise<void> {
         resetReader: async () => {
             reader = fakeClient ? fakeClient() : createReader(secrets, true);
         },
+        appId,
         accounts,
         ledger,
         history,
@@ -106,17 +122,31 @@ async function main(): Promise<void> {
         registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get()});
     }
 
-    ipcMain.handle("getState", () => state());
-    ipcMain.handle("getLogs", () => logger.recent());
-    ipcMain.handle("getHistory", () => history.all());
-    ipcMain.handle("installUpdate", () => updater?.install());
-    ipcMain.handle("saveSettings", async (_event, next: Settings) => {
+    // 앱 화면(개발 서버 또는 앱에 들어 있는 index.html)에서 온 요청만 받습니다.
+    // 창이 다른 페이지로 넘어가는 것은 아래에서 막지만, 혹시 다른 페이지가 preload API를 쓰려 해도 거절합니다.
+    const rendererUrl = process.env["ELECTRON_RENDERER_URL"];
+    const fromApp = (event: IpcMainInvokeEvent): boolean => {
+        const url = event.senderFrame?.url ?? "";
+        return rendererUrl ? url.startsWith(rendererUrl) : url.startsWith("file://") && url.includes("/renderer/index.html");
+    };
+    const handle = <A extends unknown[], R>(channel: string, listener: (event: IpcMainInvokeEvent, ...args: A) => R) => {
+        ipcMain.handle(channel, (event, ...args) => {
+            if (!fromApp(event)) throw new Error("허용되지 않은 화면에서 온 요청입니다.");
+            return listener(event, ...(args as A));
+        });
+    };
+
+    handle("getState", () => state());
+    handle("getLogs", () => logger.recent());
+    handle("getHistory", () => history.all());
+    handle("installUpdate", () => updater?.install());
+    handle("saveSettings", async (_event, next: Settings) => {
         const removed = settingsStore.get().accounts.filter((account) => !next.accounts.some((item) => item.id === account.id));
         for (const account of removed) await accounts.remove(account.id);
         await settingsStore.save(next);
         return state();
     });
-    ipcMain.handle("setSecret", async (_event, key: SecretKey, value: string) => {
+    handle("setSecret", async (_event, key: SecretKey, value: string) => {
         const valid = PROVIDERS.some((provider) => key === `llm:${provider}`)
             || (key.startsWith("account:") && settingsStore.get().accounts.some((account) => key === `account:${account.id}`));
         if (!valid) throw new Error("알 수 없는 항목입니다.");
@@ -136,25 +166,25 @@ async function main(): Promise<void> {
         pushState();
     }
 
-    ipcMain.handle("login", async (_event, accountId: string, otp?: string) => {
+    handle("login", async (_event, accountId: string, otp?: string) => {
         const account = settingsStore.get().accounts.find((item) => item.id === accountId);
         if (!account) throw new Error("계정을 찾을 수 없습니다.");
         if (otp !== undefined && !/^\d{6}$/.test(otp)) throw new Error("OTP는 숫자 6자리입니다.");
         await loginAccount(account, otp);
         return state();
     });
-    ipcMain.handle("checkGallery", (_event, galleryId: string) => checkGallery(reader, galleryId));
-    ipcMain.handle("start", () => {
+    handle("checkGallery", (_event, galleryId: string) => checkGallery(reader, galleryId));
+    handle("start", () => {
         engine.start();
         tray?.update();
         return state();
     });
-    ipcMain.handle("stop", () => {
+    handle("stop", () => {
         engine.stop();
         tray?.update();
         return state();
     });
-    ipcMain.handle("testWebhook", async () => {
+    handle("testWebhook", async () => {
         try {
             await sendDiscordNotice(settingsStore.get().discordWebhookUrl, {
                 title: "Hamboogie 알림 테스트",
@@ -197,9 +227,14 @@ async function main(): Promise<void> {
             }
         });
         // 외부 링크는 앱 안이 아니라 기본 브라우저로 엽니다.
+        // 정해진 사이트(디시 글, 이 저장소의 릴리스)만 기본 브라우저로 엽니다.
         created.webContents.setWindowOpenHandler(({url}) => {
-            if (url.startsWith("https://")) void shell.openExternal(url);
+            if (isAllowedExternalUrl(url)) void shell.openExternal(url);
             return {action: "deny"};
+        });
+        // 앱 화면이 다른 페이지(창에 끌어다 놓은 파일 등)로 넘어가지 않게 합니다.
+        created.webContents.on("will-navigate", (event, url) => {
+            if (!rendererUrl || !url.startsWith(rendererUrl)) event.preventDefault();
         });
         if (process.env["ELECTRON_RENDERER_URL"]) await created.loadURL(process.env["ELECTRON_RENDERER_URL"]);
         else await created.loadFile(join(import.meta.dirname, "../renderer/index.html"));

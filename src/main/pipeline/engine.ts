@@ -1,8 +1,8 @@
 import type {DCInside, PostItem} from "@green-1052/dcinside.js";
 import {galleryProblems, PROVIDER_LABELS} from "@shared/settings";
 import type {GalleryConfig, HistoryEntry, Settings} from "@shared/types";
-import {isAppIdFailure, type AccountManager} from "../dc/accounts";
-import {AppIdBackoff} from "../dc/app-id-backoff";
+import {isAppIdFailure, isDefiniteCommentFailure, type AccountManager} from "../dc/accounts";
+import type {AppIdBackoff} from "../dc/app-id-backoff";
 import {htmlToText} from "../dc/text";
 import type {Decision} from "../llm/decision";
 import {createProvider, type LlmProvider} from "../llm/providers";
@@ -10,7 +10,7 @@ import type {Logger} from "../logger";
 import {sendDiscordNotice} from "../notify/discord";
 import type {Ledger, SecretStore} from "../store";
 import {findKeyword, matchesKeywords} from "./keyword-filter";
-import {makePlan, type Plan} from "./planner";
+import {eligible, END_MARGIN_MS, makePlan, type Plan} from "./planner";
 
 /** 한 번 확인할 때 최대로 넘겨볼 목록 페이지 수입니다. */
 const MAX_PAGES_PER_TICK = 3;
@@ -26,12 +26,16 @@ export interface Analysis {
     plan: Plan;
 }
 
+type CommentPlan = Extract<Plan, {kind: "comment"}>;
+
 export interface EngineDeps {
     /** 글 읽기 전용 클라이언트입니다. `resetReader` 뒤에는 새 클라이언트를 돌려줍니다. */
     reader(): DCInside;
     onReaderReady(): Promise<void>;
     /** 읽기용 기기 정보를 버리고 새 클라이언트를 만듭니다. */
     resetReader(): Promise<void>;
+    /** app_id 발급 거절 대기 규칙입니다. 거절은 IP 단위라 계정들과 함께 씁니다. */
+    appId: AppIdBackoff;
     accounts: AccountManager;
     ledger: Ledger;
     history: {add(entry: HistoryEntry): void};
@@ -40,6 +44,12 @@ export interface EngineDeps {
     settings(): Settings;
     /** 계정 상태가 바뀌었을 때(디시콘을 다시 불러온 경우 등) 화면을 갱신합니다. */
     onAccountsChanged?(): void;
+}
+
+/** 감시로 찾은 글의 줄 서기입니다. 개발 모드 테스트(`live`가 없음)와 구분합니다. */
+interface Live {
+    /** 예약할 때의 세대입니다. 사용자가 감시를 멈추면 세대가 바뀌어, 그 전에 시작한 일은 댓글을 달지 않습니다. */
+    epoch: number;
 }
 
 function postUrl(galleryId: string, postNo: number): string {
@@ -53,19 +63,19 @@ function errorMessage(error: unknown): string {
 /** 갤러리 감시, 글 분석, 줄 서기를 실행합니다. */
 export class Engine {
     private readonly watchers = new Map<string, ReturnType<typeof setTimeout>>();
-    /** 예약된 줄 서기입니다. 취소되면 처리 기록을 되돌리기 위해 글 정보를 같이 둡니다. */
-    private readonly scheduled = new Map<ReturnType<typeof setTimeout>, {galleryId: string; postNo: number; useLedger: boolean}>();
+    /** 예약된 줄 서기입니다. */
+    private readonly scheduled = new Map<ReturnType<typeof setTimeout>, {gallery: GalleryConfig; post: NewPost; test: boolean}>();
+    /** 마지막으로 처리한 글 번호입니다. 갤러리 설정 항목과 갤러리 ID를 함께 키로 써서, ID를 바꾸면 기준을 새로 잡습니다. */
     private readonly lastSeen = new Map<string, number>();
     private readerReady = false;
-    /** 읽기용 클라이언트의 app_id 발급이 거절됐을 때 목록 확인을 쉬는 규칙입니다. */
-    private readonly readerAppId: AppIdBackoff;
+    /** 감시 타이머 세대입니다. 시작/멈춤마다 바뀝니다. */
     private runId = 0;
+    /** 줄 서기 세대입니다. 사용자가 감시를 멈출 때만 바뀌고, 감시를 다시 시작할 때는 예약을 유지합니다. */
+    private epoch = 0;
     /** 같은 서비스/모델/키라면 LLM 클라이언트를 다시 만들지 않습니다. */
     private provider: {key: string; instance: LlmProvider} | null = null;
 
-    constructor(private readonly deps: EngineDeps, now: () => number = Date.now) {
-        this.readerAppId = new AppIdBackoff(now);
-    }
+    constructor(private readonly deps: EngineDeps) {}
 
     get running(): boolean {
         return this.watchers.size > 0;
@@ -75,10 +85,10 @@ export class Engine {
         return this.watchers.size;
     }
 
-    /** 감시를 시작합니다. 시작할 수 없는 갤러리는 로그에 이유를 남기고 건너뜁니다. */
+    /** 감시를 (다시) 시작합니다. 예약해 둔 줄 서기는 그대로 둡니다. 시작할 수 없는 갤러리는 로그에 이유를 남기고 건너뜁니다. */
     start(): void {
-        this.stop();
-        const runId = ++this.runId;
+        this.haltWatchers();
+        const runId = this.runId;
         const {logger} = this.deps;
         for (const gallery of this.deps.settings().galleries) {
             if (!gallery.enabled) continue;
@@ -88,9 +98,6 @@ export class Engine {
                 continue;
             }
             this.schedule(gallery.id, runId, 0);
-        }
-        for (const gallery of this.deps.settings().galleries) {
-            if (!this.watchers.has(gallery.id)) continue;
             if (this.deps.accounts.candidates(this.deps.settings().accounts, gallery.accountIds).length === 0) {
                 logger.warn("로그인된 대기 계정이 없습니다. 이대로면 나눔 글을 찾아도 줄을 설 수 없습니다.", {galleryId: gallery.galleryId});
             }
@@ -99,18 +106,24 @@ export class Engine {
         else logger.info(`갤러리 ${this.watchers.size}개 감시를 시작합니다.`);
     }
 
+    /** 감시를 멈추고 예약해 둔 줄 서기도 취소합니다. 분석 중이던 글에도 댓글을 달지 않습니다. */
     stop(): void {
-        this.runId++;
-        for (const timer of this.watchers.values()) clearTimeout(timer);
-        // 실행되지 못한 줄 서기는 처리 기록을 되돌려, 다시 감시할 때 같은 글을 다시 볼 수 있게 합니다.
+        const wasRunning = this.watchers.size > 0;
+        this.haltWatchers();
+        this.epoch++;
         for (const [timer, pending] of this.scheduled) {
             clearTimeout(timer);
-            if (pending.useLedger) this.deps.ledger.release(pending.galleryId, pending.postNo);
-            this.deps.logger.warn("예약된 줄 서기를 취소했습니다.", {galleryId: pending.galleryId, postNo: pending.postNo});
+            this.deps.logger.warn("감시를 멈춰 예약된 줄 서기를 취소했습니다.", {galleryId: pending.gallery.galleryId, postNo: pending.post.no});
+            this.record(pending.gallery, pending.post, "failure", "감시를 멈춰 예약된 줄 서기를 취소함", pending.test);
         }
-        if (this.watchers.size > 0) this.deps.logger.info("감시를 멈췄습니다.");
-        this.watchers.clear();
         this.scheduled.clear();
+        if (wasRunning) this.deps.logger.info("감시를 멈췄습니다.");
+    }
+
+    private haltWatchers(): void {
+        this.runId++;
+        for (const timer of this.watchers.values()) clearTimeout(timer);
+        this.watchers.clear();
         this.lastSeen.clear();
     }
 
@@ -126,38 +139,47 @@ export class Engine {
     private async tick(configId: string, runId: number): Promise<void> {
         const gallery = this.gallery(configId);
         if (!gallery || !gallery.enabled || runId !== this.runId) {
-            this.watchers.delete(configId);
+            if (runId === this.runId) this.watchers.delete(configId);
             return;
         }
-        if (await this.deps.accounts.maintain(this.deps.settings().accounts)) this.deps.onAccountsChanged?.();
-        // app_id 발급이 거절된 뒤에는 잠시 목록 확인을 쉽니다. 다시 시도해 봐야 거절만 늘어납니다.
-        if (!this.readerAppId.canTry()) {
-            this.schedule(configId, runId, (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
+        // 감시 중에 갤러리 ID를 바꿨는데 아직 확인하지 않았으면 그 갤러리 감시를 멈춥니다.
+        const problems = galleryProblems(gallery);
+        if (problems.length > 0) {
+            this.deps.logger.warn(`감시를 멈춤: ${problems.join(" ")}`, {galleryId: gallery.galleryId || "(이름 없음)"});
+            this.watchers.delete(configId);
+            this.deps.onAccountsChanged?.();
             return;
         }
         try {
-            const posts = await this.fetchNewPosts(gallery);
-            this.readerAppId.succeed();
-            for (const post of posts) {
-                if (runId !== this.runId) return;
-                await this.handlePost(gallery, post);
-            }
+            if (await this.deps.accounts.maintain(this.deps.settings().accounts)) this.deps.onAccountsChanged?.();
+            // app_id 발급이 거절된 뒤에는 잠시 목록 확인을 쉽니다. 다시 시도해 봐야 거절만 늘어납니다.
+            if (this.deps.appId.canTry()) await this.checkGallery(gallery, runId);
         } catch (error) {
             this.deps.logger.error(`목록 확인 실패: ${errorMessage(error)}`, {galleryId: gallery.galleryId});
             await this.recoverReader(error);
+        } finally {
+            // 설정이 바뀌었을 수 있으니 다음 간격은 최신 설정에서 읽습니다.
+            if (runId === this.runId) this.schedule(configId, runId, (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
         }
-        // 설정이 바뀌었을 수 있으니 다음 간격은 최신 설정에서 읽습니다.
-        if (runId === this.runId) this.schedule(configId, runId, (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
     }
 
-    /** 마지막으로 본 글보다 새 글을 오래된 순서로 돌려줍니다. 처음 확인할 때는 기준점만 잡습니다. */
-    private async fetchNewPosts(gallery: GalleryConfig): Promise<NewPost[]> {
+    private seenKey(gallery: GalleryConfig): string {
+        return `${gallery.id}\n${gallery.galleryId}`;
+    }
+
+    /**
+     * 새 글을 오래된 순서로 하나씩 처리합니다. 처음 확인할 때는 기준점만 잡습니다.
+     * app_id 거절로 글을 못 읽으면 거기서 멈추고, 그 글부터 다음에 다시 봅니다.
+     */
+    private async checkGallery(gallery: GalleryConfig, runId: number): Promise<void> {
         const {reader, logger} = this.deps;
-        const lastSeen = this.lastSeen.get(gallery.id);
+        const key = this.seenKey(gallery);
+        const lastSeen = this.lastSeen.get(key);
         const collected = new Map<number, NewPost>();
 
         for (let page = 1; page <= MAX_PAGES_PER_TICK; page++) {
             const response = await reader().articles.list({gallery: gallery.galleryId, page});
+            this.deps.appId.succeed();
             if (!this.readerReady) {
                 this.readerReady = true;
                 await this.deps.onReaderReady();
@@ -168,27 +190,35 @@ export class Engine {
             if (lastSeen === undefined || items.length === 0 || items.some((item) => item.no! <= lastSeen)) break;
         }
 
-        const newest = Math.max(lastSeen ?? 0, ...collected.keys());
-        this.lastSeen.set(gallery.id, newest);
         if (lastSeen === undefined) {
+            const newest = Math.max(0, ...collected.keys());
+            this.lastSeen.set(key, newest);
             logger.info(`감시 시작. 기준 글 #${newest} 이후의 새 글만 확인합니다.`, {galleryId: gallery.galleryId});
-            return [];
+            return;
         }
-        return [...collected.values()].filter((post) => post.no > lastSeen).sort((a, b) => a.no - b.no);
+        const posts = [...collected.values()].filter((post) => post.no > lastSeen).sort((a, b) => a.no - b.no);
+        for (const post of posts) {
+            if (runId !== this.runId) return;
+            if (!(await this.handlePost(gallery, post))) return;
+            this.lastSeen.set(key, post.no);
+        }
     }
 
-    private async handlePost(gallery: GalleryConfig, post: NewPost): Promise<void> {
+    /** 글 하나를 처리합니다. 지금은 처리할 수 없어 다음에 다시 봐야 하면 false를 돌려줍니다. */
+    private async handlePost(gallery: GalleryConfig, post: NewPost): Promise<boolean> {
         const {ledger, logger} = this.deps;
-        if (ledger.has(gallery.galleryId, post.no)) return;
-        if (!matchesKeywords(post.title, gallery.keywords)) return;
+        if (ledger.has(gallery.galleryId, post.no)) return true;
+        if (!matchesKeywords(post.title, gallery.keywords)) return true;
         const context = {galleryId: gallery.galleryId, postNo: post.no};
         const excludedByTitle = this.excludedBy(gallery, post.title);
         if (excludedByTitle) {
             logger.info(`넘어감: 제목에 제외 키워드 "${excludedByTitle}"`, context);
-            return;
+            return true;
         }
+        if (!this.deps.appId.canTry()) return false;
 
         logger.info(`키워드 일치: "${post.title}"`, context);
+        const epoch = this.epoch;
         const detectedAt = Date.now();
         let analysis: Analysis;
         try {
@@ -198,29 +228,34 @@ export class Engine {
             const excludedByBody = this.excludedBy(gallery, body);
             if (excludedByBody) {
                 logger.info(`넘어감: 본문에 제외 키워드 "${excludedByBody}"`, context);
-                return;
+                return true;
             }
             analysis = await this.analyze(gallery, title, body, detectedAt);
         } catch (error) {
             // 금방 지워진 글은 알릴 필요가 없습니다.
             if (/삭제했거나 존재하지 않는/.test(errorMessage(error))) {
-                logger.info("넘어감: 삭제된 글", {galleryId: gallery.galleryId, postNo: post.no});
-                return;
+                logger.info("넘어감: 삭제된 글", context);
+                return true;
+            }
+            // app_id 거절이면 잠시 쉬고 이 글부터 다음에 다시 봅니다. 알리거나 처리한 글로 남기지 않습니다.
+            if (isAppIdFailure(error)) {
+                await this.recoverReader(error);
+                return false;
             }
             analysis = {decision: null, plan: {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`}};
-            await this.recoverReader(error);
         }
-        await this.dispatch(gallery, post, analysis.plan);
+        await this.dispatch(gallery, post, analysis.plan, {live: {epoch}});
+        return true;
     }
 
     /**
-     * 읽기용 클라이언트의 app_id 발급이 거절됐으면 잠시 목록 확인을 쉽니다.
-     * 거절이 오래 이어질 때만 기기 정보를 새로 받습니다.
+     * app_id 발급이 거절됐으면 잠시 목록 확인을 쉽니다.
+     * 거절이 오래 이어질 때만 읽기용 기기 정보를 새로 받습니다.
      */
     private async recoverReader(error: unknown): Promise<void> {
         if (!isAppIdFailure(error)) return;
-        const minutes = Math.round(this.readerAppId.pauseMs / 60000);
-        if (!this.readerAppId.fail()) {
+        const minutes = Math.round(this.deps.appId.pauseMs / 60000);
+        if (!this.deps.appId.fail()) {
             this.deps.logger.warn(`디시 앱 인증(app_id) 발급이 거절되어 ${minutes}분 동안 목록 확인을 쉽니다.`);
             return;
         }
@@ -240,7 +275,7 @@ export class Engine {
             const decision = await this.decide(title, body);
             const settings = this.deps.settings();
             const candidates = this.deps.accounts.candidates(settings.accounts, gallery.accountIds);
-            return {decision, plan: makePlan(decision, gallery, candidates, detectedAt)};
+            return {decision, plan: makePlan(decision, gallery, candidates, detectedAt, `${title}\n${body}`)};
         } catch (error) {
             return {decision: null, plan: {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`}};
         }
@@ -249,15 +284,20 @@ export class Engine {
     /**
      * 계획대로 넘어가거나, 알리거나, 줄 서기를 예약합니다.
      *
-     * @param options.useLedger false면 처리한 글 기록을 보지도 남기지도 않습니다. 개발 모드 테스트 전용입니다.
+     * @param options.live 감시로 찾은 글이면 넘깁니다. 처리한 글 기록을 남기고, 사용자가 감시를 멈췄으면 아무것도 하지 않으며,
+     *   실행 직전에 최신 설정을 다시 확인합니다. 없으면 개발 모드 테스트로 보고 기록과 설정 확인을 건너뜁니다.
      * @param options.label 로그와 알림 앞에 붙일 표시입니다.
      */
-    async dispatch(gallery: GalleryConfig, post: NewPost, plan: Plan, options: {useLedger?: boolean; label?: string} = {}): Promise<void> {
+    async dispatch(gallery: GalleryConfig, post: NewPost, plan: Plan, options: {live?: Live; label?: string} = {}): Promise<void> {
         const {ledger, logger} = this.deps;
-        const useLedger = options.useLedger ?? true;
+        const {live} = options;
         const label = options.label ? `${options.label} ` : "";
         const context = {galleryId: gallery.galleryId, postNo: post.no};
-        const claim = () => !useLedger || ledger.claim(gallery.galleryId, post.no);
+        if (live && live.epoch !== this.epoch) {
+            logger.info(`${label}감시를 멈춰 이 글은 처리하지 않습니다.`, context);
+            return;
+        }
+        const claim = () => !live || ledger.claim(gallery.galleryId, post.no);
 
         switch (plan.kind) {
             case "skip":
@@ -274,9 +314,9 @@ export class Engine {
                 if (waitMs > 0) logger.info(`${label}${Math.round(waitMs / 1000)}초 뒤에 줄을 섭니다.`, context);
                 const timer = setTimeout(() => {
                     this.scheduled.delete(timer);
-                    void this.execute(gallery, post, plan, label);
+                    void this.execute(gallery, post, plan, label, live);
                 }, waitMs);
-                this.scheduled.set(timer, {galleryId: gallery.galleryId, postNo: post.no, useLedger});
+                this.scheduled.set(timer, {gallery, post, test: !live});
             }
         }
     }
@@ -291,34 +331,82 @@ export class Engine {
         return this.provider.instance.decide({title, body});
     }
 
-    /** 우선순위 순서로 한 계정씩 시도하고, 하나라도 성공하면 멈춥니다. 글 하나에는 댓글 하나만 답니다. */
-    private async execute(gallery: GalleryConfig, post: NewPost, plan: Extract<Plan, {kind: "comment"}>, prefix = ""): Promise<void> {
+    /**
+     * 실행 직전에 최신 설정으로 계획을 다시 확인합니다. 줄을 서면 안 되면 그 이유를 돌려줍니다.
+     * 서도 되면 지금 설정에서 시도할 수 있는 계정만 남긴 시도 목록을 돌려줍니다.
+     */
+    private revalidate(gallery: GalleryConfig, plan: CommentPlan): {reason: string} | {attempts: CommentPlan["attempts"]} {
+        const settings = this.deps.settings();
+        const latest = settings.galleries.find((item) => item.id === gallery.id);
+        if (!latest || !latest.enabled || latest.galleryId !== gallery.galleryId) return {reason: "감시 설정이 바뀌어(갤러리 삭제/끄기/ID 변경) 취소함"};
+        if (latest.category === "food" && !plan.isFood) return {reason: "나눔 종류 설정이 '음식만'으로 바뀌어 취소함"};
+        const allowed = new Set(latest.accountIds);
+        const candidates = new Map(this.deps.accounts.candidates(settings.accounts, latest.accountIds).map((account) => [account.id, account]));
+        const attempts = plan.attempts.filter((attempt) => {
+            if (!allowed.has(attempt.accountId)) return false;
+            const candidate = candidates.get(attempt.accountId);
+            // 로그아웃된 계정은 시도해서 실패로 남기고, 로그인된 계정은 바뀐 계정 종류로 자격을 다시 봅니다.
+            return !candidate || eligible(candidate, plan.requirement);
+        });
+        if (attempts.length === 0) return {reason: "대기 계정 설정이 바뀌어 줄을 설 계정이 없어 취소함"};
+        return {attempts};
+    }
+
+    /**
+     * 우선순위 순서로 한 계정씩 시도하고, 하나라도 성공하면 멈춥니다. 글 하나에는 댓글 하나만 답니다.
+     * 댓글이 달리지 않은 것이 확실한 실패일 때만 다음 계정으로 넘어가고, 결과를 알 수 없으면(응답 시간 초과 등) 멈추고 알립니다.
+     */
+    private async execute(gallery: GalleryConfig, post: NewPost, plan: CommentPlan, prefix: string, live: Live | undefined): Promise<void> {
         const {accounts, logger} = this.deps;
         const context = {galleryId: gallery.galleryId, postNo: post.no};
-        // 예약해 둔 사이 마감이 지났으면 달지 않습니다. 앞 계정이 실패해 재시도하는 동안 지난 경우도 막습니다.
-        const pastDeadline = () => plan.deadline !== undefined && Date.now() > plan.deadline;
+        const test = !live;
+        const cancel = (reason: string) => {
+            logger.warn(`${prefix}줄 서기를 하지 않음: ${reason}`, context);
+            this.record(gallery, post, "failure", reason, test);
+        };
+
+        let attempts = plan.attempts;
+        if (live) {
+            const checked = this.revalidate(gallery, plan);
+            if ("reason" in checked) return cancel(checked.reason);
+            attempts = checked.attempts;
+        }
+
         const failures: string[] = [];
-        for (const attempt of plan.attempts) {
-            if (pastDeadline()) {
-                logger.warn(`${prefix}마감 시각이 지나 줄을 서지 않았습니다.`, context);
-                this.record(gallery, post, "failure", "마감 시각이 지나 댓글을 달지 않음", prefix !== "");
-                return;
-            }
+        for (const attempt of attempts) {
+            if (live && live.epoch !== this.epoch) return cancel("감시를 멈춰 취소함");
+            // 예약해 둔 사이, 또는 앞 계정이 실패해 재시도하는 사이 마감이 지났으면 달지 않습니다.
+            if (plan.deadline !== undefined && Date.now() > plan.deadline - END_MARGIN_MS) return cancel("마감 시각이 지나 댓글을 달지 않음");
+
             const label = attempt.content.type === "text" ? `"${attempt.content.text}"` : `디시콘 "${attempt.content.dccon.title}"`;
+            let failure: unknown = null;
             try {
                 await accounts.writeComment(attempt.accountId, gallery.galleryId, post.no, attempt.content);
-                const summary = `${accounts.nickname(attempt.accountId)} 계정으로 ${label}`;
+            } catch (error) {
+                failure = error;
+            }
+            const nickname = accounts.nickname(attempt.accountId);
+
+            if (failure === null) {
+                const summary = `${nickname} 계정으로 ${label}`;
                 logger.success(`${prefix}줄 서기 성공: ${summary}`, context);
-                this.record(gallery, post, "success", summary, prefix !== "");
+                this.record(gallery, post, "success", summary, test);
                 if (this.deps.settings().notifyOnSuccess) await this.alert(`${prefix}줄 서기 성공: ${post.title}`, summary, context, true);
                 return;
-            } catch (error) {
-                const message = `${accounts.nickname(attempt.accountId)}: ${errorMessage(error)}`;
-                failures.push(message);
-                logger.error(`${prefix}줄 서기 실패 (${message})`, context);
             }
+            const message = `${nickname}: ${errorMessage(failure)}`;
+            if (!isDefiniteCommentFailure(failure)) {
+                // 서버가 댓글을 저장했을 수도 있으므로 다른 계정으로 또 달지 않습니다.
+                const detail = `결과를 알 수 없음 (${message}). 댓글이 달렸는지 글에서 직접 확인하세요.`;
+                logger.error(`${prefix}줄 서기 결과 불명: ${message}`, context);
+                this.record(gallery, post, "failure", detail, test);
+                await this.notify(`${prefix}줄 서기 결과 확인 필요: ${post.title}`, detail, gallery.galleryId, post.no);
+                return;
+            }
+            failures.push(message);
+            logger.error(`${prefix}줄 서기 실패 (${message})`, context);
         }
-        this.record(gallery, post, "failure", failures.join("\n"), prefix !== "");
+        this.record(gallery, post, "failure", failures.join("\n"), test);
         await this.notify(`${prefix}줄 서기 실패: ${post.title}`, failures.join("\n"), gallery.galleryId, post.no);
     }
 

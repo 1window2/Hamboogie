@@ -81,14 +81,20 @@ export function normalizeGallery(gallery: GalleryConfig, accounts: AccountConfig
 }
 
 /** 저장 전에 설정값을 허용 범위로 맞춥니다. */
+const PROVIDERS = ["gemini", "openai", "claude"] as const;
+/** 계정 ID는 앱이 만든 UUID입니다. 비밀 정보 키에 쓰이므로 다른 형식은 받지 않습니다. */
+const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function normalizeSettings(settings: Settings): Settings {
-    const accounts = settings.accounts.map((account) => ({...account, loginId: account.loginId.trim()}));
+    const accounts = settings.accounts
+        .filter((account) => ACCOUNT_ID_PATTERN.test(account.id))
+        .map((account) => ({...account, loginId: account.loginId.trim()}));
     return {
         ...settings,
         accounts,
         galleries: settings.galleries.map((gallery) => normalizeGallery(gallery, accounts)),
         llm: {
-            provider: settings.llm.provider,
+            provider: PROVIDERS.includes(settings.llm.provider) ? settings.llm.provider : "gemini",
             models: {...DEFAULT_MODELS, ...settings.llm.models}
         },
         discordWebhookUrl: settings.discordWebhookUrl.trim(),

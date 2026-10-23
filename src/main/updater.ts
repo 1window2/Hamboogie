@@ -67,7 +67,9 @@ export function startUpdater(onChange: (state: UpdateState) => void, beforeInsta
             if (!response.ok) return;
             const release = await response.json() as {tag_name?: string; html_url?: string};
             if (release.tag_name && isNewerVersion(release.tag_name, app.getVersion())) {
-                set({state: "available", version: release.tag_name.replace(/^v/, ""), url: release.html_url ?? RELEASES_PAGE});
+                // 응답에 담긴 주소는 이 저장소의 릴리스 페이지일 때만 씁니다.
+                const url = release.html_url?.startsWith("https://github.com/1window2/Hamboogie/releases/") ? release.html_url : RELEASES_PAGE;
+                set({state: "available", version: release.tag_name.replace(/^v/, ""), url});
             }
         } catch {
             // 확인에 실패해도 다음 주기에 다시 봅니다.

@@ -22,28 +22,46 @@ export type CommentContent = {type: "text"; text: string} | {type: "dccon"; dcco
 export type Plan =
     | {kind: "skip"; reason: string}
     | {kind: "notify"; reason: string}
-    | {kind: "comment"; notBefore: number; attempts: {accountId: string; content: CommentContent}[]; deadline?: number};
+    | {
+        kind: "comment";
+        notBefore: number;
+        attempts: {accountId: string; content: CommentContent}[];
+        /** 마감 시각입니다. 실행 직전에 다시 확인합니다. */
+        deadline?: number;
+        /** 예약한 뒤 설정이 바뀌었을 때 실행 직전에 다시 확인하려고 남겨 둡니다. */
+        requirement: Decision["member_requirement"];
+        isFood: boolean;
+    };
 
-const TEXT_MAX_LENGTH = 30;
+/** 요구 문구는 짧은 것만 자동으로 답니다. 긴 문구는 사람이 확인하도록 알림으로 넘깁니다. */
+const TEXT_MAX_LENGTH = 20;
 /** "N시부터" 줄은 정각보다 이만큼 늦게 섭니다. 이 컴퓨터 시계가 디시 서버보다 빨라 정각 전 댓글로 찍히는 것을 막습니다. */
 export const START_MARGIN_MS = 2000;
+/** 마감은 이만큼 일찍 닫힌 것으로 봅니다. 이 컴퓨터 시계가 서버보다 늦어 마감 뒤 댓글로 찍히는 것을 막습니다. */
+export const END_MARGIN_MS = 2000;
+/** 지금보다 이른 시각이 이 범위 안이면 오늘 이미 지난 시각으로, 더 이르면 다음 날 시각으로 봅니다. */
+const PAST_WINDOW_MS = 6 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
-/** `HH:MM`(한국 시간)을 기준 시각 이후의 가장 가까운 시각으로 바꿉니다. 기준보다 이르면 다음 날로 봅니다. */
+/**
+ * `HH:MM`(한국 시간)을 기준 시각 근처의 실제 시각으로 바꿉니다. 나눔 글의 시각은 보통 "오늘"을 뜻하므로
+ * 같은 날 그 시각을 먼저 보고, 그 시각이 기준보다 6시간 넘게 이르면 다음 날(예: 23:50에 본 "00:30까지")로 봅니다.
+ * 형식이 다르면 null입니다.
+ */
 export function resolveClock(clock: string, reference: number): number | null {
     const match = /^(\d{1,2}):(\d{2})$/.exec(clock.trim());
     if (!match) return null;
     const hours = Number(match[1]);
     const minutes = Number(match[2]);
-    if (hours > 24 || minutes > 59) return null;
+    if (hours > 24 || minutes > 59 || (hours === 24 && minutes > 0)) return null;
     const kst = new Date(reference + KST_OFFSET_MS);
     const dayStartKst = Date.UTC(kst.getUTCFullYear(), kst.getUTCMonth(), kst.getUTCDate());
-    let candidate = dayStartKst + (hours * 60 + minutes) * 60 * 1000 - KST_OFFSET_MS;
-    if (candidate < reference) candidate += 24 * 60 * 60 * 1000;
-    return candidate;
+    const sameDay = dayStartKst + (hours * 60 + minutes) * 60 * 1000 - KST_OFFSET_MS;
+    return reference - sameDay > PAST_WINDOW_MS ? sameDay + DAY_MS : sameDay;
 }
 
-function eligible(account: CandidateAccount, requirement: Decision["member_requirement"]): boolean {
+export function eligible(account: {memberType: MemberType | null}, requirement: Decision["member_requirement"]): boolean {
     switch (requirement) {
         case "any":
         case "member":
@@ -57,13 +75,31 @@ function eligible(account: CandidateAccount, requirement: Decision["member_requi
     }
 }
 
-/** 텍스트 댓글로 쓰기에 안전한 문구인지 확인합니다. */
+/** 비교하기 쉽게 문구를 정리합니다: 전각/호환 문자 통일, 숨은 문자와 공백 제거, 소문자. */
+export function normalizeForMatch(text: string): string {
+    return text.normalize("NFKC").replace(/[\p{Cf}\s]/gu, "").toLowerCase();
+}
+
+/** 봇 색출용 낚시 문구에 자주 쓰이는 단어입니다. 이런 문구를 요구하면 자동으로 달지 않고 알립니다. */
+const BAIT_WORDS = ["봇", "매크로", "자동", "bot", "macro", "프로그램", "크롤"];
+/** 연락처나 외부 링크로 이어지는 단어입니다. */
+const CONTACT_WORDS = ["카톡", "카카오", "오픈채팅", "텔레", "telegram", "디코", "discord", "라인", "연락", "전화", "번호", "계좌", "주소", "링크"];
+
+/**
+ * 텍스트 댓글로 자동으로 달아도 되는 문구인지 확인합니다. 글 내용은 누구나 쓸 수 있으므로,
+ * 내 계정으로 엉뚱한 말(봇 자백, 연락처, 링크 등)을 쓰게 만드는 시도를 막습니다.
+ */
 export function isSafeCommentText(text: string): boolean {
-    if (text.length === 0 || text.length > TEXT_MAX_LENGTH) return false;
-    if (/[\r\n]/.test(text)) return false;
-    if (/https?:|www\.|\.(com|net|kr|io|me)\b/i.test(text)) return false;
-    if (/\d{3,}[-\s]?\d{3,}/.test(text)) return false;
-    if (/@/.test(text)) return false;
+    const normalized = text.normalize("NFKC");
+    if (normalized.length === 0 || normalized.length > TEXT_MAX_LENGTH) return false;
+    // 제어 문자, 줄바꿈, 숨은 서식 문자(제로폭 문자, 방향 전환 문자 등)
+    if (/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(normalized)) return false;
+    // 한글, 영문, 숫자, 공백, 기본 문장부호만 허용합니다.
+    if (!/^[\p{Script=Hangul}A-Za-z0-9 .,!?~^♡♥()'"_-]+$/u.test(normalized)) return false;
+    const compactText = normalizeForMatch(normalized);
+    // 링크처럼 보이는 것(점 뒤 영문 2자 이상), 숫자 5자리 이상(전화번호 등)
+    if (/\.[a-z]{2,}/.test(compactText) || /\d{5,}/.test(compactText.replace(/[^0-9]/g, ""))) return false;
+    if ([...BAIT_WORDS, ...CONTACT_WORDS].some((word) => compactText.includes(word))) return false;
     return true;
 }
 
@@ -82,17 +118,19 @@ export function findDccon(dccons: OwnedDccon[], keyword: string): OwnedDccon | n
 /**
  * LLM 판단을 실제 행동 계획으로 바꿉니다.
  *
- * @param accounts 갤러리의 대기 계정을 우선순위 순서로, 로그인된 것만 넘깁니다.
+ * @param accounts 갤러리의 대기 계정을 우선순위 순서로, 로그인된 것만 넘깁니다. 비어 있으면 줄을 설 수 없으므로 알림 계획이 됩니다.
  * @param detectedAt 글을 감지한 시각(ms)입니다.
+ * @param postText 글의 제목과 본문입니다. LLM이 말한 요구 문구가 실제로 글에 있는지 확인합니다.
  */
-export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: CandidateAccount[], detectedAt: number): Plan {
+export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: CandidateAccount[], detectedAt: number, postText: string): Plan {
     if (!decision.is_giveaway) return {kind: "skip", reason: "나눔 글이 아님"};
     if (gallery.category === "food" && !decision.is_food) return {kind: "skip", reason: "음식 나눔이 아님"};
 
-    // 감지 시각 기준으로 다음 날로 넘어갔다면 이미 지난 마감으로 봅니다(12시간 이상 남은 경우).
-    const endsAt = decision.ends_at ? resolveClock(decision.ends_at, detectedAt) : null;
-    if (endsAt !== null && endsAt - detectedAt > 12 * 60 * 60 * 1000) {
-        return {kind: "skip", reason: `마감 시각(${decision.ends_at})이 지남`};
+    let endsAt: number | null = null;
+    if (decision.ends_at) {
+        endsAt = resolveClock(decision.ends_at, detectedAt);
+        if (endsAt === null) return {kind: "notify", reason: `마감 시각을 해석할 수 없음: ${decision.ends_at}`};
+        if (endsAt - END_MARGIN_MS <= detectedAt) return {kind: "skip", reason: `마감 시각(${decision.ends_at})이 지남`};
     }
 
     if (accounts.length === 0) return {kind: "notify", reason: "로그인된 대기 계정이 없어 줄을 설 수 없습니다. 계정 탭에서 로그인 상태를 확인하세요."};
@@ -106,20 +144,25 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     if (decision.starts_at) {
         const startsAt = resolveClock(decision.starts_at, detectedAt);
         if (startsAt === null) return {kind: "notify", reason: `시작 시각을 해석할 수 없음: ${decision.starts_at}`};
-        // 12시간 넘게 남았다면 이미 시작된 줄로 봅니다.
-        if (startsAt - detectedAt <= 12 * 60 * 60 * 1000) notBefore = startsAt + START_MARGIN_MS;
+        // 이미 시작했어도 정각 직후라면 여유 시간까지는 기다립니다.
+        notBefore = Math.max(detectedAt, startsAt + START_MARGIN_MS);
     }
     notBefore += gallery.delaySec * 1000;
     // 줄 서기 지연이나 시작 시각 대기 때문에 마감 뒤에 댓글을 달게 되면 처음부터 서지 않습니다.
-    if (endsAt !== null && notBefore > endsAt) {
+    if (endsAt !== null && notBefore > endsAt - END_MARGIN_MS) {
         return {kind: "skip", reason: `줄 서기 지연 때문에 마감 시각(${decision.ends_at}) 전에 댓글을 달 수 없음`};
     }
-    const deadline = endsAt !== null ? {deadline: endsAt} : {};
+    const common = {notBefore, requirement: decision.member_requirement, isFood: decision.is_food, ...(endsAt !== null ? {deadline: endsAt} : {})};
 
     if (decision.line_method === "text") {
-        const text = decision.line_text?.trim() || DEFAULT_COMMENT_TEXT;
+        const required = decision.line_text?.trim();
+        const text = required || DEFAULT_COMMENT_TEXT;
         if (!isSafeCommentText(text)) return {kind: "notify", reason: `요구 문구를 자동으로 달기 어려움: "${text}"`};
-        return {kind: "comment", notBefore, attempts: qualified.map((account) => ({accountId: account.id, content: {type: "text", text}})), ...deadline};
+        // LLM이 지어낸 문구를 달지 않도록, 요구 문구는 글에 실제로 있어야 합니다.
+        if (required && !normalizeForMatch(postText).includes(normalizeForMatch(required))) {
+            return {kind: "notify", reason: `요구 문구가 글에 없음: "${required}"`};
+        }
+        return {kind: "comment", attempts: qualified.map((account) => ({accountId: account.id, content: {type: "text", text}})), ...common};
     }
 
     const keyword = decision.dccon_keyword?.trim() ?? "";
@@ -128,5 +171,5 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
         return dccon ? [{accountId: account.id, content: {type: "dccon" as const, dccon}}] : [];
     });
     if (attempts.length === 0) return {kind: "notify", reason: `요구 디시콘("${keyword}")을 가진 대기 계정이 없음`};
-    return {kind: "comment", notBefore, attempts, ...deadline};
+    return {kind: "comment", attempts, ...common};
 }

@@ -5,8 +5,10 @@ on:
   push:
     tags: ["v*"]
 
+# 기본은 읽기만 하고, 릴리스를 만드는 단계에만 쓰기 권한을 줍니다.
+# 의존성 설치와 빌드 단계가 릴리스를 바꿀 수 있는 토큰을 갖지 않게 하기 위해서입니다.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -47,6 +49,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v5
         with:

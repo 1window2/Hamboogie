@@ -38,7 +38,12 @@ export const SYSTEM_PROMPT = `너는 디시인사이드 갤러리 글을 분석�
 /** LLM에 보낼 사용자 메시지입니다. 본문이 너무 길면 토큰 낭비를 막기 위해 자릅니다. */
 export const BODY_CHAR_LIMIT = 4000;
 
+/** 글 내용이 `</post>` 같은 태그로 데이터 구역을 닫고 지시문을 끼워 넣지 못하게 꺾쇠를 바꿉니다. */
+function neutralize(text: string): string {
+    return text.replace(/</g, "‹").replace(/>/g, "›");
+}
+
 export function buildUserMessage(title: string, body: string): string {
     const trimmedBody = body.length > BODY_CHAR_LIMIT ? `${body.slice(0, BODY_CHAR_LIMIT)}\n(이하 생략)` : body;
-    return `<post>\n<title>${title}</title>\n<body>${trimmedBody || "(본문 없음)"}</body>\n</post>`;
+    return `<post>\n<title>${neutralize(title)}</title>\n<body>${neutralize(trimmedBody) || "(본문 없음)"}</body>\n</post>`;
 }

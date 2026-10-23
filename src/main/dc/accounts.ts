@@ -1,4 +1,4 @@
-import {AuthExpiredError, CaptchaRequiredError, DCInside, OtpRequiredError, type DeviceCredentials} from "@green-1052/dcinside.js";
+import {ApiError, AuthExpiredError, CaptchaRequiredError, DCInside, OtpRequiredError, type DeviceCredentials} from "@green-1052/dcinside.js";
 import type {AccountConfig, AccountStatus, MemberType} from "@shared/types";
 import type {SecretStore} from "../store";
 import {AppIdBackoff} from "./app-id-backoff";
@@ -14,7 +14,25 @@ interface LoggedIn {
     dccons: OwnedDccon[];
     /** 보유 디시콘을 아직 못 불러왔으면 그 이유입니다. */
     dcconError?: string;
-    appId: AppIdBackoff;
+    /** app_id가 필요한 요청이 마지막으로 성공한 시각입니다. 이때 받은 app_id는 한동안 다시 발급받지 않고 씁니다. */
+    appIdOkAt?: number;
+}
+
+/** 받아 둔 app_id를 다시 발급받지 않고 쓸 수 있다고 보는 시간입니다(라이브러리의 갱신 주기 11시간보다 짧게). */
+const APP_ID_FRESH_MS = 10 * 60 * 60 * 1000;
+
+/**
+ * 댓글을 보내기 전에 실패해서 댓글이 달리지 않은 것이 확실한 오류입니다.
+ * 이런 오류일 때만 다음 순위 계정으로 넘어갑니다.
+ */
+export class CommentNotPostedError extends Error {}
+
+/**
+ * 댓글이 달리지 않은 것이 확실한 실패인지 확인합니다. 서버가 명시적으로 거절했거나(ApiError 계열) 보내기 전에 실패한 경우입니다.
+ * 응답 시간 초과, 네트워크 오류, 서버 오류(5xx)는 서버가 댓글을 저장했을 수도 있어 확실하지 않습니다.
+ */
+export function isDefiniteCommentFailure(error: unknown): boolean {
+    return error instanceof ApiError || error instanceof CommentNotPostedError || isAppIdFailure(error);
 }
 
 const APP_ID_REFUSED_MESSAGE = "디시 앱 인증(app_id) 발급이 일시적으로 거절되었습니다. 같은 IP에서 짧은 시간에 여러 번 발급받으면 한동안 막히며, 잠시 후 다시 시도합니다.";
@@ -62,12 +80,16 @@ export class AccountManager {
     private readonly statuses = new Map<string, AccountStatus>();
     /** OTP를 요구받은 클라이언트입니다. OTP는 요구받은 클라이언트(같은 기기 정보)로 보내야 합니다. */
     private readonly awaitingOtp = new Map<string, DCInside>();
+    /** 삭제된 계정입니다. 재로그인 도중 삭제되면 로그인 결과를 버립니다. */
+    private readonly removed = new Set<string>();
     /** 진행 중인 로그인입니다. 같은 계정의 재로그인이 겹치면 하나만 하고 결과를 함께 씁니다. */
     private readonly pendingLogins = new Map<string, Promise<AccountStatus>>();
 
     constructor(
-        private readonly secrets: Pick<SecretStore, "get" | "has" | "set" | "removeByPrefix">,
+        private readonly secrets: Pick<SecretStore, "get" | "has" | "set">,
         private readonly createClient: (credentials?: DeviceCredentials) => DCInside = (credentials) => new DCInside({credentials}),
+        /** app_id 발급 거절 대기 규칙입니다. 거절은 IP 단위라 읽기용 클라이언트와 함께 씁니다. */
+        private readonly appId: AppIdBackoff = new AppIdBackoff(),
         private readonly now: () => number = Date.now
     ) {}
 
@@ -122,11 +144,12 @@ export class AccountManager {
                 client,
                 nickname: session.result.name ?? account.loginId,
                 detectedMemberType: isGonick === 1 ? "gonick" : isGonick === 0 ? "semi" : null,
-                dccons: [],
-                appId: new AppIdBackoff(this.now)
+                dccons: []
             };
             // 보유 디시콘을 불러오면서 app_id도 받아 둡니다. 거절되면 로그인은 그대로 두고 디시콘만 나중에 다시 불러옵니다.
             await this.loadDccons(loggedIn);
+            // 로그인하는 사이 계정이 삭제됐으면 결과를 버립니다(기기 정보를 다시 저장하지 않습니다).
+            if (this.removed.has(account.id)) return {state: "logged_out"};
             // app_id를 받은 뒤에 저장해야 앱을 다시 켰을 때 app_id를 또 발급받지 않습니다.
             await saveDevice(this.secrets, deviceKey, client);
             this.sessions.set(account.id, loggedIn);
@@ -179,10 +202,11 @@ export class AccountManager {
                     }]
                     : []));
             loggedIn.dcconError = undefined;
-            loggedIn.appId.succeed();
+            loggedIn.appIdOkAt = this.now();
+            this.appId.succeed();
         } catch (error) {
             if (isAppIdFailure(error)) {
-                loggedIn.appId.fail();
+                this.appId.fail();
                 loggedIn.dcconError = APP_ID_REFUSED_MESSAGE;
             } else {
                 loggedIn.dcconError = describe(error);
@@ -197,7 +221,7 @@ export class AccountManager {
     async maintain(accounts: AccountConfig[]): Promise<boolean> {
         let changed = false;
         for (const [id, loggedIn] of this.sessions) {
-            if (!loggedIn.dcconError || !loggedIn.appId.canTry()) continue;
+            if (!loggedIn.dcconError || !this.appId.canTry()) continue;
             await this.loadDccons(loggedIn);
             const account = accounts.find((item) => item.id === id) ?? loggedIn.account;
             this.setStatus(id, this.loggedInStatus(account, loggedIn));
@@ -222,19 +246,25 @@ export class AccountManager {
 
     /**
      * 댓글을 답니다. 로그인 세션이 만료됐으면 다시 로그인한 뒤 한 번 더 시도합니다.
-     * app_id 발급이 거절되면 잠시 쉬어야 하므로 바로 실패로 처리하고, 거절이 오래 이어졌을 때만
+     * app_id 발급이 거절된 상태면 발급 요청을 늘리지 않도록 바로 실패로 처리하고, 거절이 오래 이어졌을 때만
      * 기기 정보를 새로 받아 다시 로그인한 뒤 한 번 더 시도합니다.
+     *
+     * 댓글이 달리지 않은 것이 확실한 실패는 `isDefiniteCommentFailure`가 true인 오류로 던집니다.
      */
     async writeComment(accountId: string, galleryId: string, postNo: number, content: CommentContent): Promise<void> {
         const loggedIn = this.sessions.get(accountId);
-        if (!loggedIn) throw new Error("로그인되지 않은 계정입니다.");
+        if (!loggedIn) throw new CommentNotPostedError("로그인되지 않은 계정입니다.");
+        // 받아 둔 app_id가 아직 유효하면 대기 중이어도 씁니다(발급 요청이 나가지 않습니다).
+        const hasFreshAppId = loggedIn.appIdOkAt !== undefined && this.now() - loggedIn.appIdOkAt < APP_ID_FRESH_MS;
+        if (!hasFreshAppId && !this.appId.canTry()) throw new CommentNotPostedError(APP_ID_REFUSED_MESSAGE);
         try {
             await this.write(loggedIn.client, galleryId, postNo, content);
-            loggedIn.appId.succeed();
+            loggedIn.appIdOkAt = this.now();
+            this.appId.succeed();
             return;
         } catch (error) {
             if (isAppIdFailure(error)) {
-                if (!loggedIn.appId.fail()) throw new Error(APP_ID_REFUSED_MESSAGE);
+                if (!this.appId.fail()) throw new CommentNotPostedError(APP_ID_REFUSED_MESSAGE);
             } else if (!(error instanceof AuthExpiredError)) {
                 throw error;
             }
@@ -242,9 +272,10 @@ export class AccountManager {
             const status = await this.login(loggedIn.account, undefined, freshDevice);
             const renewed = this.sessions.get(accountId);
             if (status.state !== "logged_in" || !renewed) {
-                throw new Error(`${freshDevice ? "앱 인증(app_id) 거절이 계속되어" : "세션이 만료되어"} 다시 로그인했지만 실패했습니다: ${"message" in status ? status.message : status.state}`);
+                throw new CommentNotPostedError(`${freshDevice ? "앱 인증(app_id) 거절이 계속되어" : "세션이 만료되어"} 다시 로그인했지만 실패했습니다: ${"message" in status ? status.message : status.state}`);
             }
             await this.write(renewed.client, galleryId, postNo, content);
+            renewed.appIdOkAt = this.now();
         }
     }
 
@@ -254,7 +285,7 @@ export class AccountManager {
             return;
         }
         const inserted = await client.dccons.insert({package_idx: content.dccon.packageIdx, detail_idx: content.dccon.detailIdx});
-        if (!inserted.img_tag) throw new Error("디시콘 태그를 받지 못했습니다.");
+        if (!inserted.img_tag) throw new CommentNotPostedError("디시콘 태그를 받지 못했습니다.");
         await client.comments.write(galleryId, postNo, {dccons: [{tag: inserted.img_tag, detailIdx: content.dccon.detailIdx}]});
     }
 
@@ -263,11 +294,13 @@ export class AccountManager {
     }
 
     async remove(accountId: string): Promise<void> {
+        this.removed.add(accountId);
         this.sessions.delete(accountId);
         this.awaitingOtp.delete(accountId);
         this.statuses.delete(accountId);
-        await this.secrets.removeByPrefix(`account:${accountId}`);
-        await this.secrets.removeByPrefix(`device:${accountId}`);
-        await this.secrets.removeByPrefix(`otp:${accountId}`);
+        // 앞부분이 같은 다른 키까지 지우지 않도록 정확한 키만 지웁니다.
+        await this.secrets.set(`account:${accountId}`, "");
+        await this.secrets.set(`device:${accountId}`, "");
+        await this.secrets.set(`otp:${accountId}`, "");
     }
 }

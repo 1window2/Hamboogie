@@ -1,4 +1,4 @@
-import {existsSync, readFileSync} from "node:fs";
+import {existsSync, readFileSync, renameSync} from "node:fs";
 import {rename, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import {safeStorage} from "electron";
@@ -92,7 +92,15 @@ export class SecretStore {
 
     constructor(dir: string) {
         this.path = join(dir, "secrets.json");
-        this.data = readJson<Record<string, string>>(this.path, {});
+        this.data = readJson<Record<string, string> | null>(this.path, {}) ?? {};
+        // 파일이 깨져서 읽지 못했다면, 다음 저장 때 덮어써서 남은 내용까지 잃지 않도록 백업해 둡니다.
+        if (existsSync(this.path) && Object.keys(this.data).length === 0) {
+            try {
+                if (readFileSync(this.path, "utf8").trim() !== "{}") renameSync(this.path, `${this.path}.broken-${Date.now()}`);
+            } catch {
+                // 백업에 실패해도 앱은 계속 동작합니다.
+            }
+        }
     }
 
     private ensureAvailable(): void {
@@ -121,11 +129,6 @@ export class SecretStore {
         } else {
             delete this.data[key];
         }
-        await writeJson(this.path, this.data);
-    }
-
-    async removeByPrefix(prefix: string): Promise<void> {
-        for (const key of Object.keys(this.data)) if (key.startsWith(prefix)) delete this.data[key];
         await writeJson(this.path, this.data);
     }
 }
@@ -170,14 +173,6 @@ export class Ledger {
     /** 밀린 저장이 끝날 때까지 기다립니다. */
     flush(): Promise<void> {
         return flushJson(this.path);
-    }
-
-    /** 기록을 되돌립니다. 예약한 줄 서기가 실행되지 못하고 취소됐을 때 씁니다. */
-    release(galleryId: string, postNo: number): void {
-        const key = Ledger.key(galleryId, postNo);
-        if (!this.set.delete(key)) return;
-        this.keys.splice(this.keys.indexOf(key), 1);
-        void writeJson(this.path, this.keys).catch(() => {});
     }
 }
 
