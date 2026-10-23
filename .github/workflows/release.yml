@@ -5,8 +5,10 @@ on:
   push:
     tags: ["v*"]
 
+# 기본은 읽기만 하고, 릴리스를 만드는 단계에만 쓰기 권한을 줍니다.
+# 의존성 설치와 빌드 단계가 릴리스를 바꿀 수 있는 토큰을 갖지 않게 하기 위해서입니다.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -15,14 +17,18 @@ jobs:
         include:
           - os: windows-latest
             target: --win
-            files: release/*.exe
+            # latest.yml과 blockmap은 앱의 자동 업데이트가 새 버전을 찾고 받는 데 씁니다.
+            files: |
+              release/*.exe
+              release/*.exe.blockmap
+              release/latest.yml
           - os: macos-latest
             target: --mac
             files: release/*.dmg
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24
           cache: npm
@@ -34,7 +40,7 @@ jobs:
       - run: npx electron-builder ${{ matrix.target }} --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: ${{ matrix.os }}
           path: ${{ matrix.files }}
@@ -43,8 +49,10 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           path: dist
           merge-multiple: true

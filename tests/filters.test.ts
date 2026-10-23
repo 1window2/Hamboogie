@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 import {KEYWORD_MAX, newGallery, normalizeGallery, normalizeKeywords} from "@shared/settings";
-import {matchesKeywords} from "../src/main/pipeline/keyword-filter";
+import {findKeyword, matchesKeywords} from "../src/main/pipeline/keyword-filter";
 import {htmlToText} from "../src/main/dc/text";
 
 describe("matchesKeywords", () => {
@@ -11,7 +11,21 @@ describe("matchesKeywords", () => {
     });
 });
 
+describe("findKeyword", () => {
+    it("들어 있는 제외 키워드를 공백과 대소문자 무시하고 찾는다", () => {
+        expect(findKeyword("치킨 나눔 (인 증 필수)", ["구매", "인증"])).toBe("인증");
+        expect(findKeyword("Event 참여", ["event"])).toBe("event");
+        expect(findKeyword("햄버거 나눔", ["인증"])).toBeNull();
+        expect(findKeyword("아무 글", [])).toBeNull();
+    });
+});
+
 describe("settings normalize", () => {
+    it("이전 버전 설정(제외 키워드 없음)도 빈 목록으로 읽는다", () => {
+        const {excludeKeywords: _, ...old} = newGallery("g");
+        expect(normalizeGallery(old as ReturnType<typeof newGallery>, []).excludeKeywords).toEqual([]);
+    });
+
     it("키워드는 다듬고 중복을 없애며 최대 30개까지만 남긴다", () => {
         const many = Array.from({length: 40}, (_, index) => `k${index}`);
         expect(normalizeKeywords([" 나눔 ", "나눔", "", ...many])).toHaveLength(KEYWORD_MAX);

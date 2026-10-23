@@ -1,9 +1,9 @@
-import {existsSync, readFileSync} from "node:fs";
+import {existsSync, readFileSync, renameSync} from "node:fs";
 import {rename, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import {safeStorage} from "electron";
 import {defaultSettings, normalizeSettings} from "@shared/settings";
-import type {SecretKey, Settings} from "@shared/types";
+import type {HistoryEntry, SecretKey, Settings} from "@shared/types";
 
 function readJson<T>(path: string, fallback: T): T {
     if (!existsSync(path)) return fallback;
@@ -14,22 +14,54 @@ function readJson<T>(path: string, fallback: T): T {
     }
 }
 
-const writeQueues = new Map<string, Promise<void>>();
+interface FileWriter {
+    /** 아직 쓰지 않은 최신 내용입니다. */
+    pending: string | null;
+    /** 진행 중인 쓰기입니다. 끝나면 pending까지 모두 쓴 상태입니다. */
+    writing: Promise<void> | null;
+}
+
+const writers = new Map<string, FileWriter>();
 
 /**
- * 임시 파일에 쓴 뒤 바꿔치기합니다. 같은 파일에 대한 쓰기는 순서대로 하나씩 처리해서,
- * 동시에 저장할 때 임시 파일이 겹쳐 써져 내용이 깨지는 일을 막습니다.
+ * 임시 파일에 쓴 뒤 바꿔치기합니다. 같은 파일에 대한 쓰기는 하나씩 처리하고, 쓰는 동안 밀린 요청은
+ * 최신 내용 하나로 합칩니다. 동시에 저장해도 내용이 깨지지 않고, 연달아 기록해도 파일을 매번 다시 쓰지 않습니다.
+ * 돌려준 Promise는 이 호출의 내용(또는 그보다 최신 내용)이 디스크에 쓰였을 때 끝납니다.
  */
 function writeJson(path: string, value: unknown): Promise<void> {
-    const content = JSON.stringify(value, null, 2);
-    const write = async () => {
-        const temp = `${path}.tmp`;
-        await writeFile(temp, content, "utf8");
-        await rename(temp, path);
-    };
-    const next = (writeQueues.get(path) ?? Promise.resolve()).catch(() => {}).then(write);
-    writeQueues.set(path, next);
-    return next;
+    let writer = writers.get(path);
+    if (!writer) {
+        writer = {pending: null, writing: null};
+        writers.set(path, writer);
+    }
+    writer.pending = JSON.stringify(value, null, 2);
+    writer.writing ??= drain(path, writer);
+    return writer.writing;
+}
+
+async function drain(path: string, writer: FileWriter): Promise<void> {
+    try {
+        while (writer.pending !== null) {
+            const content = writer.pending;
+            writer.pending = null;
+            const temp = `${path}.tmp`;
+            // 계정 비밀번호(암호화됨), 웹훅 주소, 처리 기록이 들어 있어 이 사용자만 읽을 수 있게 둡니다.
+            await writeFile(temp, content, {encoding: "utf8", mode: 0o600});
+            await rename(temp, path);
+        }
+    } finally {
+        writer.writing = null;
+    }
+}
+
+/** 이 파일에 밀린 쓰기가 모두 끝날 때까지 기다립니다. */
+function flushJson(path: string): Promise<void> {
+    return writers.get(path)?.writing?.catch(() => {}) ?? Promise.resolve();
+}
+
+/** 모든 파일에 밀린 쓰기가 끝날 때까지 기다립니다. 앱을 끄기 전에 부릅니다. */
+export function flushAllJson(): Promise<void> {
+    return Promise.all([...writers.keys()].map(flushJson)).then(() => {});
 }
 
 /** 일반 설정입니다. 비밀 정보는 들어 있지 않습니다. */
@@ -66,7 +98,17 @@ export class SecretStore {
 
     constructor(dir: string) {
         this.path = join(dir, "secrets.json");
-        this.data = readJson<Record<string, string>>(this.path, {});
+        const loaded = readJson<unknown>(this.path, {});
+        // 객체가 아니면(배열 등) 깨진 것으로 보고 비웁니다. 아래에서 백업합니다.
+        this.data = loaded && typeof loaded === "object" && !Array.isArray(loaded) ? loaded as Record<string, string> : {};
+        // 파일이 깨져서 읽지 못했다면, 다음 저장 때 덮어써서 남은 내용까지 잃지 않도록 백업해 둡니다.
+        if (existsSync(this.path) && Object.keys(this.data).length === 0) {
+            try {
+                if (readFileSync(this.path, "utf8").trim() !== "{}") renameSync(this.path, `${this.path}.broken-${Date.now()}`);
+            } catch {
+                // 백업에 실패해도 앱은 계속 동작합니다.
+            }
+        }
     }
 
     private ensureAvailable(): void {
@@ -95,11 +137,6 @@ export class SecretStore {
         } else {
             delete this.data[key];
         }
-        await writeJson(this.path, this.data);
-    }
-
-    async removeByPrefix(prefix: string): Promise<void> {
-        for (const key of Object.keys(this.data)) if (key.startsWith(prefix)) delete this.data[key];
         await writeJson(this.path, this.data);
     }
 }
@@ -139,5 +176,45 @@ export class Ledger {
         }
         void writeJson(this.path, this.keys).catch(() => {});
         return true;
+    }
+
+    /** 밀린 저장이 끝날 때까지 기다립니다. */
+    flush(): Promise<void> {
+        return flushJson(this.path);
+    }
+}
+
+const HISTORY_LIMIT = 500;
+
+/** 줄 서기 기록입니다. 최근 500건만 남깁니다. */
+export class HistoryStore {
+    private readonly path: string;
+    private readonly entries: HistoryEntry[];
+    private readonly listeners = new Set<(entry: HistoryEntry) => void>();
+
+    constructor(dir: string) {
+        this.path = join(dir, "history.json");
+        this.entries = readJson<HistoryEntry[]>(this.path, []);
+    }
+
+    add(entry: HistoryEntry): void {
+        this.entries.push(entry);
+        if (this.entries.length > HISTORY_LIMIT) this.entries.splice(0, this.entries.length - HISTORY_LIMIT);
+        void writeJson(this.path, this.entries).catch(() => {});
+        for (const listener of this.listeners) listener(entry);
+    }
+
+    /** 밀린 저장이 끝날 때까지 기다립니다. */
+    flush(): Promise<void> {
+        return flushJson(this.path);
+    }
+
+    all(): HistoryEntry[] {
+        return [...this.entries];
+    }
+
+    subscribe(listener: (entry: HistoryEntry) => void): () => void {
+        this.listeners.add(listener);
+        return () => this.listeners.delete(listener);
     }
 }

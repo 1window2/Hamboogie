@@ -1,15 +1,16 @@
 import {useState} from "react";
-import {DEFAULT_MODELS, PROVIDER_LABELS} from "@shared/settings";
+import {DEFAULT_MODELS, FREE_LLM_RPM, PROVIDER_LABELS, PROVIDERS} from "@shared/settings";
+import type {DraftSetter} from "../App";
+import {NumberInput} from "../components/NumberInput";
 import type {AppState, LlmProviderId, Settings} from "@shared/types";
 
 interface Props {
     draft: Settings;
-    setDraft(settings: Settings): void;
+    setDraft: DraftSetter;
     state: AppState;
     run(action: () => Promise<AppState>, keepDraft?: boolean): Promise<void>;
 }
 
-const PROVIDERS: LlmProviderId[] = ["gemini", "openai", "claude"];
 
 export function LlmTab({draft, setDraft, state, run}: Props) {
     const [webhookResult, setWebhookResult] = useState<{ok: boolean; message: string} | null>(null);
@@ -37,11 +38,37 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
                 {PROVIDERS.map((provider) => (
                     <ProviderRow key={provider} provider={provider} draft={draft} setDraft={setDraft} state={state} run={run}/>
                 ))}
+                <div className="field">
+                    <label className="check">
+                        <input type="checkbox" checked={draft.llm.paidPlan}
+                               onChange={(event) => setDraft({...draft, llm: {...draft.llm, paidPlan: event.target.checked}})}/>
+                        유료 요금제 사용 중
+                    </label>
+                    {draft.llm.paidPlan ? (
+                        <label className="field">
+                            <span>분당 요청 상한</span>
+                            <NumberInput value={draft.llm.requestsPerMinute} min={0}
+                                         onChange={(requestsPerMinute) => setDraft({...draft, llm: {...draft.llm, requestsPerMinute}})}/>
+                            <small className="muted">사용 중인 요금제의 분당 요청 한도에 맞추세요. 0이면 제한하지 않습니다.</small>
+                        </label>
+                    ) : (
+                        <small className="muted">무료 등급 한도에 맞춰 모든 갤러리를 합쳐 분당 {FREE_LLM_RPM}회까지만 보냅니다.</small>
+                    )}
+                    <small className="muted">
+                        감시 간격이 1분 이상이면 한 번 확인할 때 이 한도를 다 쓰고, 1분보다 짧거나 갤러리가 여럿이면 1분 동안의 확인 횟수로 나눠 씁니다.
+                        판단할 글이 쓸 수 있는 요청 수보다 많으면 여러 글을 한 요청에 묶어 보냅니다.
+                    </small>
+                </div>
             </section>
 
             <section className="card">
                 <h2>Discord 알림</h2>
-                <p className="muted">줄 서기에 실패했거나 자동으로 판단할 수 없는 글이 있을 때만 알림을 보냅니다.</p>
+                <p className="muted">줄 서기에 실패했거나 자동으로 판단할 수 없는 글이 있을 때 알림을 보냅니다.</p>
+                <label className="check">
+                    <input type="checkbox" checked={draft.notifyOnSuccess}
+                           onChange={(event) => setDraft({...draft, notifyOnSuccess: event.target.checked})}/>
+                    줄 서기에 성공했을 때도 알림 받기
+                </label>
                 <label className="field">
                     <span>웹훅 주소</span>
                     <div className="row">

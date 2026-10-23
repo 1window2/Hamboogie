@@ -7,6 +7,7 @@ Node.js 22.12 이상이 필요합니다.
 ```sh
 npm install
 npm run dev          # 실행
+npm run dev:offline  # 디시에 접속하지 않고 가짜 글/계정으로 실행
 npm run dist:win     # Windows 설치 파일 빌드 (release/)
 ```
 

@@ -4,7 +4,19 @@ directories:
   output: release
 files:
   - out/**
+  - "!out/**/*.map"
+  - resources/**
   - package.json
+# 다른 프로그램이 앱 실행 파일을 Node처럼 띄우거나 디버거를 붙여, OS 보안 저장소에 넣어 둔 비밀번호를 꺼내 가지 못하게 합니다.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+  # 앱 파일(app.asar)을 몰래 바꿔 비밀 정보를 꺼내는 것을 막기 위해, 실행할 때 빌드 때의 해시와 비교합니다.
+  enableEmbeddedAsarIntegrityValidation: true
+  # 서명하지 않은 macOS 빌드는 퓨즈를 바꾸면 기존 서명이 깨져 Apple Silicon에서 실행되지 않으므로 임시 서명을 다시 합니다.
+  resetAdHocDarwinSignature: true
 win:
   target: nsis
   artifactName: ${productName}-${version}-setup.${ext}
@@ -15,3 +27,7 @@ mac:
   target: dmg
   category: public.app-category.utilities
   artifactName: ${productName}-${version}-${arch}.${ext}
+publish:
+  provider: github
+  owner: 1window2
+  repo: Hamboogie
