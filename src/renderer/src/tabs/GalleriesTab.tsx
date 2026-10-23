@@ -153,6 +153,32 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                     본문까지 키워드 확인
                 </label>
                 <small className="muted">새 글마다 본문을 열어 제목과 본문을 함께 봅니다. 제목에 티를 안 내는 나눔 글도 잡지만 새 글마다 디시 요청이 하나씩 늘어납니다.</small>
+                {gallery.scanBody && (
+                    <label className="field">
+                        <span>본문 요청 상한 (한 번 확인할 때)</span>
+                        <NumberInput value={gallery.bodyReadLimit} min={0} onChange={(bodyReadLimit) => onChange({bodyReadLimit})}/>
+                        <small className="muted">
+                            제목에 키워드가 없는 새 글은 최근 글부터 이 개수까지만 본문을 엽니다. 나머지는 제목으로만 판단합니다.
+                            제목에 키워드가 있는 글은 상한과 상관없이 엽니다. 0이면 제한하지 않습니다.
+                        </small>
+                        {gallery.bodyReadLimit === 0 && (
+                            <div className="banner danger">
+                                주의: 분당 글이 수십개씩 올라오는 초대형 갤러리에서는 본문 요청 상한을 제거할 시 IP 차단의 사유가 될 수도 있습니다.
+                            </div>
+                        )}
+                    </label>
+                )}
+            </div>
+
+            <div className="field">
+                <label className="check">
+                    <input type="checkbox" checked={gallery.screenUnmatched} onChange={(event) => onChange({screenUnmatched: event.target.checked})}/>
+                    키워드에 안 걸린 글도 LLM으로 골라내기
+                </label>
+                <small className="muted">
+                    키워드에 걸리지 않은 새 글을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 다시 판단합니다.
+                    확인할 때마다 LLM 요청이 하나 늘어납니다. 본문을 열지 않은 글은 제목만 보냅니다.
+                </small>
             </div>
 
             <KeywordEditor label="제외 키워드" keywords={gallery.excludeKeywords} onChange={(excludeKeywords) => onChange({excludeKeywords})}

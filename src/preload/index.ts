@@ -27,6 +27,7 @@ const api: HamboogieApi = {
     getHistory: invoker("getHistory"),
     installUpdate: invoker("installUpdate"),
     devTestRun: import.meta.env.DEV ? invoker("devTestRun") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
+    devListSample: import.meta.env.DEV ? invoker("devListSample") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
     onLog: (listener) => subscribe<LogEntry>("log", listener),
     onState: (listener) => subscribe<AppState>("state", listener),
     onHistory: (listener) => subscribe<HistoryEntry>("history", listener)

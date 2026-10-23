@@ -136,7 +136,7 @@ async function main(): Promise<void> {
     // 개발 모드 전용 테스트 실행입니다. 배포 빌드에서는 이 분기와 모듈이 통째로 빠집니다.
     if (import.meta.env.DEV) {
         const {registerDevTestIpc} = await import("./dev/test-run");
-        registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get()});
+        registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get(), reader: () => readingAccount()?.client ?? reader});
     }
 
     // 앱 화면(개발 서버 또는 앱에 들어 있는 index.html)에서 온 요청만 받습니다.

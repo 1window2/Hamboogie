@@ -27,6 +27,13 @@ export interface GalleryConfig {
      * 새 글마다 디시 요청이 하나씩 늘어납니다. 끄면 제목에 키워드가 있는 글만 엽니다.
      */
     scanBody: boolean;
+    /**
+     * 한 번 확인할 때 본문을 열어 볼 글 수의 상한입니다. 제목에 키워드가 없는 글에만 적용하며, 넘는 글은 제목으로만 판단합니다.
+     * 0이면 제한하지 않습니다.
+     */
+    bodyReadLimit: number;
+    /** 키워드에 걸리지 않은 새 글을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 골라냅니다. */
+    screenUnmatched: boolean;
     /** 대기 계정 ID 목록입니다. 앞에 있을수록 우선순위가 높습니다. */
     accountIds: string[];
     /** 나눔 글을 감지한 뒤 줄을 서기까지 기다릴 시간(초)입니다. */
@@ -53,6 +60,8 @@ export interface AccountConfig {
 export interface LlmConfig {
     provider: LlmProviderId;
     models: Record<LlmProviderId, string>;
+    /** 최근 1분 동안 보낼 수 있는 LLM 요청 수입니다. 넘으면 묶어 보내거나 기다립니다. 0이면 제한하지 않습니다. */
+    requestsPerMinute: number;
 }
 
 export interface Settings {
@@ -173,4 +182,6 @@ export interface HamboogieApi {
     onState(listener: (state: AppState) => void): () => void;
     /** 개발 모드 전용입니다. 배포 빌드에서는 호출하면 실패합니다. */
     devTestRun(input: DevTestInput): Promise<DevTestResult>;
+    /** 개발 모드 전용입니다. 목록을 한 번 읽어 앞쪽 글들의 원본 필드를 돌려줍니다. */
+    devListSample(gallery: string, thumbnail: boolean): Promise<Record<string, unknown>[]>;
 }

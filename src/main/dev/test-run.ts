@@ -3,6 +3,7 @@
 // 입력한 제목/본문을 테스트 갤러리 1번 글의 내용인 것처럼 LLM 판단 → 줄 서기 계획 → 실제 댓글까지 돌립니다.
 // 디시에는 글을 쓰지 않으며, 댓글은 아래에 고정한 테스트 갤러리의 1번 글에만 답니다.
 import {ipcMain} from "electron";
+import type {DCInside} from "@green-1052/dcinside.js";
 import type {DevTestInput, DevTestResult, Settings} from "@shared/types";
 import type {AccountManager} from "../dc/accounts";
 import type {Logger} from "../logger";
@@ -17,6 +18,8 @@ const LABEL = "[테스트]";
 
 interface Deps {
     engine: Engine;
+    /** 글을 읽을 클라이언트(로그인된 계정 또는 읽기용)입니다. */
+    reader(): DCInside;
     accounts: AccountManager;
     logger: Logger;
     settings(): Settings;
@@ -63,4 +66,9 @@ async function run(deps: Deps, input: DevTestInput): Promise<DevTestResult> {
 
 export function registerDevTestIpc(deps: Deps): void {
     ipcMain.handle("devTestRun", (_event, input: DevTestInput) => run(deps, input));
+    // 목록 응답에 어떤 필드가 오는지 확인하는 용도입니다. 목록을 한 번 읽어 앞쪽 몇 개 글의 필드를 돌려줍니다.
+    ipcMain.handle("devListSample", async (_event, gallery: string, thumbnail: boolean) => {
+        const response = await deps.reader().articles.list({gallery, thumbnail});
+        return (response.gall_list ?? []).slice(0, 5);
+    });
 }

@@ -169,46 +169,122 @@ describe("Engine 성공 알림", () => {
     });
 });
 
-describe("Engine 본문 키워드 확인", () => {
-    type HandlePost = (gallery: GalleryConfig, post: {no: number; title: string}) => Promise<string>;
-    function withReader(articles: Record<number, {title: string; body: string}>) {
-        const reads: number[] = [];
-        const env = setup();
-        const deps = (env.engine as unknown as {deps: EngineDeps}).deps as EngineDeps & {reader: () => unknown; secrets: unknown};
-        Object.assign(deps, {
-            reader: () => ({
-                articles: {
-                    read: async (_gallery: string, no: number) => {
-                        reads.push(no);
-                        const article = articles[no]!;
-                        return {view_info: {subject: article.title}, view_main: {memo: article.body}};
-                    }
-                }
-            }),
-            // LLM 키가 없어 판단은 "분석 실패" 알림이 됩니다. 키워드에 걸려 판단까지 갔는지만 봅니다.
-            secrets: {get: () => null}
-        });
-        const handlePost = (env.engine as unknown as {handlePost: HandlePost}).handlePost.bind(env.engine);
-        return {...env, reads, handlePost};
-    }
+const GIVEAWAY = {
+    is_giveaway: true, is_food: true, line_method: "text" as const, line_text: null, dccon_keyword: null,
+    member_requirement: "any" as const, starts_at: null, ends_at: null, needs_extra_action: false, reason: "나눔"
+};
 
+/** 목록, 본문, LLM을 가짜로 바꾼 감시 한 번을 돌립니다. 첫 확인으로 기준점을 잡은 뒤 `articles`의 글이 새로 올라온 것으로 봅니다. */
+function withGallery(articles: Record<number, {title: string; body: string}>, options: {screen?: (titles: string[]) => number[]; rpm?: number} = {}) {
+    const reads: number[] = [];
+    const calls: string[][] = [];
+    const env = setup();
+    env.update({llm: {...defaultSettings().llm, requestsPerMinute: options.rpm ?? 5}});
+    let listed: number[] = [];
+    const engine = env.engine as unknown as {deps: EngineDeps; readGapMs: number; llm: () => unknown; checkGallery(gallery: GalleryConfig, runId: number): Promise<void>};
+    engine.readGapMs = 0;
+    Object.assign(engine.deps, {
+        reader: () => ({
+            articles: {
+                list: async () => ({gall_list: listed.map((no) => ({no, subject: articles[no]?.title ?? "기존 글"})).reverse()}),
+                read: async (_gallery: string, no: number) => {
+                    reads.push(no);
+                    return {view_info: {subject: articles[no]!.title}, view_main: {memo: articles[no]!.body}};
+                }
+            }
+        }),
+        onReadSucceeded: async () => {}
+    });
+    engine.llm = () => ({
+        decide: async (post: {title: string}) => {
+            calls.push([post.title]);
+            return GIVEAWAY;
+        },
+        decideMany: async (posts: {title: string}[]) => {
+            calls.push(posts.map((post) => post.title));
+            return posts.map(() => GIVEAWAY);
+        },
+        screen: async (posts: {title: string}[]) => {
+            calls.push(["골라내기", ...posts.map((post) => post.title)]);
+            return options.screen?.(posts.map((post) => post.title)) ?? [];
+        }
+    });
+    const run = async (gallery: GalleryConfig) => {
+        listed = [1];
+        await engine.checkGallery(gallery, 0);
+        listed = [1, ...Object.keys(articles).map(Number)];
+        await engine.checkGallery(gallery, 0);
+    };
+    return {...env, reads, calls, run};
+}
+
+const decided = (calls: string[][]) => calls.filter((call) => call[0] !== "골라내기");
+
+describe("Engine 본문 키워드 확인", () => {
     it("켜져 있으면 제목에 키워드가 없어도 본문에 있으면 판단한다", async () => {
-        const {handlePost, reads, logger} = withReader({8: {title: "테스트", body: "햄버거 선착 3명 뿌림"}, 9: {title: "잡담", body: "오늘 날씨 좋다"}});
-        const scan = {...gallery, scanBody: true};
-        expect(await handlePost(scan, {no: 8, title: "테스트"})).toBe("matched");
-        expect(await handlePost(scan, {no: 9, title: "잡담"})).toBe("done");
+        const {run, reads, calls, logger} = withGallery({8: {title: "테스트", body: "햄버거 선착 3명 뿌림"}, 9: {title: "잡담", body: "오늘 날씨 좋다"}});
+        await run({...gallery, scanBody: true});
         expect(reads).toEqual([8, 9]);
+        expect(calls).toEqual([["테스트"]]);
         expect(logged(logger, "본문 키워드")).toBe(true);
     });
 
     it("꺼져 있으면 제목에 키워드가 없는 글은 열지도 않는다", async () => {
-        const {handlePost, reads} = withReader({8: {title: "테스트", body: "햄버거 뿌림"}});
-        expect(await handlePost({...gallery, scanBody: false}, {no: 8, title: "테스트"})).toBe("done");
+        const {run, reads, calls} = withGallery({8: {title: "테스트", body: "햄버거 뿌림"}});
+        await run({...gallery, scanBody: false});
         expect(reads).toEqual([]);
+        expect(calls).toEqual([]);
     });
 
     it("본문에 제외 키워드가 있으면 넘어간다", async () => {
-        const {handlePost} = withReader({8: {title: "치킨 나눔", body: "구매 인증한 사람만"}});
-        expect(await handlePost({...gallery, scanBody: true, excludeKeywords: ["인증"]}, {no: 8, title: "치킨 나눔"})).toBe("done");
+        const {run, calls} = withGallery({8: {title: "치킨 나눔", body: "구매 인증한 사람만"}});
+        await run({...gallery, scanBody: true, excludeKeywords: ["인증"]});
+        expect(calls).toEqual([]);
+    });
+
+    it("본문 요청 상한을 넘으면 최근 글만 열고, 제목에 키워드가 있는 글은 상한과 상관없이 연다", async () => {
+        const {run, reads, logger} = withGallery({
+            2: {title: "잡담1", body: ""}, 3: {title: "잡담2", body: ""}, 4: {title: "치킨 나눔", body: ""}, 5: {title: "잡담3", body: ""}, 6: {title: "잡담4", body: ""}
+        });
+        await run({...gallery, scanBody: true, bodyReadLimit: 2});
+        expect(reads).toEqual([4, 5, 6]);
+        expect(logged(logger, "최근 2개만 본문을 확인")).toBe(true);
+    });
+
+    it("상한이 0이면 모두 연다", async () => {
+        const {run, reads} = withGallery({2: {title: "a", body: ""}, 3: {title: "b", body: ""}, 4: {title: "c", body: ""}});
+        await run({...gallery, scanBody: true, bodyReadLimit: 0});
+        expect(reads).toEqual([2, 3, 4]);
+    });
+});
+
+describe("Engine LLM 요청 묶기", () => {
+    const many = (count: number) => Object.fromEntries(Array.from({length: count}, (_, i) => [i + 2, {title: `나눔 ${i + 2}`, body: ""}]));
+
+    it("분당 한도 이하면 글마다 따로 보낸다", async () => {
+        const {run, calls} = withGallery(many(3));
+        await run(gallery);
+        expect(calls).toHaveLength(3);
+        expect(calls.every((call) => call.length === 1)).toBe(true);
+    });
+
+    it("한도를 넘으면 한도만큼의 요청으로 묶는다", async () => {
+        const {run, calls, ledger} = withGallery(many(12));
+        await run(gallery);
+        expect(calls.map((call) => call.length)).toEqual([3, 3, 2, 2, 2]);
+        // 판단을 받은 글은 모두 처리한 글로 남습니다(로그인된 계정이 없어 알림으로 처리됩니다).
+        expect(Array.from({length: 12}, (_, i) => ledger.has("gf2", i + 2)).every(Boolean)).toBe(true);
+    });
+
+    it("키워드에 안 걸린 글은 하나로 묶어 골라내고, 고른 글만 판단한다", async () => {
+        const {run, calls, reads} = withGallery(
+            {2: {title: "치킨 나눔", body: ""}, 3: {title: "오늘 3시까지 ㄱㄱ", body: ""}, 4: {title: "잡담", body: "오늘 날씨"}},
+            {screen: (titles) => titles.flatMap((title, index) => title.includes("3시") ? [index] : [])}
+        );
+        await run({...gallery, keywords: ["나눔"], scanBody: true, bodyReadLimit: 1, screenUnmatched: true});
+        // 상한 1이라 최근 글(4)만 본문을 열고, 3은 제목만으로 골라내기에 들어갑니다.
+        expect(reads).toEqual([2, 4]);
+        expect(calls.find((call) => call[0] === "골라내기")).toEqual(["골라내기", "오늘 3시까지 ㄱㄱ", "잡담"]);
+        expect(decided(calls).flat().sort()).toEqual(["오늘 3시까지 ㄱㄱ", "치킨 나눔"]);
     });
 });
