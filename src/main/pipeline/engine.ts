@@ -3,7 +3,7 @@ import {effectiveRpm, galleryProblems, PROVIDER_LABELS} from "@shared/settings";
 import type {GalleryConfig, GalleryStatus, HistoryEntry, Settings} from "@shared/types";
 import {isAppIdFailure, isDefiniteCommentFailure, type AccountManager} from "../dc/accounts";
 import type {AppIdBackoff} from "../dc/app-id-backoff";
-import {isOutdatedAppError, OUTDATED_APP_MESSAGE} from "../dc/app-version";
+import {isOutdatedAppError, OUTDATED_APP_MESSAGE, OUTDATED_PAUSE_MS} from "../dc/app-version";
 import {htmlToText} from "../dc/text";
 import type {Decision} from "../llm/decision";
 import {createProvider, type LlmProvider} from "../llm/providers";
@@ -453,10 +453,12 @@ export class Engine {
      */
     private async recoverReader(error: unknown): Promise<void> {
         if (!isAppIdFailure(error)) return;
-        const minutes = Math.round(this.deps.appId.pauseMs / 60000);
-        const needsFreshDevice = this.deps.appId.fail();
+        const outdated = isOutdatedAppError(error);
+        const pauseMs = outdated ? OUTDATED_PAUSE_MS : this.deps.appId.pauseMs;
+        const minutes = Math.round(pauseMs / 60000);
+        const needsFreshDevice = this.deps.appId.fail(pauseMs);
         // 앱 버전이 낮아 거절된 것이면 기기 정보를 새로 받아도 풀리지 않습니다. 쉬면서 한 번만 알립니다.
-        if (isOutdatedAppError(error)) {
+        if (outdated) {
             this.deps.logger.error(`${OUTDATED_APP_MESSAGE} ${minutes}분 뒤 다시 확인합니다.`);
             if (!this.outdatedNotified) {
                 this.outdatedNotified = true;

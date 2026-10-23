@@ -2,7 +2,7 @@ import {ApiError, AuthExpiredError, CaptchaRequiredError, DCInside, OtpRequiredE
 import type {AccountConfig, AccountStatus, MemberType} from "@shared/types";
 import type {SecretStore} from "../store";
 import {AppIdBackoff} from "./app-id-backoff";
-import {DC_APP_VERSION, isOutdatedAppError, OUTDATED_APP_MESSAGE} from "./app-version";
+import {DC_APP_VERSION, isOutdatedAppError, OUTDATED_APP_MESSAGE, OUTDATED_PAUSE_MS} from "./app-version";
 import type {CandidateAccount, CommentContent, OwnedDccon} from "../pipeline/planner";
 
 interface LoggedIn {
@@ -224,7 +224,7 @@ export class AccountManager {
             this.appId.succeed();
         } catch (error) {
             if (isAppIdFailure(error)) {
-                this.appId.fail();
+                this.appId.fail(isOutdatedAppError(error) ? OUTDATED_PAUSE_MS : undefined);
                 loggedIn.dcconError = isOutdatedAppError(error) ? OUTDATED_APP_MESSAGE : APP_ID_REFUSED_MESSAGE;
             } else {
                 loggedIn.dcconError = describe(error);
@@ -306,7 +306,7 @@ export class AccountManager {
             return;
         } catch (error) {
             if (isAppIdFailure(error)) {
-                const needsFreshDevice = this.appId.fail();
+                const needsFreshDevice = this.appId.fail(isOutdatedAppError(error) ? OUTDATED_PAUSE_MS : undefined);
                 // 앱 버전이 낮아 거절된 것이면 기기 정보를 새로 받아도 풀리지 않습니다.
                 if (isOutdatedAppError(error)) throw new CommentNotPostedError(OUTDATED_APP_MESSAGE);
                 if (!needsFreshDevice) throw new CommentNotPostedError(APP_ID_REFUSED_MESSAGE);
