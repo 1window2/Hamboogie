@@ -193,3 +193,13 @@ describe("AccountManager 계정 삭제", () => {
         expect(Object.keys(secrets.data).sort()).toEqual(["account:acc10", "device:reader"]);
     });
 });
+
+describe("AccountManager 글 읽기 계정", () => {
+    it("계정 목록 순서에서 처음으로 로그인된 계정의 클라이언트로 읽고, 없으면 null", async () => {
+        const {manager} = setup({"otp:acc1": "token-abc"});
+        const other: AccountConfig = {id: "acc0", loginId: "other", memberTypeOverride: "auto"};
+        expect(manager.readingClient([other, ACCOUNT])).toBeNull();
+        await manager.login(ACCOUNT);
+        expect(manager.readingClient([other, ACCOUNT])?.accountId).toBe("acc1");
+    });
+});

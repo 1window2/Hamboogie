@@ -66,12 +66,27 @@ async function main(): Promise<void> {
     // app_id 발급 거절은 IP 단위라 읽기용 클라이언트와 계정들이 대기 상태를 함께 씁니다.
     const appId = new AppIdBackoff();
     const accounts = new AccountManager(secrets, fakeClient, appId);
+    // 읽기용 기기는 로그인된 계정이 없을 때만 씁니다. 계정이 있으면 그 계정으로 읽어서 앱 인증(app_id)을 하나만 받습니다.
     let reader = fakeClient ? fakeClient() : createReader(secrets);
+    const readingAccount = () => accounts.readingClient(settingsStore.get().accounts);
+    let readerUsed = false;
     const engine = new Engine({
-        reader: () => reader,
-        onReaderReady: () => persistReader(secrets, reader),
+        reader: () => {
+            const account = readingAccount();
+            if (account) return account.client;
+            readerUsed = true;
+            return reader;
+        },
+        onReadSucceeded: async () => {
+            const account = readingAccount();
+            if (account) accounts.markAppIdOk(account.accountId);
+            // 따로 쓴 읽기용 기기는 app_id를 받은 뒤 저장해야 다음 실행 때 다시 발급받지 않습니다.
+            else if (readerUsed) await persistReader(secrets, reader);
+        },
         resetReader: async () => {
-            reader = fakeClient ? fakeClient() : createReader(secrets, true);
+            const account = readingAccount();
+            if (account) await accounts.refreshDevice(account.accountId);
+            else reader = fakeClient ? fakeClient() : createReader(secrets, true);
         },
         appId,
         accounts,
@@ -173,7 +188,7 @@ async function main(): Promise<void> {
         await loginAccount(account, otp);
         return state();
     });
-    handle("checkGallery", (_event, galleryId: string) => checkGallery(reader, galleryId));
+    handle("checkGallery", (_event, galleryId: string) => checkGallery(readingAccount()?.client ?? reader, galleryId));
     handle("start", () => {
         engine.start();
         tray?.update();

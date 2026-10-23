@@ -69,9 +69,13 @@ export function createReader(secrets: SecretStore, freshDevice = false): DCInsid
     return new DCInside({credentials: freshDevice ? undefined : loadDevice(secrets, "device:reader")});
 }
 
-/** 인증 정보 발급은 첫 요청 때 일어나므로, 첫 요청이 성공한 뒤에 호출합니다. */
+/**
+ * 읽기용 기기 정보를 저장합니다. 인증 정보 발급은 첫 요청 때 일어나므로 요청이 성공한 뒤에 부릅니다.
+ * 내용이 바뀌었을 때(새 app_id를 받았을 때 등)만 저장합니다.
+ */
 export async function persistReader(secrets: SecretStore, client: DCInside): Promise<void> {
-    await saveDevice(secrets, "device:reader", client);
+    const credentials = JSON.stringify(client.auth.exportCredentials());
+    if (secrets.get("device:reader") !== credentials) await secrets.set("device:reader", credentials);
 }
 
 /** 등록된 계정의 로그인 상태와 세션을 관리합니다. */
@@ -232,6 +236,30 @@ export class AccountManager {
 
     private memberType(account: AccountConfig, loggedIn: LoggedIn): MemberType | null {
         return account.memberTypeOverride === "auto" ? loggedIn.detectedMemberType : account.memberTypeOverride;
+    }
+
+    /**
+     * 글을 읽을 때 쓸 로그인된 계정의 클라이언트입니다. 계정 목록 순서에서 처음으로 로그인된 계정을 씁니다.
+     * 읽기용 기기를 따로 두지 않으면 앱 인증(app_id)을 하나만 받으면 됩니다. 로그인된 계정이 없으면 null입니다.
+     */
+    readingClient(accounts: AccountConfig[]): {accountId: string; client: DCInside} | null {
+        for (const account of accounts) {
+            const loggedIn = this.sessions.get(account.id);
+            if (loggedIn) return {accountId: account.id, client: loggedIn.client};
+        }
+        return null;
+    }
+
+    /** 글 읽기에 쓴 계정의 요청이 성공했음을 기록합니다. 그 계정의 app_id가 유효하다는 뜻입니다. */
+    markAppIdOk(accountId: string): void {
+        const loggedIn = this.sessions.get(accountId);
+        if (loggedIn) loggedIn.appIdOkAt = this.now();
+    }
+
+    /** app_id 거절이 오래 이어질 때 그 계정의 기기 정보를 새로 받아 다시 로그인합니다. */
+    async refreshDevice(accountId: string): Promise<void> {
+        const loggedIn = this.sessions.get(accountId);
+        if (loggedIn) await this.login(loggedIn.account, undefined, true);
     }
 
     /** 대기 계정 중 로그인된 계정만 우선순위 순서대로 돌려줍니다. */

@@ -29,10 +29,11 @@ export interface Analysis {
 type CommentPlan = Extract<Plan, {kind: "comment"}>;
 
 export interface EngineDeps {
-    /** 글 읽기 전용 클라이언트입니다. `resetReader` 뒤에는 새 클라이언트를 돌려줍니다. */
+    /** 글을 읽을 클라이언트입니다. 로그인된 계정이 있으면 그 계정의 것을, 없으면 읽기용 클라이언트를 돌려줍니다. */
     reader(): DCInside;
-    onReaderReady(): Promise<void>;
-    /** 읽기용 기기 정보를 버리고 새 클라이언트를 만듭니다. */
+    /** 목록을 읽는 데 성공했을 때 부릅니다(app_id가 유효함을 기록하고, 읽기용 기기 정보를 저장합니다). */
+    onReadSucceeded(): Promise<void>;
+    /** app_id 거절이 오래 이어질 때 글 읽는 쪽의 기기 정보를 새로 받습니다. */
     resetReader(): Promise<void>;
     /** app_id 발급 거절 대기 규칙입니다. 거절은 IP 단위라 계정들과 함께 씁니다. */
     appId: AppIdBackoff;
@@ -67,7 +68,6 @@ export class Engine {
     private readonly scheduled = new Map<ReturnType<typeof setTimeout>, {gallery: GalleryConfig; post: NewPost; test: boolean}>();
     /** 마지막으로 처리한 글 번호입니다. 갤러리 설정 항목과 갤러리 ID를 함께 키로 써서, ID를 바꾸면 기준을 새로 잡습니다. */
     private readonly lastSeen = new Map<string, number>();
-    private readerReady = false;
     /** 감시 타이머 세대입니다. 시작/멈춤마다 바뀝니다. */
     private runId = 0;
     /** 줄 서기 세대입니다. 사용자가 감시를 멈출 때만 바뀌고, 감시를 다시 시작할 때는 예약을 유지합니다. */
@@ -180,10 +180,7 @@ export class Engine {
         for (let page = 1; page <= MAX_PAGES_PER_TICK; page++) {
             const response = await reader().articles.list({gallery: gallery.galleryId, page});
             this.deps.appId.succeed();
-            if (!this.readerReady) {
-                this.readerReady = true;
-                await this.deps.onReaderReady();
-            }
+            await this.deps.onReadSucceeded();
             const items = (response.gall_list ?? []).filter((item: PostItem) => typeof item.no === "number" && !item.fixtop);
             for (const item of items) collected.set(item.no!, {no: item.no!, title: item.subject ?? ""});
             // 첫 확인이거나, 이번 페이지에 이미 본 글이 있으면 더 넘기지 않습니다.
@@ -259,8 +256,7 @@ export class Engine {
             this.deps.logger.warn(`디시 앱 인증(app_id) 발급이 거절되어 ${minutes}분 동안 목록 확인을 쉽니다.`);
             return;
         }
-        this.deps.logger.warn(`디시 앱 인증(app_id) 거절이 오래 이어져 읽기용 기기 정보를 새로 받습니다. ${minutes}분 뒤 다시 확인합니다.`);
-        this.readerReady = false;
+        this.deps.logger.warn(`디시 앱 인증(app_id) 거절이 오래 이어져 글 읽는 쪽의 기기 정보를 새로 받습니다. ${minutes}분 뒤 다시 확인합니다.`);
         await this.deps.resetReader();
     }
 
