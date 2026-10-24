@@ -1,6 +1,7 @@
 // 개발 모드(npm run dev) 전용 화면입니다. 배포 빌드에서는 탭이 보이지 않습니다.
 import {useEffect, useState} from "react";
-import type {DevTestResult, LogEntry} from "@shared/types";
+import {errorMessage} from "@shared/errors";
+import type {DevApiCheckStep, DevTestResult, LogEntry} from "@shared/types";
 
 function clock(offsetMinutes: number): string {
     const date = new Date(Date.now() + offsetMinutes * 60 * 1000);
@@ -60,6 +61,7 @@ export function DevTestTab() {
 
     return (
         <div className="stack">
+            <ApiCheck/>
             <section className="card">
                 <h2>가짜 글 테스트 <span className="badge">개발 모드 전용</span></h2>
                 <p className="muted">
@@ -130,5 +132,47 @@ export function DevTestTab() {
                 </ul>
             )}
         </div>
+    );
+}
+
+/** 실제 디시 API를 asgeir 1번 글에서 차례로 점검합니다. 단 댓글은 바로 지웁니다. */
+function ApiCheck() {
+    const [running, setRunning] = useState(false);
+    const [steps, setSteps] = useState<DevApiCheckStep[] | null>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    async function check() {
+        setRunning(true);
+        setError(null);
+        try {
+            setSteps(await window.hamboogie.devApiCheck());
+        } catch (caught) {
+            setError(errorMessage(caught));
+        } finally {
+            setRunning(false);
+        }
+    }
+
+    return (
+        <section className="card">
+            <h2>실제 API 점검 <span className="badge">개발 모드 전용</span></h2>
+            <p className="muted">
+                로그인된 계정으로 asgeir 갤러리 확인, 글 목록, 1번 글 읽기, 텍스트 댓글과 디시콘 댓글 달기를 차례로 해 보고,
+                단 댓글은 바로 지웁니다. 디시 요청이 10여 번 나갑니다.
+            </p>
+            <div className="row">
+                <button className="button" disabled={running} onClick={() => void check()}>{running ? "점검 중…" : "점검하기"}</button>
+                {error && <span className="error-text">{error}</span>}
+            </div>
+            {steps && (
+                <ul className="logs">
+                    {steps.map((item) => (
+                        <li key={item.name} className={`log ${item.ok ? "success" : "error"}`}>
+                            <span className="message">{item.ok ? "✓" : "✗"} {item.name}: {item.detail} ({item.elapsedMs}ms)</span>
+                        </li>
+                    ))}
+                </ul>
+            )}
+        </section>
     );
 }

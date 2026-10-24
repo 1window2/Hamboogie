@@ -4,6 +4,7 @@ import {join} from "node:path";
 import {describe, expect, it, vi} from "vitest";
 import {defaultSettings, newGallery} from "@shared/settings";
 import type {GalleryConfig, HistoryEntry, Settings} from "@shared/types";
+import {AuthExpiredError, CaptchaRequiredError} from "@green-1052/dcinside.js";
 import {CommentNotPostedError} from "../src/main/dc/accounts";
 import {AppIdBackoff} from "../src/main/dc/app-id-backoff";
 import {Engine, type EngineDeps} from "../src/main/pipeline/engine";
@@ -153,6 +154,79 @@ describe("Engine 글 하나에 댓글 하나", () => {
         expect(written).toEqual([]);
         expect(recorded[0]).toMatchObject({outcome: "failure", detail: expect.stringContaining("결과를 알 수 없음")});
         expect(logged(logger, "결과 불명")).toBe(true);
+    });
+});
+
+describe("Engine dcinside.js 2.0.2 오류 대응", () => {
+    it("보안 코드가 걸린 갤러리면 다음 계정으로 넘어가지 않고 알린다", async () => {
+        const tried: string[] = [];
+        const {engine, written, recorded} = setup({
+            write: async (accountId) => {
+                tried.push(accountId);
+                throw new CaptchaRequiredError("코드가 설정된 갤러리입니다.", null);
+            }
+        });
+        await engine.dispatch(gallery, {no: 50, title: "나눔"}, plan(0), LIVE);
+        await vi.waitFor(() => expect(recorded).toHaveLength(1));
+        expect(tried).toEqual(["a"]);
+        expect(written).toEqual([]);
+        expect(recorded[0]).toMatchObject({outcome: "failure", detail: expect.stringContaining("보안 코드")});
+    });
+
+    it("글을 읽던 계정의 로그인이 풀리면 그 클라이언트의 계정을 처리하고, 내려놓았을 때만 알린다", async () => {
+        const client = {articles: {list: async () => {
+            throw new AuthExpiredError("login", "로그인이 필요합니다.", null);
+        }}};
+        const run = async (outcome: "recovered" | "expired" | "none") => {
+            const env = setup();
+            const calls: unknown[] = [];
+            const deps = (env.engine as unknown as {deps: EngineDeps}).deps;
+            Object.assign(deps, {
+                reader: () => client,
+                onReaderLoginExpired: async (which: unknown) => {
+                    calls.push(which);
+                    return outcome;
+                }
+            });
+            await (env.engine as unknown as {tick(configId: string, runId: number): Promise<void>}).tick(gallery.id, 0);
+            env.engine.stop();
+            return {calls, logger: env.logger};
+        };
+        const expired = await run("expired");
+        expect(expired.calls).toEqual([client]);
+        expect(logged(expired.logger, "다음 계정으로 읽습니다")).toBe(true);
+        // 웹훅이 없어 알림 대신 남는 경고로 알림 시도를 확인합니다.
+        expect(logged(expired.logger, "Discord 웹훅이 설정되지 않아")).toBe(true);
+
+        const anonymous = await run("none");
+        expect(logged(anonymous.logger, "Discord 웹훅이 설정되지 않아")).toBe(false);
+        const recovered = await run("recovered");
+        expect(logged(recovered.logger, "OTP 토큰으로 다시 로그인")).toBe(true);
+    });
+});
+
+describe("Engine 로그인 필수", () => {
+    it("로그인된 계정이 없으면 디시에 요청하지 않고, 한 번만 알린다", async () => {
+        const {engine, logger} = setup();
+        const deps = (engine as unknown as {deps: EngineDeps}).deps;
+        Object.assign(deps, {reader: () => null});
+        const tick = (engine as unknown as {tick(configId: string, runId: number): Promise<void>}).tick.bind(engine);
+        await tick(gallery.id, 0);
+        await tick(gallery.id, 0);
+        engine.stop();
+        const warnings = logger.recent().filter((entry) => entry.message.includes("로그인된 계정이 없어 디시에 요청하지 않고"));
+        expect(warnings).toHaveLength(1);
+    });
+
+    it("글을 읽는 도중 로그인된 계정이 없어지면 남은 글은 읽지 않고 다음 확인 때 다시 본다", async () => {
+        const {run, reads, engine} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "피자 나눔", body: ""}});
+        const deps = (engine as unknown as {deps: EngineDeps}).deps;
+        const original = deps.reader;
+        let calls = 0;
+        // 목록(첫 확인, 두 번째 확인)과 첫 글 읽기까지는 로그인돼 있다가 그 뒤로 로그인이 사라진 상황입니다.
+        deps.reader = () => (++calls <= 3 ? original() : null);
+        await run({...gallery, keywords: ["나눔"]});
+        expect(reads).toEqual([2]);
     });
 });
 

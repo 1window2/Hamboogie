@@ -1,18 +1,11 @@
 import {APP} from "@green-1052/dcinside.js";
-import version from "./dc-app-version.json";
 
 /**
- * 디시 서버가 요구하는 공식 안드로이드 앱 버전입니다. 디시가 강제 업데이트를 걸면 낮은 버전으로는 app_id를 발급하지 않으므로,
- * dcinside.js가 따라오기 전까지 여기서 맞춥니다. 2026-10-23에 5.3.20 강제 업데이트가 걸렸습니다
- * (`app_check` 응답의 `ver`, `force`). 버전 코드는 같은 버전의 APK에 적힌 값입니다.
- * 값은 `dc-app-version.json`에 두고 스크립트(scripts/*.mjs)와 함께 씁니다.
+ * dcinside.js가 흉내 내는 공식 안드로이드 앱의 버전 코드입니다. 기기 정보를 저장할 때 함께 적어 두고,
+ * 라이브러리 업데이트로 앱 버전이 바뀌면 옛 버전으로 받아 둔 app_id를 버리고 새로 받습니다.
+ * (디시가 강제 업데이트를 걸면 옛 버전으로 받은 app_id도 거절됩니다.)
  */
-export const DC_APP_VERSION: {readonly name: string; readonly code: string} = version;
-
-/** 디시 클라이언트를 만들기 전에 부릅니다. */
-export function applyDcAppVersion(): void {
-    Object.assign(APP as {versionName: string; versionCode: string}, {versionName: DC_APP_VERSION.name, versionCode: DC_APP_VERSION.code});
-}
+export const DC_APP_VERSION_CODE: string = APP.versionCode;
 
 /** 앱 버전이 낮아 거절되면 다시 시도해도 풀리지 않으므로 오래 쉽니다. */
 export const OUTDATED_PAUSE_MS = 60 * 60 * 1000;

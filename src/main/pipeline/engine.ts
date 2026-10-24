@@ -2,7 +2,7 @@ import type {DCInside, PostItem} from "@green-1052/dcinside.js";
 import {errorMessage} from "@shared/errors";
 import {effectiveRpm, galleryProblems, PROVIDER_LABELS} from "@shared/settings";
 import type {GalleryConfig, GalleryStatus, HistoryEntry, Settings} from "@shared/types";
-import {isAppIdFailure, isDefiniteCommentFailure, type AccountManager} from "../dc/accounts";
+import {isAppIdFailure, isCaptchaFailure, isDefiniteCommentFailure, isLoginExpired, type AccountManager} from "../dc/accounts";
 import type {AppIdBackoff} from "../dc/app-id-backoff";
 import {isOutdatedAppError, OUTDATED_APP_MESSAGE, OUTDATED_PAUSE_MS} from "../dc/app-version";
 import {htmlToText} from "../dc/text";
@@ -51,12 +51,19 @@ interface Candidate {
 }
 
 export interface EngineDeps {
-    /** 글을 읽을 클라이언트입니다. 로그인된 계정이 있으면 그 계정의 것을, 없으면 읽기용 클라이언트를 돌려줍니다. */
-    reader(): DCInside;
-    /** 목록을 읽는 데 성공했을 때 부릅니다(app_id가 유효함을 기록하고, 읽기용 기기 정보를 저장합니다). */
-    onReadSucceeded(): Promise<void>;
+    /**
+     * 글을 읽을 로그인된 계정의 클라이언트입니다. 로그인된 계정이 없으면 null이고, 그때는 디시에 요청하지 않습니다.
+     * 로그인하지 않은 채 요청을 쌓으면 비정상 접근으로 보일 수 있어서입니다.
+     */
+    reader(): DCInside | null;
     /** app_id 거절이 오래 이어질 때 글 읽는 쪽의 기기 정보를 새로 받습니다. */
     resetReader(): Promise<void>;
+    /**
+     * 글을 읽던 클라이언트의 로그인이 풀려 라이브러리의 자동 재로그인도 실패했을 때 부릅니다.
+     * 저장된 OTP 토큰으로 다시 로그인했으면 "recovered", 그 계정을 내려놓았으면 "expired",
+     * 로그인하지 않은 읽기용 클라이언트라 할 일이 없으면 "none"입니다.
+     */
+    onReaderLoginExpired(client: DCInside, reason: string): Promise<"recovered" | "expired" | "none">;
     /** app_id 발급 거절 대기 규칙입니다. 거절은 IP 단위라 계정들과 함께 씁니다. */
     appId: AppIdBackoff;
     accounts: AccountManager;
@@ -67,6 +74,13 @@ export interface EngineDeps {
     settings(): Settings;
     /** 계정 상태나 감시 상태가 바뀌었을 때 화면을 갱신합니다. */
     onStateChanged?(): void;
+}
+
+/** 로그인된 계정이 없어 디시에 요청하지 않았다는 오류입니다. 읽던 글은 다음 확인 때 다시 봅니다. */
+class NotLoggedInError extends Error {
+    constructor() {
+        super("로그인된 계정이 없어 디시에 요청하지 않았습니다.");
+    }
 }
 
 /** 감시로 찾은 글의 줄 서기입니다. 개발 모드 테스트(`live`가 없음)와 구분합니다. */
@@ -104,6 +118,10 @@ export class Engine {
     private readonly readGapMs = BODY_READ_GAP_MS;
     /** 앱 버전이 낮아 접속이 거절됐다고 이미 알렸는지입니다. */
     private outdatedNotified = false;
+    /** 로그인된 계정이 없어 감시를 쉰다고 이미 알렸는지입니다. 로그인되면 다시 알릴 수 있게 됩니다. */
+    private notLoggedInWarned = false;
+    /** 마지막으로 글을 읽은 클라이언트입니다. */
+    private lastReader: DCInside | null = null;
     /** 진행 중인 LLM 판단입니다. 목록 확인이 판단을 기다리지 않도록 따로 돌립니다. */
     private readonly inflight = new Set<Promise<void>>();
 
@@ -186,6 +204,14 @@ export class Engine {
         this.inflight.add(tracked);
     }
 
+    /** 글을 읽을 클라이언트입니다. 로그인이 풀렸을 때 어느 계정인지 알 수 있게 마지막으로 쓴 것을 기억합니다. */
+    private reader(): DCInside {
+        const client = this.deps.reader();
+        if (!client) throw new NotLoggedInError();
+        this.lastReader = client;
+        return client;
+    }
+
     private schedule(configId: string, runId: number, delayMs: number): void {
         const timer = setTimeout(() => void this.tick(configId, runId), delayMs);
         this.watchers.set(configId, timer);
@@ -211,8 +237,14 @@ export class Engine {
         }
         try {
             if (await this.deps.accounts.maintain(this.deps.settings().accounts)) this.deps.onStateChanged?.();
+            // 로그인된 계정이 없으면 디시에 요청하지 않습니다. 로그인이 풀린 채 요청을 쌓지 않기 위해서입니다.
+            if (!this.deps.reader()) {
+                await this.warnNotLoggedIn();
             // app_id 발급이 거절된 뒤에는 잠시 목록 확인을 쉽니다. 다시 시도해 봐야 거절만 늘어납니다.
-            if (this.deps.appId.canTry()) await this.checkGallery(gallery, runId);
+            } else if (this.deps.appId.canTry()) {
+                this.notLoggedInWarned = false;
+                await this.checkGallery(gallery, runId);
+            }
         } catch (error) {
             this.deps.logger.error(`목록 확인 실패: ${errorMessage(error)}`, {galleryId: gallery.galleryId});
             await this.recoverReader(error);
@@ -236,16 +268,15 @@ export class Engine {
      * 3. 키워드에 걸린 글을 LLM으로 판단합니다. 분당 요청 한도 안이면 글마다 따로, 넘으면 묶어서 보냅니다.
      */
     private async checkGallery(gallery: GalleryConfig, runId: number): Promise<void> {
-        const {reader, logger} = this.deps;
+        const {logger} = this.deps;
         const key = this.seenKey(gallery);
         const lastSeen = this.lastSeen.get(key);
         const collected = new Map<number, NewPost>();
         let reachedLastSeen = false;
 
         for (let page = 1; page <= MAX_PAGES_PER_TICK; page++) {
-            const response = await reader().articles.list({gallery: gallery.galleryId, page});
+            const response = await this.reader().articles.list({gallery: gallery.galleryId, page});
             this.deps.appId.succeed();
-            await this.deps.onReadSucceeded();
             const items = (response.gall_list ?? []).filter((item: PostItem) => typeof item.no === "number" && !item.fixtop);
             for (const item of items) collected.set(item.no!, {no: item.no!, title: item.subject ?? ""});
             // 첫 확인이거나, 이번 페이지에 이미 본 글이 있으면 더 넘기지 않습니다.
@@ -343,7 +374,7 @@ export class Engine {
             }
             try {
                 await this.paceRead();
-                const article = await this.deps.reader().articles.read(gallery.galleryId, candidate.post.no);
+                const article = await this.reader().articles.read(gallery.galleryId, candidate.post.no);
                 const body = htmlToText(article.view_main?.memo ?? "");
                 const excluded = this.excludedBy(gallery, body);
                 if (excluded) {
@@ -352,8 +383,13 @@ export class Engine {
                 }
                 result.push({...candidate, title: article.view_info?.subject ?? candidate.title, body, bodyRead: true});
             } catch (error) {
-                if (isAppIdFailure(error)) await this.recoverReader(error);
                 this.deps.logger.warn(`골라낸 글의 본문을 읽지 못해 넘어감: ${errorMessage(error)}`, context);
+                if (error instanceof NotLoggedInError) break;
+                // app_id 거절이나 로그인 만료면 남은 글은 더 읽지 않습니다.
+                if (isAppIdFailure(error) || isLoginExpired(error)) {
+                    await this.recoverReader(error);
+                    break;
+                }
             }
         }
         if (skipped > 0) {
@@ -428,7 +464,7 @@ export class Engine {
         let title = post.title;
         let body: string;
         try {
-            const article = await this.deps.reader().articles.read(gallery.galleryId, post.no);
+            const article = await this.reader().articles.read(gallery.galleryId, post.no);
             title = article.view_info?.subject ?? post.title;
             body = htmlToText(article.view_main?.memo ?? "");
         } catch (error) {
@@ -437,8 +473,10 @@ export class Engine {
                 if (titleMatched) logger.info("넘어감: 삭제된 글", context);
                 return "done";
             }
-            // app_id 거절이면 잠시 쉬고 이 글부터 다음에 다시 봅니다. 알리거나 처리한 글로 남기지 않습니다.
-            if (isAppIdFailure(error)) {
+            // app_id 거절이나 로그인 만료면 처리한 뒤 이 글부터 다음에 다시 봅니다. 알리거나 처리한 글로 남기지 않고,
+            // 남은 글을 계속 읽어 로그인 재시도를 쌓지 않습니다. 로그인된 계정이 없어진 경우도 같습니다.
+            if (error instanceof NotLoggedInError) return "retry";
+            if (isAppIdFailure(error) || isLoginExpired(error)) {
                 await this.recoverReader(error);
                 return "retry";
             }
@@ -461,6 +499,15 @@ export class Engine {
         if (!titleMatched && !bodyKeyword) return gallery.screenUnmatched ? {kind: "unmatched", candidate} : "done";
         logger.info(bodyKeyword ? `본문 키워드 "${bodyKeyword}" 일치: "${title}"` : `키워드 일치: "${title}"`, context);
         return {kind: "matched", candidate};
+    }
+
+    /** 로그인된 계정이 없어 감시를 쉰다고 한 번만 알립니다. */
+    private async warnNotLoggedIn(): Promise<void> {
+        if (this.notLoggedInWarned) return;
+        this.notLoggedInWarned = true;
+        const message = "로그인된 계정이 없어 디시에 요청하지 않고 감시를 쉽니다. 계정 탭에서 로그인하면 이어서 확인합니다.";
+        this.deps.logger.warn(message);
+        await this.alert("감시 일시 중지: 로그인 필요", message);
     }
 
     /** 본문 읽기 사이에 간격을 둡니다. */
@@ -588,6 +635,18 @@ export class Engine {
      * 거절이 오래 이어질 때만 읽기용 기기 정보를 새로 받습니다.
      */
     private async recoverReader(error: unknown): Promise<void> {
+        // 읽던 계정의 로그인이 풀렸으면(비밀번호 변경 등) 그 계정을 내려놓아, 확인할 때마다 로그인을 다시 시도하지 않게 합니다.
+        if (isLoginExpired(error)) {
+            const outcome = this.lastReader ? await this.deps.onReaderLoginExpired(this.lastReader, errorMessage(error)) : "none";
+            this.deps.onStateChanged?.();
+            if (outcome === "recovered") {
+                this.deps.logger.info("글을 읽던 계정의 로그인이 풀려 저장된 OTP 토큰으로 다시 로그인했습니다.");
+            } else if (outcome === "expired") {
+                this.deps.logger.warn(`글을 읽던 계정의 로그인이 풀려 다음 계정으로 읽습니다: ${errorMessage(error)}`);
+                await this.alert("디시 로그인이 풀렸습니다", "글을 읽던 계정의 로그인이 풀렸습니다. 계정 탭에서 다시 로그인하세요.");
+            }
+            return;
+        }
         if (!isAppIdFailure(error)) return;
         const outdated = isOutdatedAppError(error);
         const pauseMs = outdated ? OUTDATED_PAUSE_MS : this.deps.appId.pauseMs;
@@ -742,6 +801,14 @@ export class Engine {
                 return;
             }
             const message = `${nickname}: ${errorMessage(failure)}`;
+            // 갤러리에 보안 코드(캡차)가 걸려 있으면 계정을 바꿔도 같으므로 멈추고 알립니다.
+            if (isCaptchaFailure(failure)) {
+                const detail = `이 갤러리는 댓글에 보안 코드 입력이 필요해 자동으로 줄을 설 수 없습니다. (${message})`;
+                logger.error(`${prefix}줄 서기 실패: 보안 코드 필요`, context);
+                this.record(gallery, post, "failure", detail, test);
+                await this.notify(`${prefix}줄 서기 실패(보안 코드 필요): ${post.title}`, detail, gallery.galleryId, post.no);
+                return;
+            }
             if (!isDefiniteCommentFailure(failure)) {
                 // 서버가 댓글을 저장했을 수도 있으므로 다른 계정으로 또 달지 않습니다.
                 const detail = `결과를 알 수 없음 (${message}). 댓글이 달렸는지 글에서 직접 확인하세요.`;

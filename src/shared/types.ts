@@ -186,9 +186,20 @@ export interface HamboogieApi {
     devTestRun(input: DevTestInput): Promise<DevTestResult>;
     /** 개발 모드 전용입니다. 테스트 갤러리의 목록·검색 결과나 글 하나를 읽습니다. */
     devProbe(probe: DevProbe): Promise<unknown>;
+    /** 개발 모드 전용입니다. 테스트 갤러리 1번 글에서 실제 디시 API를 차례로 점검하고, 단 댓글은 지웁니다. */
+    devApiCheck(): Promise<DevApiCheckStep[]>;
 }
 
 /** 개발 모드에서 디시 응답을 직접 확인할 때 보내는 요청입니다. 테스트 갤러리에만 보냅니다. */
 export type DevProbe =
     | {kind: "list"; search?: {keyword: string; type: "subject_m" | "subject" | "memo"}}
-    | {kind: "read"; no: number};
+    | {kind: "read"; no: number}
+    | {kind: "comments"; no: number};
+
+/** 실제 디시 API 점검의 한 단계 결과입니다. */
+export interface DevApiCheckStep {
+    name: string;
+    ok: boolean;
+    detail: string;
+    elapsedMs: number;
+}

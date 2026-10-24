@@ -4,9 +4,8 @@ import {app, BrowserWindow, ipcMain, Notification, shell, type IpcMainInvokeEven
 import {PROVIDERS} from "@shared/settings";
 import type {AccountConfig, AppState, SecretKey, Settings} from "@shared/types";
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
-import {AccountManager, createReader, persistReader} from "./dc/accounts";
+import {AccountManager} from "./dc/accounts";
 import {AppIdBackoff} from "./dc/app-id-backoff";
-import {applyDcAppVersion} from "./dc/app-version";
 import {checkGallery} from "./dc/gallery-check";
 import {Logger} from "./logger";
 import {sendDiscordNotice} from "./notify/discord";
@@ -78,32 +77,25 @@ async function main(): Promise<void> {
         fakeClient = createFakeClientFactory((message) => logger.info(`[오프라인] ${message}`));
         logger.warn("오프라인 모드입니다. 디시 대신 가짜 글과 가짜 계정을 씁니다.");
     }
-    // 디시가 요구하는 앱 버전으로 맞춥니다. 디시 클라이언트를 만들기 전이어야 합니다.
-    applyDcAppVersion();
     // app_id 발급 거절은 IP 단위라 읽기용 클라이언트와 계정들이 대기 상태를 함께 씁니다.
     const appId = new AppIdBackoff();
     const accounts = new AccountManager(secrets, fakeClient, appId);
-    // 읽기용 기기는 로그인된 계정이 없을 때만 씁니다. 계정이 있으면 그 계정으로 읽어서 앱 인증(app_id)을 하나만 받습니다.
-    let reader = fakeClient ? fakeClient() : createReader(secrets);
+    // 글은 로그인된 계정으로만 읽습니다. 로그인된 계정이 없으면 디시에 요청하지 않습니다.
+    // 계정 하나로 읽기와 댓글을 모두 하므로 앱 인증(app_id)도 하나만 받습니다.
     const readingAccount = () => accounts.readingClient(settingsStore.get().accounts);
-    let readerUsed = false;
     const engine = new Engine({
-        reader: () => {
-            const account = readingAccount();
-            if (account) return account.client;
-            readerUsed = true;
-            return reader;
-        },
-        onReadSucceeded: async () => {
-            const account = readingAccount();
-            if (account) accounts.markAppIdOk(account.accountId);
-            // 따로 쓴 읽기용 기기는 app_id를 받은 뒤 저장해야 다음 실행 때 다시 발급받지 않습니다.
-            else if (readerUsed) await persistReader(secrets, reader);
+        reader: () => readingAccount()?.client ?? null,
+        onReaderLoginExpired: async (client, reason) => {
+            // 그사이 이미 다른 이유로 내려놓은 계정이면 할 일이 없습니다.
+            const accountId = accounts.accountOf(client);
+            if (!accountId) return "none";
+            const outcome = await accounts.recoverLogin(accountId, reason) ? "recovered" : "expired";
+            tray?.update();
+            return outcome;
         },
         resetReader: async () => {
             const account = readingAccount();
             if (account) await accounts.refreshDevice(account.accountId);
-            else reader = fakeClient ? fakeClient() : createReader(secrets, true);
         },
         appId,
         accounts,
@@ -167,7 +159,11 @@ async function main(): Promise<void> {
     // 개발 모드 전용 테스트 실행입니다. 배포 빌드에서는 이 분기와 모듈이 통째로 빠집니다.
     if (import.meta.env.DEV) {
         const {registerDevTestIpc} = await import("./dev/test-run");
-        registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get(), reader: () => readingAccount()?.client ?? reader}, handle);
+        registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get(), reader: () => {
+            const account = readingAccount();
+            if (!account) throw new Error("로그인된 계정이 없습니다. 계정 탭에서 먼저 로그인하세요.");
+            return account.client;
+        }}, handle);
     }
 
     handle("getState", () => state());
@@ -207,7 +203,13 @@ async function main(): Promise<void> {
         await loginAccount(account, otp);
         return state();
     });
-    handle("checkGallery", (_event, galleryId: string) => checkGallery(readingAccount()?.client ?? reader, galleryId));
+    handle("checkGallery", (_event, galleryId: string) => {
+        // 로그인하지 않은 채로는 디시에 요청하지 않습니다.
+        const account = readingAccount();
+        if (!account) throw new Error("갤러리를 확인하려면 계정 탭에서 먼저 로그인하세요.");
+        if (!appId.canTry()) throw new Error("디시 앱 인증 대기 중이라 지금은 확인할 수 없습니다. 잠시 후 다시 시도하세요.");
+        return checkGallery(account.client, galleryId, appId);
+    });
     handle("start", () => {
         engine.start();
         tray?.update();

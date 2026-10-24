@@ -59,42 +59,68 @@ export function createFakeClientFactory(log: (message: string) => void): (creden
         return list;
     };
 
-    return () => ({
-        auth: {exportCredentials: () => ({offline: true})},
-        async login(id: string, password: string, _options: LoginOptions = {}) {
-            log(`오프라인 로그인: ${id}`);
-            return {type: "login", id, password, userId: id, result: {result: true, user_id: id, name: `오프라인 ${id}`, is_gonick: 1}};
-        },
-        articles: {
-            async list({gallery}: {gallery: string}) {
-                const list = posts(gallery);
-                const last = list.at(-1)!;
-                const next = SCRIPT[(last.no - 1000) % SCRIPT.length]!;
-                list.push({no: last.no + 1, ...next});
-                return {
-                    gall_info: [{gall_title: `오프라인 ${gallery} 갤러리`, is_minor: true}],
-                    gall_list: list.slice(-16).reverse().map((post) => ({no: post.no, subject: post.subject}))
-                };
+    /** 가짜 댓글입니다. 글마다 쌓이고, 개발 모드의 API 점검에서 지울 수 있습니다. */
+    const comments = new Map<string, {comment_no: number; user_id: string; comment_memo?: string; dccon?: string}[]>();
+    let nextCommentNo = 1;
+    const commentsOf = (gallery: string, no: number) => {
+        const key = `${gallery}#${no}`;
+        if (!comments.has(key)) comments.set(key, []);
+        return comments.get(key)!;
+    };
+
+    return () => {
+        let userId = "";
+        return {
+            auth: {exportCredentials: () => ({offline: true})},
+            async login(id: string, password: string, _options: LoginOptions = {}) {
+                log(`오프라인 로그인: ${id}`);
+                userId = id;
+                return {type: "login", id, password, userId: id, result: {result: true, user_id: id, name: `오프라인 ${id}`, is_gonick: 1}};
             },
-            async read(gallery: string, no: number) {
-                const post = posts(gallery).find((item) => item.no === no);
-                if (!post) throw new Error("작성자가 삭제했거나 존재하지 않는 게시물입니다.");
-                return {view_info: {subject: post.subject}, view_main: {memo: post.memo}};
-            }
-        },
-        dccons: {
-            async list() {
-                return {tab: [{title: "가짜콘"}], list: [[{package_idx: 1, detail_idx: 1, title: "가짜콘 1"}]]};
+            articles: {
+                async list({gallery}: {gallery: string}) {
+                    const list = posts(gallery);
+                    const last = list.at(-1)!;
+                    const next = SCRIPT[(last.no - 1000) % SCRIPT.length]!;
+                    list.push({no: last.no + 1, ...next});
+                    return {
+                        gall_info: [{gall_title: `오프라인 ${gallery} 갤러리`, is_minor: true}],
+                        gall_list: list.slice(-16).reverse().map((post) => ({no: post.no, subject: post.subject}))
+                    };
+                },
+                async read(gallery: string, no: number) {
+                    const post = posts(gallery).find((item) => item.no === no);
+                    if (!post) throw new Error("작성자가 삭제했거나 존재하지 않는 게시물입니다.");
+                    return {view_info: {subject: post.subject}, view_main: {memo: post.memo}};
+                }
             },
-            async insert() {
-                return {img_tag: "<img class='written_dccon'>"};
+            dccons: {
+                async list() {
+                    return {tab: [{title: "가짜콘"}], list: [[{package_idx: 1, detail_idx: 1, title: "가짜콘 1"}]]};
+                },
+                async insert() {
+                    return {img_tag: "<img class='written_dccon'>"};
+                }
+            },
+            comments: {
+                async write(gallery: string, no: number, content: unknown) {
+                    log(`오프라인 댓글: ${gallery} #${no} ← ${typeof content === "string" ? content : "디시콘"}`);
+                    const comment = typeof content === "string" ? {comment_memo: content} : {dccon: "가짜콘"};
+                    commentsOf(gallery, no).unshift({comment_no: nextCommentNo++, user_id: userId, ...comment});
+                    return {result: "true"};
+                },
+                async list(gallery: string, no: number) {
+                    return {comment_list: [...commentsOf(gallery, no)]};
+                },
+                async delete(gallery: string, no: number, commentNo: number) {
+                    const list = commentsOf(gallery, no);
+                    const index = list.findIndex((comment) => comment.comment_no === commentNo);
+                    if (index === -1) throw new Error("댓글을 찾을 수 없습니다.");
+                    list.splice(index, 1);
+                    log(`오프라인 댓글 삭제: ${gallery} #${no} 댓글 #${commentNo}`);
+                    return {result: "true"};
+                }
             }
-        },
-        comments: {
-            async write(gallery: string, no: number, content: unknown) {
-                log(`오프라인 댓글: ${gallery} #${no} ← ${typeof content === "string" ? content : "디시콘"}`);
-                return {result: "true"};
-            }
-        }
-    }) as unknown as DCInside;
+        } as unknown as DCInside;
+    };
 }

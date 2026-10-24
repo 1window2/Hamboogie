@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
-import {APP, AuthExpiredError, DCInsideError, OtpRequiredError, type DCInside, type DeviceCredentials, type LoginOptions} from "@green-1052/dcinside.js";
-import {AccountManager} from "../src/main/dc/accounts";
-import {applyDcAppVersion, DC_APP_VERSION} from "../src/main/dc/app-version";
+import {APP, ApiError, AuthExpiredError, DCInsideError, OtpRequiredError, type DCInside, type DeviceCredentials, type LoginOptions} from "@green-1052/dcinside.js";
+import {AccountManager, CommentNotPostedError, isAppIdFailure} from "../src/main/dc/accounts";
+import {DC_APP_VERSION_CODE} from "../src/main/dc/app-version";
 import {AppIdBackoff} from "../src/main/dc/app-id-backoff";
 import type {AccountConfig} from "@shared/types";
 
@@ -46,7 +46,13 @@ function fakeClientFactory(server: FakeServer) {
                 otp_token: options.otp ? server.validOtpToken : undefined
             }};
         },
-        auth: {exportCredentials: () => ({androidId: "1"})},
+        auth: {
+            exportCredentials: () => ({androidId: "1"}),
+            async appId() {
+                if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
+                return "app-id";
+            }
+        },
         dccons: {
             async list() {
                 if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
@@ -126,9 +132,32 @@ describe("AccountManager 댓글 작성", () => {
         await manager.login(ACCOUNT);
         server.expireWrites = 1;
         server.validOtpToken = "rotated";
-        await expect(manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"})).rejects.toThrow("다시 로그인했지만 실패");
+        await expect(manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"})).rejects.toThrow("로그인이 풀려 댓글을 달지 못했습니다");
         expect(server.written).toEqual([]);
         expect(secrets.data["otp:acc1"]).toBeUndefined();
+    });
+
+    it("OTP 토큰이 없는 계정은 라이브러리의 자동 재로그인이 이미 실패했으므로 다시 로그인하지 않고 내려놓는다", async () => {
+        const {server, manager} = setup({"otp:acc1": "token-abc"});
+        await manager.login(ACCOUNT);
+        // 로그인 뒤 OTP 토큰이 지워진 상황입니다.
+        (manager as unknown as {secrets: {set(key: string, value: string): Promise<void>}}).secrets.set("otp:acc1", "");
+        server.expireWrites = 1;
+        const before = server.loginCalls.length;
+        await expect(manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"})).rejects.toThrow("다시 로그인하세요");
+        expect(server.loginCalls.length).toBe(before);
+        expect(manager.readingClient([ACCOUNT])).toBeNull();
+    });
+
+    it("댓글 요청을 보내기 전(디시콘 준비 등)에 난 오류는 달리지 않은 것이 확실한 실패로 바꾼다", async () => {
+        const {manager} = setup({"otp:acc1": "token-abc"});
+        await manager.login(ACCOUNT);
+        const client = (manager as unknown as {sessions: Map<string, {client: DCInside}>}).sessions.get("acc1")!.client;
+        (client.dccons as unknown as {insert: () => Promise<never>}).insert = async () => {
+            throw new TypeError("fetch failed");
+        };
+        await expect(manager.writeComment("acc1", "asgeir", 1, {type: "dccon", dccon: {packageIdx: 1, detailIdx: 11, title: "햄버거", packageTitle: "음식콘"}}))
+            .rejects.toBeInstanceOf(CommentNotPostedError);
     });
 
     it("계정을 지우면 비밀번호, 디바이스 정보, OTP 토큰을 모두 지운다", async () => {
@@ -202,7 +231,7 @@ describe("디시 앱 버전", () => {
     it("다른 앱 버전으로 저장한 기기 정보는 받아 둔 app_id만 버리고, 같은 버전이면 그대로 쓴다", async () => {
         const used: (DeviceCredentials | undefined)[] = [];
         const device = {androidId: "old", securityToken: "s", fid: "f", refreshToken: "r", clientToken: "c", appId: "old-app-id", appIdIssuedAt: 1};
-        for (const appVersion of [undefined, "100175", DC_APP_VERSION.code]) {
+        for (const appVersion of [undefined, "100175", DC_APP_VERSION_CODE]) {
             const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0, savedDeviceBroken: false};
             const secrets = memorySecrets({"account:acc1": "pw", "otp:acc1": "token-abc", "device:acc1": JSON.stringify({...device, appVersion})});
             const factory = fakeClientFactory(server);
@@ -212,10 +241,8 @@ describe("디시 앱 버전", () => {
         expect(used.every((credentials) => credentials?.androidId === "old")).toBe(true);
     });
 
-    it("클라이언트를 만들기 전에 디시가 요구하는 버전으로 맞춘다", () => {
-        applyDcAppVersion();
-        expect(APP.versionName).toBe(DC_APP_VERSION.name);
-        expect(APP.versionCode).toBe(DC_APP_VERSION.code);
+    it("라이브러리가 흉내 내는 앱 버전 코드를 그대로 쓴다", () => {
+        expect(DC_APP_VERSION_CODE).toBe(APP.versionCode);
     });
 });
 
@@ -235,5 +262,27 @@ describe("AccountManager 글 읽기 계정", () => {
         expect(manager.readingClient([other, ACCOUNT])).toBeNull();
         await manager.login(ACCOUNT);
         expect(manager.readingClient([other, ACCOUNT])?.accountId).toBe("acc1");
+    });
+});
+
+describe("dcinside.js 2.0.2 오류 분류", () => {
+    it("이미 받아 둔 app_id로 보낸 요청이 앱 버전 때문에 거절돼도 app_id 거절로 본다", () => {
+        expect(isAppIdFailure(new ApiError("앱을 계속 이용하시려면 스토어에서 최신 버전으로 업데이트해 주세요.", null))).toBe(true);
+        expect(isAppIdFailure(new ApiError("존재하지 않는 게시물입니다.", null))).toBe(false);
+    });
+
+    it("로그인이 풀린 계정은 저장된 OTP 토큰이 있으면 한 번 다시 로그인하고, 없으면 내려놓는다", async () => {
+        const withOtp = setup({"otp:acc1": "token-abc"});
+        await withOtp.manager.login(ACCOUNT);
+        const before = withOtp.server.loginCalls.length;
+        expect(await withOtp.manager.recoverLogin("acc1", "세션 만료")).toBe(true);
+        expect(withOtp.server.loginCalls.length).toBe(before + 1);
+        expect(withOtp.manager.readingClient([ACCOUNT])?.accountId).toBe("acc1");
+
+        const withOtpButExpired = setup({"otp:acc1": "token-abc"});
+        await withOtpButExpired.manager.login(ACCOUNT);
+        withOtpButExpired.server.validOtpToken = "다른 토큰";
+        expect(await withOtpButExpired.manager.recoverLogin("acc1", "세션 만료")).toBe(false);
+        expect(withOtpButExpired.manager.readingClient([ACCOUNT])).toBeNull();
     });
 });

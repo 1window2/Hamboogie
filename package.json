@@ -1,6 +1,6 @@
 {
   "name": "hamboogie",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "디시인사이드 나눔 글 자동 줄서기 데스크톱 프로그램",
   "license": "GPL-3.0-only",
@@ -21,7 +21,7 @@
   "devDependencies": {
     "@anthropic-ai/sdk": "^1.1.0",
     "@google/genai": "^2.30.0",
-    "@green-1052/dcinside.js": "^2.0.1",
+    "@green-1052/dcinside.js": "2.0.2",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
