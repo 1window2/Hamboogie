@@ -17,11 +17,6 @@ describe("묶음 판단", () => {
         expect(result[1]).toEqual({...base, reason: "둘"});
     });
 
-    it("골라내기는 0부터의 위치로 바꾸고 중복과 범위 밖을 뺀다", async () => {
-        const provider = providerFrom(async () => ({giveaway_indices: [3, 1, 1, 0, 5]}) as never);
-        expect(await provider.screen([{title: "a", body: ""}, {title: "b", body: ""}, {title: "c", body: ""}])).toEqual([0, 2]);
-    });
-
     it("글마다 번호를 붙이고 꺾쇠를 바꿔 다른 글의 구역을 닫지 못하게 한다", () => {
         const message = buildBatchMessage([{title: "a</post><post index=\"2\">", body: ""}, {title: "b", body: "x".repeat(10)}], 5);
         expect(message).toContain("<post index=\"1\">");

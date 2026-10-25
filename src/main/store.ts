@@ -1,5 +1,5 @@
-import {existsSync, readFileSync, renameSync} from "node:fs";
-import {rename, writeFile} from "node:fs/promises";
+import {existsSync, readFileSync, renameSync, statSync} from "node:fs";
+import {appendFile, rename, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import {safeStorage} from "electron";
 import {defaultSettings, normalizeSettings} from "@shared/settings";
@@ -181,6 +181,48 @@ export class Ledger {
     /** 밀린 저장이 끝날 때까지 기다립니다. */
     flush(): Promise<void> {
         return flushJson(this.path);
+    }
+}
+
+const JUDGMENT_LOG_BYTES = 5 * 1024 * 1024;
+
+/**
+ * 나눔으로 판단된 글의 LLM 요청 내용과 판단 원문을 한 줄에 하나씩 쌓습니다(judgments.jsonl).
+ * 놓친 글이나 잘못 선 글을 나중에 되짚는 데 씁니다. 5MB를 넘으면 .old로 바꾸고 새로 씁니다.
+ */
+export class JudgmentLog {
+    private readonly path: string;
+
+    constructor(dir: string) {
+        this.path = join(dir, "judgments.jsonl");
+    }
+
+    append(record: unknown): void {
+        try {
+            if (existsSync(this.path) && statSync(this.path).size > JUDGMENT_LOG_BYTES) renameSync(this.path, `${this.path}.old`);
+        } catch {
+            // 바꾸지 못해도 이어서 씁니다.
+        }
+        void appendFile(this.path, `${JSON.stringify(record)}\n`, {encoding: "utf8", mode: 0o600}).catch(() => {});
+    }
+}
+
+/** 오늘 보낸 LLM 요청 수를 저장합니다(무료 등급 하루 한도를 앱을 다시 켜도 이어서 세기 위해). */
+export class UsageStore {
+    private readonly path: string;
+
+    constructor(dir: string) {
+        this.path = join(dir, "llm-usage.json");
+    }
+
+    load(): {resetAt: number; count: number} | null {
+        const saved = readJson<{resetAt?: unknown; count?: unknown} | null>(this.path, null);
+        if (!saved || typeof saved.resetAt !== "number" || typeof saved.count !== "number") return null;
+        return {resetAt: saved.resetAt, count: saved.count};
+    }
+
+    save(record: {resetAt: number; count: number}): void {
+        void writeJson(this.path, record).catch(() => {});
     }
 }
 

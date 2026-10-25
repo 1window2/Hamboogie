@@ -10,7 +10,8 @@ import {checkGallery} from "./dc/gallery-check";
 import {Logger} from "./logger";
 import {sendDiscordNotice} from "./notify/discord";
 import {Engine} from "./pipeline/engine";
-import {flushAllJson, HistoryStore, Ledger, SecretStore, SettingsStore} from "./store";
+import {LlmUsage} from "./llm/usage";
+import {flushAllJson, HistoryStore, JudgmentLog, Ledger, SecretStore, SettingsStore, UsageStore} from "./store";
 import {createTray} from "./tray";
 import {startUpdater, type Updater} from "./updater";
 import {errorMessage} from "@shared/errors";
@@ -70,6 +71,8 @@ async function main(): Promise<void> {
     const secrets = new SecretStore(dataDir);
     const ledger = new Ledger(dataDir);
     const history = new HistoryStore(dataDir);
+    const usageStore = new UsageStore(dataDir);
+    const judgments = new JudgmentLog(dataDir);
     let fakeClient: ((credentials?: DeviceCredentials) => DCInside) | undefined;
     if (offline) {
         const {blockDcinsideRequests, createFakeClientFactory} = await import("./dev/offline");
@@ -81,10 +84,10 @@ async function main(): Promise<void> {
     const appId = new AppIdBackoff();
     const accounts = new AccountManager(secrets, fakeClient, appId);
     // 글은 로그인된 계정으로만 읽습니다. 로그인된 계정이 없으면 디시에 요청하지 않습니다.
-    // 계정 하나로 읽기와 댓글을 모두 하므로 앱 인증(app_id)도 하나만 받습니다.
-    const readingAccount = () => accounts.readingClient(settingsStore.get().accounts);
+    // 갤러리마다 그 갤러리의 대기 계정으로만 읽습니다(테스트용 계정만 쓰는 갤러리를 메인 계정으로 읽지 않게).
+    const readingAccount = (accountIds: string[]) => accounts.readingClient(settingsStore.get().accounts, accountIds);
     const engine = new Engine({
-        reader: () => readingAccount()?.client ?? null,
+        reader: (gallery) => readingAccount(gallery.accountIds)?.client ?? null,
         onReaderLoginExpired: async (client, reason) => {
             // 그사이 이미 다른 이유로 내려놓은 계정이면 할 일이 없습니다.
             const accountId = accounts.accountOf(client);
@@ -93,8 +96,8 @@ async function main(): Promise<void> {
             tray?.update();
             return outcome;
         },
-        resetReader: async () => {
-            const account = readingAccount();
+        resetReader: async (gallery) => {
+            const account = readingAccount(gallery.accountIds);
             if (account) await accounts.refreshDevice(account.accountId);
         },
         appId,
@@ -104,7 +107,12 @@ async function main(): Promise<void> {
         secrets,
         logger,
         settings: () => settingsStore.get(),
-        onStateChanged: () => pushState()
+        onStateChanged: () => pushState(),
+        recordJudgment: (record) => judgments.append(record),
+        usage: new LlmUsage(() => usageStore.load(), (record) => {
+            usageStore.save(record);
+            pushState();
+        })
     });
 
     let window: BrowserWindow | null = null;
@@ -126,6 +134,8 @@ async function main(): Promise<void> {
             galleryStatus: engine.galleryStatus(),
             version: app.getVersion(),
             offline,
+            llmUsage: engine.llmUsage(),
+            autoStopAt: engine.autoStopAt,
             update: updater?.state() ?? {state: "idle"}
         };
     }
@@ -159,11 +169,7 @@ async function main(): Promise<void> {
     // 개발 모드 전용 테스트 실행입니다. 배포 빌드에서는 이 분기와 모듈이 통째로 빠집니다.
     if (import.meta.env.DEV) {
         const {registerDevTestIpc} = await import("./dev/test-run");
-        registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get(), reader: () => {
-            const account = readingAccount();
-            if (!account) throw new Error("로그인된 계정이 없습니다. 계정 탭에서 먼저 로그인하세요.");
-            return account.client;
-        }}, handle);
+        registerDevTestIpc({engine, accounts, logger, settings: () => settingsStore.get()}, handle);
     }
 
     handle("getState", () => state());
@@ -174,6 +180,7 @@ async function main(): Promise<void> {
         const removed = settingsStore.get().accounts.filter((account) => !next.accounts.some((item) => item.id === account.id));
         for (const account of removed) await accounts.remove(account.id);
         await settingsStore.save(next);
+        engine.refreshAutoStop();
         return state();
     });
     handle("setSecret", async (_event, key: SecretKey, value: string) => {
@@ -203,10 +210,10 @@ async function main(): Promise<void> {
         await loginAccount(account, otp);
         return state();
     });
-    handle("checkGallery", (_event, galleryId: string) => {
-        // 로그인하지 않은 채로는 디시에 요청하지 않습니다.
-        const account = readingAccount();
-        if (!account) throw new Error("갤러리를 확인하려면 계정 탭에서 먼저 로그인하세요.");
+    handle("checkGallery", (_event, galleryId: string, accountIds: string[]) => {
+        // 로그인하지 않은 채로는 디시에 요청하지 않고, 그 갤러리의 대기 계정으로만 확인합니다.
+        const account = readingAccount(Array.isArray(accountIds) ? accountIds.filter((id) => typeof id === "string") : []);
+        if (!account) throw new Error("갤러리를 확인하려면 대기 계정을 먼저 지정하고, 그 계정으로 로그인하세요.");
         if (!appId.canTry()) throw new Error("디시 앱 인증 대기 중이라 지금은 확인할 수 없습니다. 잠시 후 다시 시도하세요.");
         return checkGallery(account.client, galleryId, appId);
     });

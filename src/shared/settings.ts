@@ -1,4 +1,4 @@
-import type {AccountConfig, GalleryConfig, LlmProviderId, Settings} from "./types";
+import type {AccountConfig, AutoStop, GalleryConfig, LlmProviderId, Settings} from "./types";
 
 export const INTERVAL_MIN_SEC = 10;
 export const INTERVAL_MAX_SEC = 60 * 60;
@@ -14,13 +14,15 @@ export const BODY_READ_LIMIT_MAX = 1000;
 export const FREE_LLM_RPM = 5;
 export const LLM_RPM_MAX = 1000;
 
-export const DEFAULT_KEYWORDS = ["나눔", "뿌림", "뿌린다", "뿌려", "선착", "줄", "기프티콘", "쏜다", "추첨", "드림", "드립니다", "드려요", "쏩니다", "까지"];
+/** 새 갤러리의 기본 우선 키워드입니다. 이 키워드가 있는 글은 본문을 먼저 읽습니다(칩의 ×로 지울 수 있음). */
+export const DEFAULT_KEYWORDS = ["싸이", "싸단", "싸셋", "버거", "부기", "부거", "북이", "치킨", "피자", "나눔", "뿌림", "뿌린", "선착", "줄", "까지", "추첨"];
 
 /** 고를 수 있는 LLM 서비스입니다. 화면에 이 순서로 보입니다. */
 export const PROVIDERS: readonly LlmProviderId[] = ["gemini", "openai", "claude"];
 
 export const DEFAULT_MODELS: Record<LlmProviderId, string> = {
-    gemini: "gemini-3.6-flash",
+    // 무료 등급 하루 한도가 넉넉해(하루 500회, 3.6 Flash는 20회) 계속 켜 두는 감시에 맞습니다. 판단은 1~3초입니다.
+    gemini: "gemini-3.5-flash-lite",
     openai: "gpt-6-luna",
     claude: "claude-haiku-5-5"
 };
@@ -37,7 +39,8 @@ export function defaultSettings(): Settings {
         accounts: [],
         llm: {provider: "gemini", models: {...DEFAULT_MODELS}, paidPlan: false, requestsPerMinute: FREE_LLM_RPM},
         discordWebhookUrl: "",
-        notifyOnSuccess: false
+        notifyOnSuccess: false,
+        autoStop: {mode: "off", afterMinutes: AUTO_STOP_DEFAULT_MINUTES, at: AUTO_STOP_DEFAULT_AT}
     };
 }
 
@@ -53,7 +56,6 @@ export function newGallery(id: string): GalleryConfig {
         excludeKeywords: [],
         scanBody: true,
         bodyReadLimit: BODY_READ_LIMIT_DEFAULT,
-        screenUnmatched: true,
         accountIds: [],
         delaySec: 0
     };
@@ -79,8 +81,10 @@ export function normalizeKeywords(keywords: string[]): string[] {
     return result;
 }
 
-export function normalizeGallery(gallery: GalleryConfig, accounts: AccountConfig[]): GalleryConfig {
+export function normalizeGallery(saved: GalleryConfig, accounts: AccountConfig[]): GalleryConfig {
     const accountIds = new Set(accounts.map((account) => account.id));
+    // 1.1.x에 있던 "골라내기" 설정은 모든 새 글을 묶어 판단하게 되면서 없어졌습니다.
+    const {screenUnmatched: _removed, ...gallery} = saved as GalleryConfig & {screenUnmatched?: boolean};
     return {
         ...gallery,
         galleryId: gallery.galleryId.trim(),
@@ -93,7 +97,6 @@ export function normalizeGallery(gallery: GalleryConfig, accounts: AccountConfig
         // 이전 버전에서 저장한 설정에는 없으므로 기본(켜짐)으로 봅니다.
         scanBody: gallery.scanBody ?? true,
         bodyReadLimit: clamp(gallery.bodyReadLimit, 0, BODY_READ_LIMIT_MAX, BODY_READ_LIMIT_DEFAULT),
-        screenUnmatched: gallery.screenUnmatched ?? true,
         accountIds: [...new Set(gallery.accountIds)].filter((id) => accountIds.has(id))
     };
 }
@@ -118,13 +121,60 @@ export function normalizeSettings(settings: Settings): Settings {
             requestsPerMinute: clamp(settings.llm.requestsPerMinute, 0, LLM_RPM_MAX, FREE_LLM_RPM)
         },
         discordWebhookUrl: settings.discordWebhookUrl.trim(),
-        notifyOnSuccess: settings.notifyOnSuccess === true
+        notifyOnSuccess: settings.notifyOnSuccess === true,
+        autoStop: normalizeAutoStop(settings.autoStop)
     };
+}
+
+/**
+ * 무료 등급에서 하루에 보낼 LLM 요청 수입니다. Gemini 3.5 Flash Lite 무료 등급의 하루 한도(500회)에서
+ * 묶음 판단 뒤 2차 확인 등에 쓸 여유를 조금 남겼습니다. 1분마다 확인하면 하루 약 8시간 감시할 수 있습니다.
+ */
+export const FREE_DAILY_LLM_REQUESTS = 480;
+
+/**
+ * 감시 설정으로 하루에 감시할 수 있는 시간(시간 단위)을 어림합니다. 확인 한 번에 LLM 요청 한 번을 쓴다고 보고,
+ * 하루 요청 수를 모든 갤러리의 시간당 확인 횟수로 나눕니다. 감시 간격이 길수록 오래 감시할 수 있습니다(반비례).
+ * 새 글이 없는 확인에는 요청을 쓰지 않으므로 실제로는 이보다 길어집니다. 24시간을 넘으면 24입니다.
+ */
+export function estimatedWatchHours(intervalsSec: number[], dailyRequests = FREE_DAILY_LLM_REQUESTS): number {
+    const checksPerHour = intervalsSec.reduce((sum, interval) => sum + 3600 / Math.max(1, interval), 0);
+    if (checksPerHour === 0) return 24;
+    return Math.min(24, dailyRequests / checksPerHour);
 }
 
 /** 실제로 지킬 분당 LLM 요청 수입니다. 0이면 제한하지 않습니다. */
 export function effectiveRpm(llm: Settings["llm"]): number {
     return llm.paidPlan ? llm.requestsPerMinute : FREE_LLM_RPM;
+}
+
+export const AUTO_STOP_DEFAULT_MINUTES = 120;
+export const AUTO_STOP_MAX_MINUTES = 24 * 60;
+export const AUTO_STOP_DEFAULT_AT = "02:00";
+const CLOCK_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** 이전 버전 설정(자동 중지 없음)이나 잘못된 값을 쓸 수 있는 값으로 맞춥니다. */
+function normalizeAutoStop(autoStop: AutoStop | undefined): AutoStop {
+    const mode = autoStop?.mode === "after" || autoStop?.mode === "at" ? autoStop.mode : "off";
+    return {
+        mode,
+        afterMinutes: clamp(autoStop?.afterMinutes as number, 1, AUTO_STOP_MAX_MINUTES, AUTO_STOP_DEFAULT_MINUTES),
+        at: typeof autoStop?.at === "string" && CLOCK_PATTERN.test(autoStop.at) ? autoStop.at : AUTO_STOP_DEFAULT_AT
+    };
+}
+
+/**
+ * 감시를 자동으로 멈출 시각(ms)입니다. "after"는 감시를 시작한 시각부터 세고, "at"은 지금 이후 그 시각이 처음 오는 때
+ * (오늘 이미 지났으면 내일)입니다. 이 컴퓨터의 시간대를 씁니다. 꺼져 있으면 null입니다.
+ */
+export function nextAutoStopAt(autoStop: AutoStop, startedAt: number, now: number): number | null {
+    if (autoStop.mode === "after") return startedAt + autoStop.afterMinutes * 60 * 1000;
+    if (autoStop.mode !== "at" || !CLOCK_PATTERN.test(autoStop.at)) return null;
+    const [hours, minutes] = autoStop.at.split(":").map(Number) as [number, number];
+    const at = new Date(now);
+    at.setHours(hours, minutes, 0, 0);
+    if (at.getTime() <= now) at.setDate(at.getDate() + 1);
+    return at.getTime();
 }
 
 /** 감시를 시작하기 전에 갤러리 설정의 문제를 찾습니다. */

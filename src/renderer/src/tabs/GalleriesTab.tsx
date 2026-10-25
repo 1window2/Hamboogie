@@ -1,18 +1,20 @@
 import {useEffect, useState} from "react";
-import {BODY_READ_LIMIT_SAFE, INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
+import {BODY_READ_LIMIT_SAFE, estimatedWatchHours, FREE_DAILY_LLM_REQUESTS, INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
 import type {AccountView, GalleryConfig, GalleryStatus, Settings} from "@shared/types";
 import type {DraftSetter} from "../App";
 import {NumberInput} from "../components/NumberInput";
 import {KeywordEditor} from "../components/KeywordEditor";
+import {AutoStopCard} from "../components/AutoStopCard";
 
 interface Props {
     draft: Settings;
     setDraft: DraftSetter;
     accounts: AccountView[];
     status: Record<string, GalleryStatus>;
+    autoStopAt: number | null;
 }
 
-export function GalleriesTab({draft, setDraft, accounts, status}: Props) {
+export function GalleriesTab({draft, setDraft, accounts, status, autoStopAt}: Props) {
     /** `when`이 있으면 그 시점의 최신 갤러리 설정이 조건에 맞을 때만 고칩니다. */
     function update(id: string, patch: Partial<GalleryConfig>, when?: (current: GalleryConfig) => boolean) {
         setDraft((prev) => ({
@@ -24,6 +26,13 @@ export function GalleriesTab({draft, setDraft, accounts, status}: Props) {
     return (
         <div className="stack">
             {draft.galleries.length === 0 && <p className="muted">감시할 갤러리를 추가하세요.</p>}
+            {!draft.llm.paidPlan && draft.galleries.some((gallery) => gallery.enabled) && (
+                <p className="muted note">
+                    무료 등급은 LLM 요청을 하루 {FREE_DAILY_LLM_REQUESTS}회까지 씁니다. 확인할 때마다 새 글을 묶어 요청 한 번으로 판단하므로,
+                    지금 감시 설정(켜진 갤러리 {draft.galleries.filter((gallery) => gallery.enabled).length}개)이면 {watchTimeText(estimatedWatchHours(draft.galleries.filter((gallery) => gallery.enabled).map((gallery) => gallery.intervalSec)))}.
+                    감시 간격을 늘리면 더 오래 감시합니다. 새 글이 없는 확인은 요청을 쓰지 않아 실제로는 더 깁니다.
+                </p>
+            )}
             {draft.galleries.map((gallery) => (
                 <GalleryCard key={gallery.id} gallery={gallery} accounts={accounts} status={status[gallery.id]} onChange={(patch, when) => update(gallery.id, patch, when)}
                              onRemove={() => setDraft((prev) => ({...prev, galleries: prev.galleries.filter((item) => item.id !== gallery.id)}))}/>
@@ -31,6 +40,7 @@ export function GalleriesTab({draft, setDraft, accounts, status}: Props) {
             <button className="button add" onClick={() => setDraft((prev) => ({...prev, galleries: [...prev.galleries, newGallery(crypto.randomUUID())]}))}>
                 + 갤러리 추가
             </button>
+            <AutoStopCard autoStop={draft.autoStop} stopAt={autoStopAt} onChange={(autoStop) => setDraft((prev) => ({...prev, autoStop}))}/>
         </div>
     );
 }
@@ -38,6 +48,14 @@ export function GalleriesTab({draft, setDraft, accounts, status}: Props) {
 function galleryUrl(gallery: GalleryConfig): string {
     const kind = gallery.isMinor ? "mgallery/" : "";
     return `https://gall.dcinside.com/${kind}board/lists/?id=${encodeURIComponent(gallery.galleryId)}`;
+}
+
+/** 하루에 감시할 수 있는 시간을 문장으로 씁니다. */
+function watchTimeText(hours: number): string {
+    if (hours >= 24) return "하루 종일 감시할 수 있습니다";
+    const whole = Math.floor(hours);
+    const minutes = Math.round((hours - whole) * 60);
+    return `하루 약 ${minutes === 0 ? `${whole}시간` : `${whole}시간 ${minutes}분`} 감시할 수 있습니다`;
 }
 
 function formatClock(time: number): string {
@@ -61,7 +79,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
         setChecking(true);
         setCheckError(null);
         try {
-            const result = await window.hamboogie.checkGallery(id);
+            const result = await window.hamboogie.checkGallery(id, gallery.accountIds);
             // 확인하는 사이 ID를 또 바꿨으면 이 결과는 버립니다.
             onChange({galleryId: id, checkedId: id, title: result.title, isMinor: result.isMinor}, (current) => current.galleryId.trim() === id);
         } catch (caught) {
@@ -116,7 +134,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                     : gallery.galleryId.trim() && <small className="error-text check-status">갤러리 ID를 확인해야 감시할 수 있습니다.</small>}
             {status && (
                 <small className="muted check-status">
-                    마지막 확인 {formatClock(status.lastCheckedAt)} · 새 글 {status.newPosts}개 · 키워드 일치 {status.matched}개
+                    마지막 확인 {formatClock(status.lastCheckedAt)} · 새 글 {status.newPosts}개 · 나눔 판단 {status.matched}개
                 </small>
             )}
 
@@ -144,46 +162,35 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                 </fieldset>
             </div>
 
-            <KeywordEditor label="제목 키워드" keywords={gallery.keywords} onChange={(keywords) => onChange({keywords})}
+            <KeywordEditor label="우선 키워드" keywords={gallery.keywords} onChange={(keywords) => onChange({keywords})}
                            placeholder="키워드 입력 (쉼표로 여러 개)"
-                           notice={gallery.keywords.length === 0 && (
-                               <div className="banner danger">
-                                   ⚠ 키워드가 비어 있습니다. 갤러리의 모든 새 글이 LLM으로 전송되어, API 토큰이 매우 빠르게 소모되고 요금이 크게 나올 수 있습니다.
-                                   나눔 글에 자주 쓰이는 키워드를 설정하는 것을 강력히 권장합니다.
-                               </div>
-                           )}/>
+                           notice={<small className="muted">
+                               키워드와 상관없이 새 글은 전부 LLM이 판단합니다. 제목에 키워드가 있는 글은 본문 요청 상한과 상관없이 본문을 먼저 읽고,
+                               판단에 실패하면 알림으로 보냅니다.
+                           </small>}/>
 
             <div className="field">
                 <label className="check">
                     <input type="checkbox" checked={gallery.scanBody} onChange={(event) => onChange({scanBody: event.target.checked})}/>
-                    본문까지 키워드 확인
+                    키워드 없는 글도 본문 읽기
                 </label>
-                <small className="muted">새 글마다 본문을 열어 제목과 본문을 함께 봅니다. 제목에 티를 안 내는 나눔 글도 잡지만 새 글마다 디시 요청이 하나씩 늘어납니다.</small>
+                <small className="muted">
+                    새 글마다 본문을 열어 제목과 함께 LLM에 보냅니다. 제목에 티를 안 내는 나눔 글도 잡지만 새 글마다 디시 요청이 하나씩 늘어납니다.
+                    끄면 키워드에 걸린 글만 본문을 읽고, 나머지는 제목만 보냅니다.
+                </small>
                 {gallery.scanBody && (
                     <label className="field">
                         <span>본문 요청 상한 (한 번 확인할 때)</span>
                         <NumberInput value={gallery.bodyReadLimit} min={0} onChange={(bodyReadLimit) => onChange({bodyReadLimit})}/>
                         <small className="muted">
-                            제목에 키워드가 없는 새 글은 최근 글부터 이 개수까지만 본문을 엽니다. 나머지는 제목으로만 판단합니다.
-                            제목에 키워드가 있는 글은 상한과 상관없이 엽니다. 0이면 제한하지 않습니다.
+                            제목에 키워드가 없는 새 글은 최근 글부터 이 개수까지만 본문을 엽니다. 나머지는 제목만 보내고,
+                            제목만 본 글은 나눔으로 판단돼도 자동으로 줄 서지 않고 알립니다. 0이면 제한하지 않습니다.
                         </small>
                         <small className={gallery.bodyReadLimit === 0 || gallery.bodyReadLimit > BODY_READ_LIMIT_SAFE ? "error-text" : "muted"}>
                             주의: 분당 글이 수십개씩 올라오는 초대형 갤러리에서는 본문 요청 상한을 제거하거나 {BODY_READ_LIMIT_SAFE}개보다 크게 둘 시 IP 차단의 사유가 될 수도 있습니다.
                         </small>
                     </label>
                 )}
-            </div>
-
-            <div className="field">
-                <label className="check">
-                    <input type="checkbox" checked={gallery.screenUnmatched} onChange={(event) => onChange({screenUnmatched: event.target.checked})}/>
-                    키워드에 안 걸린 글도 LLM으로 골라내기
-                </label>
-                <small className="muted">
-                    키워드에 걸리지 않은 새 글의 제목을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 골라 다시 판단합니다(본문을 연 글은 앞부분도 함께).
-                    골라낼 글이 있으면 확인할 때마다 LLM 요청 1회를 여기에 씁니다. 한 번에 쓸 수 있는 요청이 1회뿐이면
-                    키워드에 걸린 글을 먼저 판단하고, 골라내기는 다음 확인으로 미룹니다(2분 넘게 미루지는 않습니다).
-                </small>
             </div>
 
             <KeywordEditor label="제외 키워드" keywords={gallery.excludeKeywords} onChange={(excludeKeywords) => onChange({excludeKeywords})}

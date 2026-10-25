@@ -256,6 +256,11 @@ fieldset {
     flex: 1;
 }
 
+/* 분 수나 시각처럼 짧은 값은 줄 전체로 늘이지 않습니다. */
+.row input.short {
+    flex: 0 0 130px;
+}
+
 .check {
     display: inline-flex;
     align-items: center;

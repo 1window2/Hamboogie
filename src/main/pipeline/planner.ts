@@ -31,6 +31,8 @@ export type Plan =
         /** 예약한 뒤 설정이 바뀌었을 때 실행 직전에 다시 확인하려고 남겨 둡니다. */
         requirement: Decision["member_requirement"];
         isFood: boolean;
+        /** 줄을 서기로 한 LLM의 근거입니다. 성공 알림에 함께 보냅니다. */
+        basis?: string;
     };
 
 /** 요구 문구는 짧은 것만 자동으로 답니다. 긴 문구는 사람이 확인하도록 알림으로 넘깁니다. */
@@ -45,19 +47,20 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 /**
- * `HH:MM`(한국 시간)을 기준 시각 근처의 실제 시각으로 바꿉니다. 나눔 글의 시각은 보통 "오늘"을 뜻하므로
+ * `HH:MM` 또는 `HH:MM:SS`(한국 시간)를 기준 시각 근처의 실제 시각으로 바꿉니다. 나눔 글의 시각은 보통 "오늘"을 뜻하므로
  * 같은 날 그 시각을 먼저 보고, 그 시각이 기준보다 6시간 넘게 이르면 다음 날(예: 23:50에 본 "00:30까지")로 봅니다.
  * 형식이 다르면 null입니다.
  */
 export function resolveClock(clock: string, reference: number): number | null {
-    const match = /^(\d{1,2}):(\d{2})$/.exec(clock.trim());
+    const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(clock.trim());
     if (!match) return null;
     const hours = Number(match[1]);
     const minutes = Number(match[2]);
-    if (hours > 24 || minutes > 59 || (hours === 24 && minutes > 0)) return null;
+    const seconds = Number(match[3] ?? 0);
+    if (hours > 24 || minutes > 59 || seconds > 59 || (hours === 24 && (minutes > 0 || seconds > 0))) return null;
     const kst = new Date(reference + KST_OFFSET_MS);
     const dayStartKst = Date.UTC(kst.getUTCFullYear(), kst.getUTCMonth(), kst.getUTCDate());
-    const sameDay = dayStartKst + (hours * 60 + minutes) * 60 * 1000 - KST_OFFSET_MS;
+    const sameDay = dayStartKst + ((hours * 60 + minutes) * 60 + seconds) * 1000 - KST_OFFSET_MS;
     return reference - sameDay > PAST_WINDOW_MS ? sameDay + DAY_MS : sameDay;
 }
 

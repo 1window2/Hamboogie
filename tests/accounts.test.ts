@@ -146,7 +146,7 @@ describe("AccountManager 댓글 작성", () => {
         const before = server.loginCalls.length;
         await expect(manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"})).rejects.toThrow("다시 로그인하세요");
         expect(server.loginCalls.length).toBe(before);
-        expect(manager.readingClient([ACCOUNT])).toBeNull();
+        expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])).toBeNull();
     });
 
     it("댓글 요청을 보내기 전(디시콘 준비 등)에 난 오류는 달리지 않은 것이 확실한 실패로 바꾼다", async () => {
@@ -256,12 +256,20 @@ describe("AccountManager 계정 삭제", () => {
 });
 
 describe("AccountManager 글 읽기 계정", () => {
-    it("계정 목록 순서에서 처음으로 로그인된 계정의 클라이언트로 읽고, 없으면 null", async () => {
+    it("갤러리의 대기 계정 중 우선순위 순서로 처음 로그인된 계정으로 읽고, 없으면 null", async () => {
         const {manager} = setup({"otp:acc1": "token-abc"});
         const other: AccountConfig = {id: "acc0", loginId: "other", memberTypeOverride: "auto"};
-        expect(manager.readingClient([other, ACCOUNT])).toBeNull();
+        expect(manager.readingClient([other, ACCOUNT], ["acc0", "acc1"])).toBeNull();
         await manager.login(ACCOUNT);
-        expect(manager.readingClient([other, ACCOUNT])?.accountId).toBe("acc1");
+        expect(manager.readingClient([other, ACCOUNT], ["acc0", "acc1"])?.accountId).toBe("acc1");
+    });
+
+    it("다른 갤러리용 계정이 로그인돼 있어도, 이 갤러리의 대기 계정이 아니면 그 계정으로 읽지 않는다", async () => {
+        const {manager} = setup({"otp:acc1": "token-abc"});
+        await manager.login(ACCOUNT);
+        // acc1(메인 계정)은 로그인돼 있지만 이 갤러리의 대기 계정은 acc0(테스트 계정)뿐입니다.
+        expect(manager.readingClient([ACCOUNT], ["acc0"])).toBeNull();
+        expect(manager.readingClient([ACCOUNT], [])).toBeNull();
     });
 });
 
@@ -277,12 +285,12 @@ describe("dcinside.js 2.0.2 오류 분류", () => {
         const before = withOtp.server.loginCalls.length;
         expect(await withOtp.manager.recoverLogin("acc1", "세션 만료")).toBe(true);
         expect(withOtp.server.loginCalls.length).toBe(before + 1);
-        expect(withOtp.manager.readingClient([ACCOUNT])?.accountId).toBe("acc1");
+        expect(withOtp.manager.readingClient([ACCOUNT], [ACCOUNT.id])?.accountId).toBe("acc1");
 
         const withOtpButExpired = setup({"otp:acc1": "token-abc"});
         await withOtpButExpired.manager.login(ACCOUNT);
         withOtpButExpired.server.validOtpToken = "다른 토큰";
         expect(await withOtpButExpired.manager.recoverLogin("acc1", "세션 만료")).toBe(false);
-        expect(withOtpButExpired.manager.readingClient([ACCOUNT])).toBeNull();
+        expect(withOtpButExpired.manager.readingClient([ACCOUNT], [ACCOUNT.id])).toBeNull();
     });
 });

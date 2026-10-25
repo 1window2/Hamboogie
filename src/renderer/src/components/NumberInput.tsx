@@ -5,13 +5,14 @@ interface Props {
     value: number;
     onChange(value: number): void;
     min?: number;
+    className?: string;
 }
 
 /**
  * 0 이상의 정수 입력칸입니다. 입력 중인 글자는 따로 들고 있어서, 칸을 비우거나 앞자리 0을 지우는 도중에
  * 값이 0으로 되돌아가지 않습니다. 비운 채로 포커스를 잃으면 입력을 시작하기 전 값으로 돌아갑니다.
  */
-export function NumberInput({value, onChange, min}: Props) {
+export function NumberInput({value, onChange, min, className}: Props) {
     const [text, setText] = useState(String(value));
     const valueAtFocus = useRef(value);
 
@@ -26,7 +27,7 @@ export function NumberInput({value, onChange, min}: Props) {
     }
 
     return (
-        <input type="text" inputMode="numeric" value={text}
+        <input type="text" inputMode="numeric" className={className} value={text}
                onFocus={() => {
                    valueAtFocus.current = value;
                }}

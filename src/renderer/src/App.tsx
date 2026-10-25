@@ -6,6 +6,7 @@ import {LlmTab} from "./tabs/LlmTab";
 import {LogsTab} from "./tabs/LogsTab";
 import {HistoryTab} from "./tabs/HistoryTab";
 import {DevTestTab} from "./tabs/DevTestTab";
+import {stopAtText} from "./components/AutoStopCard";
 import iconUrl from "./assets/icon.svg";
 import {errorMessage} from "@shared/errors";
 
@@ -74,6 +75,7 @@ export function App() {
                 <div className="header-actions">
                     <span className={state.running ? "badge running" : "badge"}>
                         {state.running ? `감시 중 · 갤러리 ${state.watching}개` : "멈춤"}
+                        {state.running && state.autoStopAt !== null && ` · ${stopAtText(state.autoStopAt)} 자동 중지`}
                     </span>
                     {state.running
                         ? <button className="button" onClick={() => run(() => window.hamboogie.stop(), true)}>감시 멈추기</button>
@@ -110,7 +112,7 @@ export function App() {
             )}
 
             <main className="content">
-                {tab === "galleries" && <GalleriesTab draft={draft} setDraft={updateDraft} accounts={state.accounts} status={state.galleryStatus}/>}
+                {tab === "galleries" && <GalleriesTab draft={draft} setDraft={updateDraft} accounts={state.accounts} status={state.galleryStatus} autoStopAt={state.autoStopAt}/>}
                 {tab === "accounts" && <AccountsTab draft={draft} setDraft={updateDraft} state={state} run={run}/>}
                 {tab === "llm" && <LlmTab draft={draft} setDraft={updateDraft} state={state} run={run}/>}
                 {tab === "history" && <HistoryTab/>}

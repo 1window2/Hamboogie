@@ -112,8 +112,22 @@ describe("makePlan 시각", () => {
     });
 
     it("시각을 해석할 수 없으면 알린다", () => {
-        expect(makePlan(decision({ends_at: "13:00:00"}), gallery, [gonick], NOW, POST)).toMatchObject({kind: "notify", reason: expect.stringContaining("마감 시각을 해석할 수 없음")});
+        expect(makePlan(decision({ends_at: "13:00:61"}), gallery, [gonick], NOW, POST)).toMatchObject({kind: "notify", reason: expect.stringContaining("마감 시각을 해석할 수 없음")});
         expect(makePlan(decision({starts_at: "오후 3시"}), gallery, [gonick], NOW, POST).kind).toBe("notify");
+    });
+});
+
+describe("makePlan 상대 시각", () => {
+    it("LLM이 초까지 바꾼 'N분 뒤부터'는 그 초 뒤에 선다", () => {
+        // 14:00:00에 감지한, 13:59:40에 올라온 "10분 뒤부터" 글
+        const seconds = 40 * 1000;
+        expect(makePlan(decision({starts_at: "14:09:40"}), gallery, [gonick], kst(14), POST))
+            .toMatchObject({kind: "comment", notBefore: kst(14, 9) + seconds + START_MARGIN_MS});
+    });
+
+    it("'30분까지'를 바꾼 마감을 지키고, 지났으면 서지 않는다", () => {
+        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], kst(14, 19), POST)).toMatchObject({kind: "comment", deadline: kst(14, 30)});
+        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], kst(14, 31), POST).kind).toBe("skip");
     });
 });
 

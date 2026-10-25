@@ -1,5 +1,6 @@
 import {useState, type ReactNode} from "react";
 import {KEYWORD_MAX} from "@shared/settings";
+import {isCommitEnter} from "./keys";
 
 interface Props {
     label: string;
@@ -38,7 +39,7 @@ export function KeywordEditor({label, keywords, onChange, placeholder, notice}: 
             <div className="row">
                 <input aria-label={label} value={input} disabled={full} placeholder={full ? `최대 ${KEYWORD_MAX}개입니다` : placeholder}
                        onChange={(event) => setInput(event.target.value)}
-                       onKeyDown={(event) => event.key === "Enter" && add()}/>
+                       onKeyDown={(event) => isCommitEnter(event) && add()}/>
                 <button className="button small" disabled={full || !input.trim()} onClick={add}>추가</button>
             </div>
         </div>

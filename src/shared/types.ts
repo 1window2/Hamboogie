@@ -32,8 +32,6 @@ export interface GalleryConfig {
      * 0이면 제한하지 않습니다.
      */
     bodyReadLimit: number;
-    /** 키워드에 걸리지 않은 새 글을 한 번에 묶어 LLM에 보내, 나눔 글로 보이는 것을 골라냅니다. LLM 요청 한 자리를 이 용도로 남겨 둡니다. */
-    screenUnmatched: boolean;
     /** 대기 계정 ID 목록입니다. 앞에 있을수록 우선순위가 높습니다. */
     accountIds: string[];
     /** 나눔 글을 감지한 뒤 줄을 서기까지 기다릴 시간(초)입니다. */
@@ -66,6 +64,16 @@ export interface LlmConfig {
     requestsPerMinute: number;
 }
 
+/**
+ * 감시 자동 중지입니다. "after"는 감시를 시작하고 `afterMinutes`분 뒤, "at"은 이 컴퓨터 시간으로 `at`(HH:MM)이
+ * 다음에 올 때 멈춥니다. "off"면 멈추지 않습니다.
+ */
+export interface AutoStop {
+    mode: "off" | "after" | "at";
+    afterMinutes: number;
+    at: string;
+}
+
 export interface Settings {
     galleries: GalleryConfig[];
     accounts: AccountConfig[];
@@ -73,6 +81,8 @@ export interface Settings {
     discordWebhookUrl: string;
     /** 줄 서기에 성공했을 때도 Discord로 알립니다. 기본은 꺼짐(실패와 판단 불가만 알림)입니다. */
     notifyOnSuccess: boolean;
+    /** 감시를 자동으로 멈추는 설정입니다. 잘 시간처럼 직접 확인할 수 없을 때 끄기 위해 씁니다. */
+    autoStop: AutoStop;
 }
 
 /** 비밀 정보 종류입니다. 값은 renderer로 절대 보내지 않습니다. */
@@ -117,6 +127,13 @@ export interface GalleryStatus {
     matched: number;
 }
 
+/** 오늘 쓴 LLM 요청 수입니다. `limit`이 0이면 제한이 없습니다(유료 요금제). */
+export interface LlmUsageView {
+    count: number;
+    limit: number;
+    resetAt: number;
+}
+
 export interface AppState {
     settings: Settings;
     accounts: AccountView[];
@@ -130,6 +147,10 @@ export interface AppState {
     update: UpdateState;
     /** 개발 모드 오프라인(가짜 디시)으로 실행 중인지입니다. */
     offline: boolean;
+    /** 오늘 쓴 LLM 요청 수입니다. */
+    llmUsage: LlmUsageView;
+    /** 감시가 자동으로 멈출 시각(ms)입니다. 감시 중이 아니거나 자동 중지가 꺼져 있으면 null입니다. */
+    autoStopAt: number | null;
 }
 
 /** 줄 서기 기록 한 건입니다. */
@@ -171,7 +192,8 @@ export interface HamboogieApi {
     /** `otp`는 OTP 6자리입니다. 상태가 `otp_required`일 때만 넘깁니다. */
     login(accountId: string, otp?: string): Promise<AppState>;
     /** 갤러리가 실제로 있는지 확인하고 이름과 마이너 여부를 돌려줍니다. 없으면 실패합니다. */
-    checkGallery(galleryId: string): Promise<GalleryCheckResult>;
+    /** 갤러리가 실제로 있는지 확인합니다. 그 갤러리의 대기 계정(`accountIds`) 중 로그인된 계정으로만 요청합니다. */
+    checkGallery(galleryId: string, accountIds: string[]): Promise<GalleryCheckResult>;
     start(): Promise<AppState>;
     stop(): Promise<AppState>;
     testWebhook(): Promise<{ok: boolean; message: string}>;
@@ -188,6 +210,12 @@ export interface HamboogieApi {
     devProbe(probe: DevProbe): Promise<unknown>;
     /** 개발 모드 전용입니다. 테스트 갤러리 1번 글에서 실제 디시 API를 차례로 점검하고, 단 댓글은 지웁니다. */
     devApiCheck(): Promise<DevApiCheckStep[]>;
+    /** 개발 모드 전용입니다. 감시를 시작하고, 처음 줄 서기에 성공하면 바로 멈춥니다. */
+    devWatchUntilFirstSuccess(): Promise<{running: boolean}>;
+    /** 개발 모드 전용입니다. 이 글에 그 갤러리의 대기 계정이 단 댓글을 지웁니다. */
+    devDeleteMyComments(galleryId: string, postNo: number): Promise<{account: string; deleted: {no?: number; memo?: string}[]; left: number}>;
+    /** 개발 모드 전용입니다. 더미 글 여러 개를 LLM 요청 한 번으로 판단합니다. */
+    devBatchTest(posts: {title: string; body: string; no?: number; postedAt?: number}[]): Promise<{elapsedMs: number; decisions: (Record<string, unknown> | null)[]}>;
 }
 
 /** 개발 모드에서 디시 응답을 직접 확인할 때 보내는 요청입니다. 테스트 갤러리에만 보냅니다. */

@@ -1,6 +1,7 @@
 import {useState} from "react";
 import type {AccountConfig, AccountStatus, AccountView, AppState, Settings} from "@shared/types";
 import type {DraftSetter} from "../App";
+import {isCommitEnter} from "../components/keys";
 
 interface Props {
     draft: Settings;
@@ -117,7 +118,7 @@ function AccountCard({account, view, onChange, run, onRemove, saved}: {
                     <>
                         <input className="otp-input" value={otp} inputMode="numeric" maxLength={6} placeholder="OTP 6자리" autoFocus
                                onChange={(event) => setOtp(event.target.value.replace(/\D/g, ""))}
-                               onKeyDown={(event) => event.key === "Enter" && submitOtp()}/>
+                               onKeyDown={(event) => isCommitEnter(event) && submitOtp()}/>
                         <button className="button primary small" disabled={!otpValid} onClick={submitOtp}>OTP 확인</button>
                     </>
                 )}

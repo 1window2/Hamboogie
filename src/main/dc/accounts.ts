@@ -288,13 +288,13 @@ export class AccountManager {
     }
 
     /**
-     * 글을 읽을 때 쓸 로그인된 계정의 클라이언트입니다. 계정 목록 순서에서 처음으로 로그인된 계정을 씁니다.
-     * 읽기용 기기를 따로 두지 않으면 앱 인증(app_id)을 하나만 받으면 됩니다. 로그인된 계정이 없으면 null입니다.
+     * 글을 읽을 때 쓸 로그인된 계정의 클라이언트입니다. `accountIds`(갤러리의 대기 계정) 가운데 우선순위 순서로
+     * 처음 로그인된 계정을 씁니다. 다른 갤러리용 계정으로 대신 읽지 않습니다. 로그인된 계정이 없으면 null입니다.
      */
-    readingClient(accounts: AccountConfig[]): {accountId: string; client: DCInside} | null {
-        for (const account of accounts) {
-            const loggedIn = this.sessions.get(account.id);
-            if (loggedIn) return {accountId: account.id, client: loggedIn.client};
+    readingClient(accounts: AccountConfig[], accountIds: string[]): {accountId: string; client: DCInside} | null {
+        for (const id of accountIds) {
+            const loggedIn = this.sessions.get(id);
+            if (loggedIn && accounts.some((account) => account.id === id)) return {accountId: id, client: loggedIn.client};
         }
         return null;
     }

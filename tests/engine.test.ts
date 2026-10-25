@@ -1,11 +1,13 @@
 import {mkdtempSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {describe, expect, it, vi} from "vitest";
-import {defaultSettings, newGallery} from "@shared/settings";
+import {afterEach, describe, expect, it, vi} from "vitest";
+import {defaultSettings, newGallery, nextAutoStopAt, normalizeSettings} from "@shared/settings";
 import type {GalleryConfig, HistoryEntry, Settings} from "@shared/types";
 import {AuthExpiredError, CaptchaRequiredError} from "@green-1052/dcinside.js";
 import {CommentNotPostedError} from "../src/main/dc/accounts";
+import {LlmQuotaExhaustedError} from "../src/main/llm/providers";
+import {LlmUsage} from "../src/main/llm/usage";
 import {AppIdBackoff} from "../src/main/dc/app-id-backoff";
 import {Engine, type EngineDeps} from "../src/main/pipeline/engine";
 import {Logger} from "../src/main/logger";
@@ -218,19 +220,64 @@ describe("Engine 로그인 필수", () => {
         expect(warnings).toHaveLength(1);
     });
 
+    it("대기 계정이 아직 로그인하는 중이면 알리지 않고 다음 확인을 기다린다", async () => {
+        const {engine, logger} = setup();
+        const deps = (engine as unknown as {deps: EngineDeps}).deps;
+        Object.assign(deps, {reader: () => null});
+        Object.assign(deps.accounts, {status: () => ({state: "logging_in"})});
+        await (engine as unknown as {tick(configId: string, runId: number): Promise<void>}).tick(gallery.id, 0);
+        engine.stop();
+        expect(logged(logger, "로그인된 계정이 없어 디시에 요청하지 않고")).toBe(false);
+    });
+
     it("글을 읽는 도중 로그인된 계정이 없어지면 남은 글은 읽지 않고 다음 확인 때 다시 본다", async () => {
         const {run, reads, engine} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "피자 나눔", body: ""}});
         const deps = (engine as unknown as {deps: EngineDeps}).deps;
         const original = deps.reader;
         let calls = 0;
         // 목록(첫 확인, 두 번째 확인)과 첫 글 읽기까지는 로그인돼 있다가 그 뒤로 로그인이 사라진 상황입니다.
-        deps.reader = () => (++calls <= 3 ? original() : null);
+        deps.reader = (target) => (++calls <= 3 ? original(target) : null);
         await run({...gallery, keywords: ["나눔"]});
         expect(reads).toEqual([2]);
     });
 });
 
+describe("Engine LLM 한도 소진", () => {
+    it("한도를 다 썼다는 오류가 오면 초기화될 때까지 LLM에 묻지 않고, 한 번만 알린다", async () => {
+        const env = setup();
+        const engine = env.engine as unknown as {llm: () => unknown; provider: unknown; deps: EngineDeps};
+        let calls = 0;
+        const quota = new LlmQuotaExhaustedError("Gemini 요청 한도를 다 썼습니다.", Date.now() + 60_000);
+        // 실제 llm()이 감싸는 경로를 타도록, 만든 클라이언트 자리에 가짜를 넣습니다.
+        Object.assign(engine.deps, {secrets: {get: () => "key"}});
+        const realLlm = (engine.llm as () => unknown).bind(env.engine);
+        realLlm();
+        const wrap = (env.engine as unknown as {watchQuota(provider: unknown): unknown}).watchQuota.bind(env.engine);
+        (engine.provider as {instance: unknown}).instance = wrap({
+            decide: async () => {
+                calls++;
+                throw quota;
+            }
+        });
+        const analyze = () => env.engine.analyze(gallery, "나눔", "", Date.now());
+        expect((await analyze()).plan).toMatchObject({kind: "notify", reason: expect.stringContaining("한도를 다 썼습니다")});
+        expect((await analyze()).plan).toMatchObject({kind: "notify"});
+        expect(calls).toBe(1);
+        expect(env.logger.recent().filter((entry) => entry.message.includes("LLM 판단을 멈춥니다"))).toHaveLength(1);
+    });
+});
+
 describe("Engine 성공 알림", () => {
+    it("성공 알림에 줄을 서기로 한 LLM의 근거를 함께 보낸다", async () => {
+        const env = setup({notifyOnSuccess: true});
+        const sent: string[] = [];
+        (env.engine as unknown as {alert: (title: string, description: string) => Promise<void>}).alert = async (_title, description) => {
+            sent.push(description);
+        };
+        await env.engine.dispatch(gallery, {no: 22, title: "나눔"}, plan(0, {basis: "햄버거 기프티콘 선착 나눔"}), LIVE);
+        await vi.waitFor(() => expect(sent).toEqual(["계정a 계정으로 \"줄\"\n판단 근거: 햄버거 기프티콘 선착 나눔"]));
+    });
+
     it("기본값(꺼짐)이면 성공해도 알리지 않고, 켜면 알린다", async () => {
         const off = setup();
         await off.engine.dispatch(gallery, {no: 20, title: "나눔"}, plan(0), LIVE);
@@ -247,26 +294,35 @@ const GIVEAWAY = {
     is_giveaway: true, is_food: true, line_method: "text" as const, line_text: null, dccon_keyword: null,
     member_requirement: "any" as const, starts_at: null, ends_at: null, needs_extra_action: false, reason: "나눔"
 };
+const NOT_GIVEAWAY = {...GIVEAWAY, is_giveaway: false, reason: "잡담"};
 
-/** 목록, 본문, LLM을 가짜로 바꾼 감시 한 번을 돌립니다. 첫 확인으로 기준점을 잡은 뒤 `articles`의 글이 새로 올라온 것으로 봅니다. */
 interface GalleryOptions {
-    screen?: (titles: string[]) => number[];
+    /** 묶음 판단에서 나눔으로 볼 글입니다. 기본은 제목이나 본문에 "나눔"이 있는 글입니다. */
+    giveaway?: (post: {title: string; body: string}) => boolean;
+    /** 2차 확인(글 하나로 다시 묻기)에서 나눔으로 볼 글입니다. 기본은 `giveaway`와 같습니다. */
+    confirm?: (post: {title: string; body: string}) => boolean;
+    /** 유료 요금제의 분당 요청 수입니다. 없으면 무료 등급입니다. */
     paidRpm?: number;
-    /** 처음 몇 번의 골라내기를 실패시킵니다. */
-    screenFailures?: number;
     /** 묶음 판단을 실패시킵니다. */
     batchFails?: boolean;
+    /** 줄을 설 수 있는 로그인된 계정이 있게 합니다. */
+    loggedIn?: boolean;
+    usage?: LlmUsage;
 }
 
+/** 목록, 본문, LLM을 가짜로 바꾼 감시를 돌립니다. 첫 확인으로 기준점을 잡은 뒤 `articles`의 글이 새로 올라온 것으로 봅니다. */
 function withGallery(articles: Record<number, {title: string; body: string}>, options: GalleryOptions = {}) {
     const reads: number[] = [];
+    /** LLM 요청입니다. 묶음은 ["묶음", 제목...], 글 하나는 ["단독", 제목]입니다. */
     const calls: string[][] = [];
     const env = setup();
     if (options.paidRpm !== undefined) env.update({llm: {...defaultSettings().llm, paidPlan: true, requestsPerMinute: options.paidRpm}});
     let listed: number[] = [];
-    const engine = env.engine as unknown as {deps: EngineDeps; readGapMs: number; llm: () => unknown; idle(): Promise<void>; checkGallery(gallery: GalleryConfig, runId: number): Promise<void>};
-    let screenFailures = options.screenFailures ?? 0;
+    const engine = env.engine as unknown as {deps: EngineDeps; readGapMs: number; usage: LlmUsage; llm: () => unknown; idle(): Promise<void>; checkGallery(gallery: GalleryConfig, runId: number): Promise<void>};
     engine.readGapMs = 0;
+    if (options.usage) engine.usage = options.usage;
+    const giveaway = options.giveaway ?? ((post) => `${post.title}${post.body}`.includes("나눔"));
+    const confirm = options.confirm ?? giveaway;
     Object.assign(engine.deps, {
         reader: () => ({
             articles: {
@@ -276,26 +332,21 @@ function withGallery(articles: Record<number, {title: string; body: string}>, op
                     return {view_info: {subject: articles[no]!.title}, view_main: {memo: articles[no]!.body}};
                 }
             }
-        }),
-        onReadSucceeded: async () => {}
+        })
     });
+    if (options.loggedIn) Object.assign(engine.deps.accounts, {candidates: () => [{id: "a", memberType: "gonick", dccons: []}]});
     engine.llm = () => ({
-        decide: async (post: {title: string}) => {
-            calls.push([post.title]);
-            return GIVEAWAY;
+        decide: async (post: {title: string; body: string}) => {
+            calls.push(["단독", post.title]);
+            return confirm(post) ? GIVEAWAY : NOT_GIVEAWAY;
         },
-        decideMany: async (posts: {title: string}[]) => {
-            calls.push(posts.map((post) => post.title));
+        decideMany: async (posts: {title: string; body: string}[]) => {
+            calls.push(["묶음", ...posts.map((post) => post.title)]);
             if (options.batchFails) throw new Error("응답 시간 초과");
-            return posts.map(() => GIVEAWAY);
-        },
-        screen: async (posts: {title: string}[]) => {
-            calls.push(["골라내기", ...posts.map((post) => post.title)]);
-            if (screenFailures-- > 0) throw new Error("서버 과부하");
-            return options.screen?.(posts.map((post) => post.title)) ?? [];
+            return posts.map((post) => (giveaway(post) ? GIVEAWAY : NOT_GIVEAWAY));
         }
     });
-    /** 목록에 이 글들이 보이는 상태로 한 번 확인합니다. 감시 간격 계산에 쓰도록 설정의 갤러리도 바꿉니다. */
+    /** 목록에 이 글들이 보이는 상태로 한 번 확인합니다. */
     const check = async (gallery: GalleryConfig, nos: number[]) => {
         env.update({galleries: [gallery]});
         listed = [1, ...nos];
@@ -314,37 +365,90 @@ function withGallery(articles: Record<number, {title: string; body: string}>, op
     return {...env, engine: env.engine, reads, calls, run, check, list};
 }
 
-const decided = (calls: string[][]) => calls.filter((call) => call[0] !== "골라내기");
+const batches = (calls: string[][]) => calls.filter((call) => call[0] === "묶음").map((call) => call.slice(1));
+const singles = (calls: string[][]) => calls.filter((call) => call[0] === "단독").map((call) => call[1]);
 
-describe("Engine 본문 키워드 확인", () => {
-    it("켜져 있으면 제목에 키워드가 없어도 본문에 있으면 판단한다", async () => {
-        const {run, reads, calls, logger} = withGallery({8: {title: "테스트", body: "햄버거 선착 3명 뿌림"}, 9: {title: "잡담", body: "오늘 날씨 좋다"}});
+describe("Engine 새 글 묶음 판단", () => {
+    it("키워드와 상관없이 새 글 전부를 LLM 요청 한 번으로 판단한다", async () => {
+        const {run, calls} = withGallery({2: {title: "잡담", body: "오늘 날씨"}, 3: {title: "질문", body: "육성 재료"}, 4: {title: "테스트", body: "햄버거 선착 뿌림"}});
+        await run({...gallery, keywords: ["나눔"]});
+        expect(batches(calls)).toEqual([["잡담", "질문", "테스트"]]);
+    });
+
+    it("나눔으로 나온 글만 그 글 하나로 다시 확인하고, 다시 확인해서도 나눔이면 줄을 선다", async () => {
+        const {run, calls, written} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "잡담", body: ""}}, {loggedIn: true});
+        await run(gallery);
+        expect(singles(calls)).toEqual(["치킨 나눔"]);
+        await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
+    });
+
+    it("다시 확인해서 나눔이 아니라고 하면 줄을 서지 않는다", async () => {
+        const {run, written, logger} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "잡담", body: ""}}, {loggedIn: true, confirm: () => false});
+        await run(gallery);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(written).toEqual([]);
+        expect(logged(logger, "따로 다시 판단하니 나눔 글이 아님")).toBe(true);
+    });
+
+    it("새 글이 하나면 묶을 다른 글이 없으므로 다시 확인하지 않는다", async () => {
+        const {run, calls, written} = withGallery({2: {title: "치킨 나눔", body: ""}}, {loggedIn: true});
+        await run(gallery);
+        expect(calls).toEqual([["단독", "치킨 나눔"]]);
+        await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
+    });
+
+    it("다시 확인할 요청 자리가 없으면 기다리지 않고 알림으로 넘긴다", async () => {
+        const {run, written, logger} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "잡담", body: ""}}, {loggedIn: true, paidRpm: 1});
+        await run(gallery);
+        expect(written).toEqual([]);
+        expect(logged(logger, "묶어 판단한 결과라")).toBe(true);
+    });
+
+    it(`한 번에 ${40}개까지 묶고, 넘으면 나눠 보낸다`, async () => {
+        const posts = Object.fromEntries(Array.from({length: 45}, (_, i) => [i + 2, {title: `잡담 ${i + 2}`, body: ""}]));
+        const {run, calls} = withGallery(posts);
+        await run({...gallery, scanBody: false});
+        expect(batches(calls).map((batch) => batch.length)).toEqual([40, 5]);
+    });
+
+    it("판단에 실패하면 키워드에 걸린 글만 알린다", async () => {
+        const {run, ledger} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "잡담", body: ""}}, {batchFails: true});
+        await run({...gallery, keywords: ["나눔"]});
+        expect(ledger.has("gf2", 2)).toBe(true);
+        expect(ledger.has("gf2", 3)).toBe(false);
+    });
+});
+
+describe("Engine 본문 읽기", () => {
+    it("켜져 있으면 키워드 없는 글도 본문을 읽어 함께 보낸다(제목에 티를 안 내는 나눔도 잡는다)", async () => {
+        const {run, reads, calls, ledger} = withGallery({8: {title: "테스트", body: "햄버거 선착 3명 나눔"}, 9: {title: "잡담", body: "오늘 날씨 좋다"}});
         await run({...gallery, scanBody: true});
         expect(reads).toEqual([8, 9]);
-        expect(decided(calls)).toEqual([["테스트"]]);
-        expect(logged(logger, "본문 키워드")).toBe(true);
+        expect(batches(calls)).toEqual([["테스트", "잡담"]]);
+        // 나눔으로 판단돼 처리한 글로 남습니다(로그인된 계정이 없어 알림).
+        expect(ledger.has("gf2", 8)).toBe(true);
     });
 
-    it("꺼져 있으면 제목에 키워드가 없는 글은 열지도 않는다", async () => {
-        const {run, reads, calls} = withGallery({8: {title: "테스트", body: "햄버거 뿌림"}});
-        await run({...gallery, scanBody: false, screenUnmatched: false});
-        expect(reads).toEqual([]);
-        expect(calls).toEqual([]);
+    it("꺼져 있으면 키워드에 걸린 글만 본문을 읽고, 나머지는 제목만 보낸다", async () => {
+        const {run, reads, calls} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "테스트", body: "햄버거 뿌림"}});
+        await run({...gallery, keywords: ["나눔"], scanBody: false});
+        expect(reads).toEqual([2]);
+        expect(batches(calls)).toEqual([["치킨 나눔", "테스트"]]);
     });
 
-    it("본문에 제외 키워드가 있으면 넘어간다", async () => {
-        const {run, calls} = withGallery({8: {title: "치킨 나눔", body: "구매 인증한 사람만"}});
-        await run({...gallery, scanBody: true, excludeKeywords: ["인증"]});
-        expect(calls).toEqual([]);
+    it("제목이나 본문에 제외 키워드가 있으면 보내지 않는다", async () => {
+        const {run, calls} = withGallery({2: {title: "치킨 나눔", body: "구매 인증한 사람만"}, 3: {title: "인증 이벤트", body: ""}, 4: {title: "잡담", body: ""}});
+        await run({...gallery, excludeKeywords: ["인증"]});
+        expect(calls).toEqual([["단독", "잡담"]]);
     });
 
     it("본문 요청 상한을 넘으면 최근 글만 열고, 제목에 키워드가 있는 글은 상한과 상관없이 연다", async () => {
         const {run, reads, logger} = withGallery({
             2: {title: "잡담1", body: ""}, 3: {title: "잡담2", body: ""}, 4: {title: "치킨 나눔", body: ""}, 5: {title: "잡담3", body: ""}, 6: {title: "잡담4", body: ""}
         });
-        await run({...gallery, scanBody: true, bodyReadLimit: 2});
+        await run({...gallery, keywords: ["나눔"], scanBody: true, bodyReadLimit: 2});
         expect(reads).toEqual([4, 5, 6]);
-        expect(logged(logger, "최근 2개만 본문을 확인")).toBe(true);
+        expect(logged(logger, "최근 2개만 본문을 읽고")).toBe(true);
     });
 
     it("상한이 0이면 모두 연다", async () => {
@@ -352,147 +456,181 @@ describe("Engine 본문 키워드 확인", () => {
         await run({...gallery, scanBody: true, bodyReadLimit: 0});
         expect(reads).toEqual([2, 3, 4]);
     });
-});
 
-describe("Engine LLM 요청 묶기", () => {
-    const many = (count: number) => Object.fromEntries(Array.from({length: count}, (_, i) => [i + 2, {title: `나눔 ${i + 2}`, body: ""}]));
-    // 묶음 크기만 봅니다. 묶음에서 나눔이라는 판단은 남은 자리가 있으면 하나씩 다시 묻기 때문에 그 요청은 뺍니다.
-    const sizes = (calls: string[][]) => {
-        const all = decided(calls);
-        const batchedTitles = new Set(all.filter((call) => call.length > 1).flat());
-        return all.filter((call) => call.length > 1 || !batchedTitles.has(call[0]!)).map((call) => call.length);
-    };
-    const unmatched = {99: {title: "잡담", body: ""}};
-
-    it("감시 간격이 1분 이상이면 한도(5회) 안에서 글마다 따로 보낸다", async () => {
-        const {run, calls} = withGallery(many(4));
-        await run(gallery);
-        expect(sizes(calls)).toEqual([1, 1, 1, 1]);
-    });
-
-    it("넘으면 묶는다. 골라낼 글이 있으면 1회를 골라내기에 쓰고 판단은 4회로 묶는다", async () => {
-        const withScreening = withGallery({...many(12), ...unmatched});
-        await withScreening.run(gallery);
-        expect(sizes(withScreening.calls)).toEqual([3, 3, 3, 3]);
-        // 판단을 받은 글은 모두 처리한 글로 남습니다(로그인된 계정이 없어 알림으로 처리됩니다).
-        expect(Array.from({length: 12}, (_, i) => withScreening.ledger.has("gf2", i + 2)).every(Boolean)).toBe(true);
-
-        // 골라낼 글이 없으면 자리를 남겨 두지 않고 5회를 다 씁니다.
-        const without = withGallery(many(12));
-        await without.run(gallery);
-        expect(sizes(without.calls)).toEqual([3, 3, 2, 2, 2]);
-    });
-
-    it("감시 간격이 30초면 1분에 두 번 확인하므로 한 번에 2회(골라내기 1 + 판단 1)만 쓴다", async () => {
-        const {run, calls} = withGallery({...many(3), ...unmatched});
-        await run({...gallery, intervalSec: 30});
-        expect(calls.filter((call) => call[0] === "골라내기")).toHaveLength(1);
-        expect(sizes(calls)).toEqual([3]);
-    });
-
-    it("한 번에 1회뿐이면 키워드에 걸린 글을 먼저 판단하고, 골라내기는 다음 확인으로 미룬다", async () => {
-        const {check, calls} = withGallery({2: {title: "나눔 2", body: ""}, 3: {title: "잡담", body: ""}, 4: {title: "잡담 2", body: ""}});
-        const fast = {...gallery, intervalSec: 10, scanBody: false};
-        await check(fast, []);
-        await check(fast, [2, 3]);
-        expect(calls).toEqual([["나눔 2"]]);
-        await check(fast, [2, 3, 4]);
-        expect(calls.at(-1)).toEqual(["골라내기", "잡담", "잡담 2"]);
-    });
-
-    it("유료 요금제에서 0으로 두면 제한 없이 글마다 따로 보낸다", async () => {
-        const {run, calls} = withGallery(many(12), {paidRpm: 0});
-        await run(gallery);
-        expect(sizes(calls)).toEqual(Array(12).fill(1));
-    });
-
-    it("묶음 판단이 실패하면 남은 요청 수로 감당되는 만큼 하나씩 다시 묻는다", async () => {
-        const {run, calls} = withGallery(many(6), {batchFails: true, paidRpm: 20});
-        await run({...gallery, screenUnmatched: false, intervalSec: 60 * 4});
-        // 한도 20을 4분 간격 확인 하나가 다 쓰므로 묶지 않습니다. 묶음이 생기도록 한도를 줄여 다시 봅니다.
-        expect(sizes(calls)).toEqual(Array(6).fill(1));
-
-        const batched = withGallery(many(6), {batchFails: true});
-        await batched.run({...gallery, screenUnmatched: false});
-        // 5회 중 묶음 5번(2,1,1,1,1)을 쓰고 남은 자리가 없어, 실패한 묶음(글 2개)은 알림으로 넘깁니다.
-        expect(sizes(batched.calls)).toEqual([2, 1, 1, 1, 1]);
-        expect(batched.ledger.has("gf2", 2)).toBe(true);
-    });
-
-    it("키워드에 안 걸린 글은 하나로 묶어 골라내고, 고른 글은 본문을 읽은 뒤 판단한다", async () => {
-        const {run, calls, reads} = withGallery(
-            {2: {title: "치킨 나눔", body: ""}, 3: {title: "오늘 3시까지 ㄱㄱ", body: "고닉만"}, 4: {title: "잡담", body: "오늘 날씨"}},
-            {screen: (titles) => titles.flatMap((title, index) => title.includes("3시") ? [index] : [])}
-        );
-        await run({...gallery, keywords: ["나눔"], scanBody: false});
-        // 본문 확인을 꺼 두면 키워드에 걸린 글(2)만 먼저 열고, 3은 제목만으로 골라내기에 들어갔다가 골라진 뒤 본문을 읽습니다.
-        expect(reads).toEqual([2, 3]);
-        expect(calls.find((call) => call[0] === "골라내기")).toEqual(["골라내기", "오늘 3시까지 ㄱㄱ", "잡담"]);
-        expect(decided(calls).flat().sort()).toEqual(["오늘 3시까지 ㄱㄱ", "치킨 나눔"]);
-    });
-
-    it("골라내기가 실패하면 다음 확인 때 같은 글을 다시 보낸다", async () => {
-        const {check, calls} = withGallery({2: {title: "잡담", body: ""}, 3: {title: "잡담 2", body: ""}}, {screenFailures: 1});
-        const noScan = {...gallery, scanBody: false};
-        await check(noScan, []);
-        await check(noScan, [2]);
-        await check(noScan, [2, 3]);
-        expect(calls).toEqual([["골라내기", "잡담"], ["골라내기", "잡담", "잡담 2"]]);
-    });
-});
-
-describe("Engine 보안 점검 반영", () => {
-    it("골라낸 글의 본문도 본문 요청 상한 안에서만 읽는다", async () => {
-        const posts = Object.fromEntries(Array.from({length: 5}, (_, i) => [i + 2, {title: `잡담 ${i + 2}`, body: ""}]));
-        // 글 하나가 LLM을 속여 모든 글을 고르게 만든 상황입니다.
-        const {run, reads, logger} = withGallery(posts, {screen: (titles) => titles.map((_, index) => index)});
-        await run({...gallery, scanBody: false, bodyReadLimit: 2});
-        expect(reads).toHaveLength(2);
-        expect(logged(logger, "본문 요청 상한(2개)을 넘어")).toBe(true);
+    it("키워드가 비어 있어도 본문 요청 상한을 지키고, 넘는 글은 제목만 보낸다", async () => {
+        const {run, reads, calls} = withGallery({2: {title: "a", body: ""}, 3: {title: "b", body: ""}, 4: {title: "c", body: ""}, 5: {title: "d", body: ""}});
+        await run({...gallery, keywords: [], bodyReadLimit: 2});
+        expect(reads).toEqual([4, 5]);
+        expect(batches(calls)).toEqual([["a", "b", "c", "d"]]);
     });
 
     it("본문을 읽지 못한 글은 줄 서라는 판단이 나와도 알림으로 넘긴다", async () => {
-        const {run, written, logger, engine} = withGallery({2: {title: "a", body: ""}, 3: {title: "b", body: ""}});
-        const deps = (engine as unknown as {deps: EngineDeps}).deps;
-        Object.assign(deps.accounts, {candidates: () => [{id: "a", memberType: "gonick", dccons: []}]});
+        const {run, written, logger} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "피자 나눔", body: ""}}, {loggedIn: true});
         await run({...gallery, keywords: [], bodyReadLimit: 1});
         // 본문을 읽은 3번 글만 줄을 서고, 상한을 넘어 읽지 못한 2번 글은 알림으로 넘깁니다.
         await vi.waitFor(() => expect(written).toEqual([["a", 3]]));
         expect(logged(logger, "본문을 확인하지 못했습니다")).toBe(true);
     });
+});
 
-    it("묶어 판단한 글 중 나눔이라는 판단은 남은 자리가 있으면 따로 다시 묻고, 없으면 알림으로 넘긴다", async () => {
-        const many = Object.fromEntries(Array.from({length: 6}, (_, i) => [i + 2, {title: `나눔 ${i + 2}`, body: ""}]));
-        // 한도 10에 30초 간격이면 한 번에 5회만 써서 묶음이 생기고, 1분 한도에는 5자리가 남습니다.
-        const spare = withGallery(many, {paidRpm: 10});
-        await spare.run({...gallery, screenUnmatched: false, intervalSec: 30});
-        const batched = decided(spare.calls).filter((call) => call.length > 1).flat();
-        const single = decided(spare.calls).filter((call) => call.length === 1).flat();
-        expect(batched.length).toBeGreaterThan(0);
-        expect(batched.every((title) => single.includes(title))).toBe(true);
+describe("Engine 무료 등급 하루 LLM 요청 수", () => {
+    const exhausted = () => new LlmUsage(() => ({resetAt: Date.now() + 60 * 60 * 1000, count: 480}), () => {});
 
-        // 무료 등급(분당 5회)을 다 쓴 경우: 묶음 속 글은 다시 묻지 않고 알립니다.
-        const full = withGallery(many);
-        await full.run({...gallery, screenUnmatched: false});
-        expect(decided(full.calls)).toHaveLength(5);
-        expect(logged(full.logger, "묶어 판단한 결과라")).toBe(true);
+    it("다 쓰면 디시에도 요청하지 않고 감시를 쉬며 한 번만 알린다", async () => {
+        const {engine, logger} = setup();
+        let listCalls = 0;
+        Object.assign((engine as unknown as {deps: EngineDeps}).deps, {reader: () => ({articles: {list: async () => (listCalls++, {gall_list: []})}})});
+        (engine as unknown as {usage: LlmUsage}).usage = exhausted();
+        const tick = (engine as unknown as {tick(configId: string, runId: number): Promise<void>}).tick.bind(engine);
+        await tick(gallery.id, 0);
+        await tick(gallery.id, 0);
+        engine.stop();
+        expect(listCalls).toBe(0);
+        expect(logger.recent().filter((entry) => entry.message.includes("하루 LLM 요청 수"))).toHaveLength(1);
+    });
+
+    it("유료 요금제면 하루 제한이 없다", async () => {
+        const {run, calls} = withGallery({2: {title: "잡담", body: ""}}, {paidRpm: 0, usage: exhausted()});
+        await run(gallery);
+        expect(calls).toHaveLength(1);
+    });
+
+    it("묶음 판단과 2차 확인을 모두 오늘 쓴 요청 수에 센다", async () => {
+        const usage = new LlmUsage(() => null, () => {});
+        const {run} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "잡담", body: ""}}, {usage, loggedIn: true});
+        await run(gallery);
+        expect(usage.count).toBe(2);
     });
 });
 
-describe("Engine 기준 글과 본문 요청 상한", () => {
-    it("키워드가 비어 있어도 본문 요청 상한을 지키고, 넘는 글은 제목으로만 판단한다", async () => {
-        const {run, reads, calls} = withGallery({2: {title: "a", body: ""}, 3: {title: "b", body: ""}, 4: {title: "c", body: ""}, 5: {title: "d", body: ""}});
-        await run({...gallery, keywords: [], bodyReadLimit: 2});
-        expect(reads).toEqual([4, 5]);
-        expect(decided(calls).flat().sort()).toEqual(["a", "b", "c", "d"]);
+describe("Engine 판단 기록과 테스트용 멈춤", () => {
+    it("나눔으로 판단된 묶음과 2차 확인에서 LLM에 보낸 내용과 판단 원문을 남긴다", async () => {
+        const records: {kind: string; message: string; posts: {no: number}[]; decisions: unknown[]}[] = [];
+        const env = withGallery({2: {title: "치킨 나눔", body: "댓글로 줄"}, 3: {title: "잡담", body: "오늘 날씨"}}, {loggedIn: true});
+        Object.assign((env.engine as unknown as {deps: EngineDeps}).deps, {recordJudgment: (record: never) => records.push(record)});
+        await env.run(gallery);
+        expect(records.map((record) => record.kind)).toEqual(["batch", "confirm"]);
+        expect(records[0]!.message).toContain('<post index="1" no="2">');
+        expect(records[0]!.message).toContain("댓글로 줄");
+        expect(records[0]!.posts.map((post) => post.no)).toEqual([2, 3]);
+        expect(records[1]!.posts.map((post) => post.no)).toEqual([2]);
     });
 
+    it("나눔이 없는 묶음은 남기지 않는다", async () => {
+        const records: unknown[] = [];
+        const env = withGallery({2: {title: "잡담", body: ""}, 3: {title: "질문", body: ""}});
+        Object.assign((env.engine as unknown as {deps: EngineDeps}).deps, {recordJudgment: (record: unknown) => records.push(record)});
+        await env.run(gallery);
+        expect(records).toEqual([]);
+    });
+
+    it("테스트 설정을 켜면 처음 줄 서기에 성공하는 즉시 감시를 멈춘다", async () => {
+        const {engine, written, logger} = setup();
+        engine.stopAfterFirstSuccess = true;
+        engine.start();
+        await engine.dispatch(gallery, {no: 60, title: "나눔"}, plan(0), LIVE);
+        await vi.waitFor(() => expect(written).toEqual([["a", 60]]));
+        await vi.waitFor(() => expect(engine.running).toBe(false));
+        expect(engine.stopAfterFirstSuccess).toBe(false);
+        expect(logged(logger, "첫 줄 서기에 성공해 감시를 멈춥니다")).toBe(true);
+    });
+});
+
+describe("Engine 기준 글", () => {
     it("감시 중에 다시 시작해도 기준 글을 유지해 그사이 올라온 글을 건너뛰지 않는다", async () => {
         const {check, list, engine, calls} = withGallery({2: {title: "나눔 2", body: ""}});
         await check(gallery, []);
         list([2]);
         engine.start();
-        await vi.waitFor(() => expect(decided(calls)).toEqual([["나눔 2"]]));
+        await vi.waitFor(() => expect(calls).toEqual([["단독", "나눔 2"]]));
         engine.stop();
+    });
+});
+
+describe("감시 자동 중지 시각", () => {
+    const at = (hours: number, minutes = 0, day = 25) => new Date(2026, 9, day, hours, minutes).getTime();
+    const autoStop = (patch: Partial<Settings["autoStop"]>): Settings["autoStop"] => ({mode: "off", afterMinutes: 120, at: "02:00", ...patch});
+
+    it("'N분 후'는 감시를 시작한 때부터 센다", () => {
+        expect(nextAutoStopAt(autoStop({mode: "after", afterMinutes: 90}), at(22), at(23))).toBe(at(23, 30));
+    });
+
+    it("'정한 시각'은 아직 안 지났으면 오늘, 지났거나 지금이면 내일이다", () => {
+        expect(nextAutoStopAt(autoStop({mode: "at", at: "23:30"}), at(22), at(23))).toBe(at(23, 30));
+        expect(nextAutoStopAt(autoStop({mode: "at", at: "02:00"}), at(22), at(23))).toBe(at(2, 0, 26));
+        expect(nextAutoStopAt(autoStop({mode: "at", at: "23:00"}), at(22), at(23))).toBe(at(23, 0, 26));
+    });
+
+    it("꺼져 있으면 멈추지 않는다", () => {
+        expect(nextAutoStopAt(autoStop({mode: "off"}), at(22), at(23))).toBeNull();
+    });
+
+    it("이전 버전 설정이나 잘못된 값은 쓸 수 있는 값으로 맞춘다", () => {
+        const {autoStop: _removed, ...old} = defaultSettings();
+        expect(normalizeSettings(old as Settings).autoStop).toEqual({mode: "off", afterMinutes: 120, at: "02:00"});
+        const broken = normalizeSettings({...defaultSettings(), autoStop: {mode: "soon" as "off", afterMinutes: 99999, at: "25:00"}});
+        expect(broken.autoStop).toEqual({mode: "off", afterMinutes: 24 * 60, at: "02:00"});
+    });
+});
+
+describe("Engine 감시 자동 중지", () => {
+    function watching(patch: Partial<Settings["autoStop"]>) {
+        vi.useFakeTimers({now: new Date(2026, 9, 25, 22, 0)});
+        const context = setup();
+        context.update({autoStop: {mode: "off", afterMinutes: 120, at: "02:00", ...patch}});
+        Object.assign((context.engine as unknown as {deps: EngineDeps}).deps, {reader: () => null});
+        context.engine.start();
+        return context;
+    }
+
+    afterEach(() => vi.useRealTimers());
+
+    it("정한 시간이 지나면 감시를 멈추고, 그 전에는 멈추지 않는다", async () => {
+        const {engine, logger} = watching({mode: "after", afterMinutes: 30});
+        expect(engine.autoStopAt).toBe(new Date(2026, 9, 25, 22, 30).getTime());
+        await vi.advanceTimersByTimeAsync(29 * 60 * 1000);
+        expect(engine.running).toBe(true);
+        await vi.advanceTimersByTimeAsync(60 * 1000);
+        expect(engine.running).toBe(false);
+        expect(engine.autoStopAt).toBeNull();
+        expect(logged(logger, "자동으로 멈춥니다")).toBe(true);
+    });
+
+    it("감시 중에 다시 시작해도 처음 시작한 때부터 센다", async () => {
+        const {engine} = watching({mode: "after", afterMinutes: 30});
+        await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+        engine.start();
+        expect(engine.autoStopAt).toBe(new Date(2026, 9, 25, 22, 30).getTime());
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+        expect(engine.running).toBe(false);
+    });
+
+    it("감시 중에 설정을 바꾸면 바로 반영하고, 끄면 멈추지 않는다", async () => {
+        const {engine, update} = watching({mode: "after", afterMinutes: 30});
+        update({autoStop: {mode: "at", afterMinutes: 30, at: "23:15"}});
+        engine.refreshAutoStop();
+        expect(engine.autoStopAt).toBe(new Date(2026, 9, 25, 23, 15).getTime());
+        update({autoStop: {mode: "off", afterMinutes: 30, at: "23:15"}});
+        engine.refreshAutoStop();
+        expect(engine.autoStopAt).toBeNull();
+        await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
+        expect(engine.running).toBe(true);
+        engine.stop();
+    });
+
+    it("컴퓨터가 잠들어 타이머가 늦어져도 깬 뒤 1분 안에 멈춘다", async () => {
+        const {engine} = watching({mode: "at", at: "23:00"});
+        // 타이머는 돌지 않고 시계만 지난 상황(잠자기)입니다.
+        vi.setSystemTime(new Date(2026, 9, 25, 23, 40));
+        await vi.advanceTimersByTimeAsync(60 * 1000);
+        expect(engine.running).toBe(false);
+    });
+
+    it("직접 멈추면 자동 중지 예약도 없어지고, 멈춰 있을 때 설정을 저장해도 예약하지 않는다", () => {
+        const {engine} = watching({mode: "after", afterMinutes: 30});
+        engine.stop();
+        expect(engine.autoStopAt).toBeNull();
+        engine.refreshAutoStop();
+        expect(engine.autoStopAt).toBeNull();
     });
 });

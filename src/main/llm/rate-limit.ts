@@ -34,19 +34,3 @@ export class RateLimiter {
         if (this.limit() > 0) this.sent.push(this.now());
     }
 }
-
-/**
- * 판단할 글들을 몇 번의 요청으로 나눌지 정합니다. 한도 이하면 글마다 따로 보내고,
- * 넘으면 한도만큼의 요청으로 고르게 묶습니다. 예: 한도 5에 글 12개면 3, 3, 2, 2, 2개씩.
- */
-export function chunkForLimit<T>(items: T[], limit: number): T[][] {
-    if (limit <= 0 || items.length <= limit) return items.map((item) => [item]);
-    const chunks: T[][] = [];
-    let start = 0;
-    for (let i = 0; i < limit; i++) {
-        const size = Math.ceil((items.length - start) / (limit - i));
-        chunks.push(items.slice(start, start + size));
-        start += size;
-    }
-    return chunks;
-}

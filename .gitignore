@@ -1,9 +1,58 @@
+# 의존성과 빌드 결과물
 node_modules/
 dist/
 out/
 release/
+coverage/
+.vite/
+*.tsbuildinfo
+*.map
+
+# 설치 파일과 패키지 (릴리스 워크플로가 만들어 GitHub 릴리스에 올림)
+*.exe
+*.dmg
+*.blockmap
+*.asar
+*.zip
+*.7z
+*.pkg
+*.msi
+*.AppImage
+*.app/
+
+# 분석하거나 받은 안드로이드 앱 파일
+*.apk
+*.xapk
+*.apks
+*.aab
+
+# 로그와 임시 파일
 *.log
+*.log.old
+npm-debug.log*
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+.probe.*
+*.cpuprofile
+*.heapsnapshot
+
+# 편집기와 OS
 .DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.code-workspace
+
+# 로컬에서만 보는 점검 보고서와 판단 기록
+reports/
+*-report.html
+*-report.md
+*.jsonl
+*.jsonl.old
 
 # 로컬 설정과 비밀 정보
 .env
@@ -11,3 +60,6 @@ release/
 !.env.example
 device.json
 credentials*.json
+secrets.json
+llm-usage.json
+ledger.json

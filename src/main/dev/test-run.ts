@@ -22,8 +22,6 @@ const LABEL = "[테스트]";
 
 interface Deps {
     engine: Engine;
-    /** 글을 읽을 클라이언트(로그인된 계정 또는 읽기용)입니다. */
-    reader(): DCInside;
     accounts: AccountManager;
     logger: Logger;
     settings(): Settings;
@@ -68,6 +66,19 @@ async function run(deps: Deps, input: DevTestInput): Promise<DevTestResult> {
     return {elapsedMs, decision: decision as Record<string, unknown> | null, plan: summary};
 }
 
+/**
+ * 테스트 갤러리의 대기 계정 중 로그인된 계정입니다. 다른 갤러리용 계정으로 테스트 갤러리에 요청하지 않습니다.
+ * 갤러리 탭에 테스트 갤러리가 없거나, 그 대기 계정이 로그인돼 있지 않으면 오류를 던집니다.
+ */
+function testReading(deps: Deps): {accountId: string; client: DCInside} {
+    const settings = deps.settings();
+    const gallery = settings.galleries.find((item) => item.galleryId === TEST_GALLERY_ID);
+    if (!gallery) throw new Error(`갤러리 탭에 ${TEST_GALLERY_ID} 갤러리를 먼저 추가하세요.`);
+    const reading = deps.accounts.readingClient(settings.accounts, gallery.accountIds);
+    if (!reading) throw new Error(`${TEST_GALLERY_ID} 갤러리의 대기 계정 중 로그인된 계정이 없습니다.`);
+    return reading;
+}
+
 /** 점검용 텍스트 댓글입니다. 지울 댓글을 찾을 때 이 문구로 알아봅니다. */
 const CHECK_COMMENT = "햄부기 점검";
 
@@ -86,8 +97,12 @@ async function apiCheck(deps: Deps): Promise<DevApiCheckStep[]> {
         }
     };
     const settings = deps.settings();
-    const reading = deps.accounts.readingClient(settings.accounts);
-    if (!reading) return [{name: "로그인된 계정", ok: false, detail: "로그인된 계정이 없습니다. 계정 탭에서 로그인하세요.", elapsedMs: 0}];
+    let reading: {accountId: string; client: DCInside};
+    try {
+        reading = testReading(deps);
+    } catch (error) {
+        return [{name: "로그인된 계정", ok: false, detail: errorMessage(error), elapsedMs: 0}];
+    }
     const account = settings.accounts.find((item) => item.id === reading.accountId)!;
     const status = deps.accounts.status(reading.accountId);
     steps.push({
@@ -127,9 +142,11 @@ async function apiCheck(deps: Deps): Promise<DevApiCheckStep[]> {
     const isCheckComment = (comment: ListedComment) => comment.comment_memo === CHECK_COMMENT || isCheckDccon(comment);
     const currentClient = () => {
         // 댓글을 달면서 다시 로그인했을 수 있으므로 지금 세션의 클라이언트를 씁니다.
-        const client = deps.accounts.readingClient(deps.settings().accounts)?.client;
-        if (!client) throw new Error("로그인이 풀려 댓글 목록을 볼 수 없습니다. 글에서 직접 확인해 주세요.");
-        return client;
+        try {
+            return testReading(deps).client;
+        } catch {
+            throw new Error("로그인이 풀려 댓글 목록을 볼 수 없습니다. 글에서 직접 확인해 주세요.");
+        }
     };
 
     // 지난 점검이 지우지 못한 점검 댓글이 남아 있으면 먼저 지웁니다.
@@ -164,13 +181,48 @@ async function apiCheck(deps: Deps): Promise<DevApiCheckStep[]> {
 }
 
 export function registerDevTestIpc(deps: Deps, handle: TrustedHandle): void {
+    // 감시를 시작하되, 처음 줄 서기에 성공하는 즉시 멈추게 합니다(실제 갤러리 테스트용).
+    handle("devWatchUntilFirstSuccess", () => {
+        deps.engine.stopAfterFirstSuccess = true;
+        deps.engine.start();
+        deps.logger.info(`${LABEL} 첫 줄 서기 성공 시 감시를 멈추도록 하고 감시를 시작합니다.`);
+        return {running: deps.engine.running};
+    });
+    // 테스트로 단 댓글을 지웁니다. 그 갤러리의 대기 계정(로그인된 첫 계정)이 단 댓글만 지우고, 다른 사람 댓글은 건드리지 않습니다.
+    handle("devDeleteMyComments", async (_event, galleryId: string, postNo: number) => {
+        const settings = deps.settings();
+        const gallery = settings.galleries.find((item) => item.galleryId === galleryId);
+        if (!gallery || !Number.isInteger(postNo)) throw new Error("갤러리 탭에 있는 갤러리와 글 번호만 쓸 수 있습니다.");
+        const reading = deps.accounts.readingClient(settings.accounts, gallery.accountIds);
+        if (!reading) throw new Error(`${galleryId} 갤러리의 대기 계정 중 로그인된 계정이 없습니다.`);
+        const loginId = settings.accounts.find((account) => account.id === reading.accountId)!.loginId;
+        // 댓글이 많으면 여러 페이지로 나뉘어 오므로 모든 페이지에서 찾습니다.
+        const myComments = async () => {
+            const found = [];
+            for await (const page of reading.client.comments.pages(galleryId, postNo)) {
+                found.push(...(page.comment_list ?? []).filter((comment) => comment.comment_no !== undefined && comment.user_id === loginId));
+            }
+            return found;
+        };
+        const mine = await myComments();
+        for (const comment of mine) await reading.client.comments.delete(galleryId, postNo, comment.comment_no!);
+        const left = mine.length > 0 ? await myComments() : [];
+        deps.logger.info(`${LABEL} ${galleryId} #${postNo}에서 ${loginId} 계정 댓글 ${mine.length}개 지움${left.length ? ` (남은 댓글 ${left.length}개)` : ""}`);
+        return {account: loginId, deleted: mine.map((comment) => ({no: comment.comment_no, memo: comment.comment_memo})), left: left.length};
+    });
+    // 여러 더미 글을 LLM 요청 한 번으로 판단해 봅니다. 디시에는 요청하지 않습니다.
+    handle("devBatchTest", async (_event, posts: {title: string; body: string; no?: number; postedAt?: number}[]) => {
+        const startedAt = Date.now();
+        const decisions = await deps.engine.decideBatch(posts);
+        return {elapsedMs: Date.now() - startedAt, decisions};
+    });
     handle("devApiCheck", () => apiCheck(deps));
     handle("devTestRun", (_event, input: DevTestInput) => run(deps, input));
     // 디시 응답을 직접 확인하는 용도입니다. 테스트 갤러리(asgeir)에만 요청하며, 부를 때마다 요청 한 번입니다.
     handle("devProbe", async (_event, probe: DevProbe) => {
-        const articles = deps.reader().articles;
+        const articles = testReading(deps).client.articles;
         if (probe.kind === "comments") {
-            const comments = await deps.reader().comments.list(TEST_GALLERY_ID, probe.no);
+            const comments = await testReading(deps).client.comments.list(TEST_GALLERY_ID, probe.no);
             return (comments.comment_list ?? []).map(({comment_no, user_id, name, comment_memo, dccon, dccon_detail_idx, dccon_type}) =>
                 ({comment_no, user_id, name, comment_memo: comment_memo?.slice(0, 80), dccon: dccon?.slice(0, 80), dccon_detail_idx, dccon_type}));
         }
