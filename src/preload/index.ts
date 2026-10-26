@@ -30,6 +30,7 @@ const api: HamboogieApi = {
     installUpdate: invoker("installUpdate"),
     devTestRun: import.meta.env.DEV ? invoker("devTestRun") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
     devProbe: import.meta.env.DEV ? invoker("devProbe") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
+    devSimulateSleep: import.meta.env.DEV ? invoker("devSimulateSleep") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
     devAddFreeDccon: import.meta.env.DEV ? invoker("devAddFreeDccon") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
     devOwnedDccons: import.meta.env.DEV ? invoker("devOwnedDccons") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
     devBatchTest: import.meta.env.DEV ? invoker("devBatchTest") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),

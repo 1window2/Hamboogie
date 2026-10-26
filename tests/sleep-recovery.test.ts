@@ -18,8 +18,9 @@ import {Ledger} from "../src/main/store";
 const ACCOUNT: AccountConfig = {id: "acc1", loginId: "tester", memberTypeOverride: "auto", defaultDccons: []};
 const MINUTE = 60 * 1000;
 
-function world() {
+function world(network: {online: () => boolean} = {online: () => true}) {
     let now = Date.UTC(2026, 9, 26, 3, 0);
+    const notices: string[] = [];
     const server = {online: true, loginWorks: true, valid: new Set<number>(), lists: 0, logins: 0};
     let nextClient = 0;
     const factory = (_credentials?: DeviceCredentials) => {
@@ -74,11 +75,15 @@ function world() {
         secrets: {get: () => null} as unknown as EngineDeps["secrets"],
         logger,
         settings: () => settings,
-        now: clock
+        now: clock,
+        checkNetwork: async () => network.online(),
+        desktopNotice: (title) => notices.push(title),
+        // 기다리는 동안 시계만 그만큼 흐르게 합니다.
+        sleep: async (ms) => void (now += ms)
     });
     const tick = () => (engine as unknown as {tick(configId: string, runId: number): Promise<void>}).tick(gallery.id, 0);
     const logs = (text: string) => logger.recent().filter((entry) => entry.message.includes(text)).length;
-    return {server, accounts, engine, tick, logs, advance: (ms: number) => (now += ms), sleep: () => server.valid.clear()};
+    return {server, accounts, engine, tick, logs, notices, advance: (ms: number) => (now += ms), sleep: () => server.valid.clear()};
 }
 
 describe("잠자기에서 깨어난 뒤 저절로 복구", () => {
@@ -145,5 +150,74 @@ describe("잠자기에서 깨어난 뒤 저절로 복구", () => {
         }
         expect(w.accounts.status("acc1").state).toBe("logged_in");
         w.engine.stop();
+    });
+});
+
+describe("잠자기 동안 멈추고 깨어나면 네트워크를 확인한 뒤 이어가기", () => {
+    it("잠든 동안에는 확인하지 않고, 짧게 잤으면 깨어나 네트워크가 붙은 뒤 기준 글을 그대로 두고 이어간다", async () => {
+        const w = world();
+        await w.accounts.login(ACCOUNT);
+        await w.tick();
+        const lists = w.server.lists;
+        w.engine.suspend();
+        await w.tick();
+        expect(w.server.lists).toBe(lists);
+        w.advance(2 * MINUTE);
+        await w.engine.resume();
+        expect(w.logs("네트워크가 연결되어 감시를 이어갑니다")).toBe(1);
+        expect(w.logs("그사이 글은 건너뛰고")).toBe(0);
+        await w.tick();
+        expect(w.server.lists).toBe(lists + 1);
+        expect(w.logs("감시 시작. 기준 글")).toBe(1);
+        w.engine.stop();
+    });
+
+    it("5분 넘게 잤으면 그사이 글은 버리고 기준 글을 새로 잡는다", async () => {
+        const w = world();
+        await w.accounts.login(ACCOUNT);
+        await w.tick();
+        w.engine.suspend();
+        w.advance(6 * MINUTE);
+        await w.engine.resume();
+        expect(w.logs("그사이 글은 건너뛰고 기준 글을 새로 잡습니다")).toBe(1);
+        await w.tick();
+        expect(w.logs("감시 시작. 기준 글")).toBe(2);
+        w.engine.stop();
+    });
+
+    it("깨어난 뒤 네트워크가 늦게 붙으면 붙을 때까지 기다렸다가 이어간다", async () => {
+        let checks = 0;
+        const w = world({online: () => ++checks >= 4});
+        await w.accounts.login(ACCOUNT);
+        await w.tick();
+        w.engine.suspend();
+        await w.engine.resume();
+        expect(checks).toBe(4);
+        expect(w.engine.running).toBe(true);
+        expect(w.logs("네트워크가 연결되어 감시를 이어갑니다")).toBe(1);
+        w.engine.stop();
+    });
+
+    it("깨어난 뒤 1분이 지나도 네트워크가 없으면 감시를 멈추고 컴퓨터 알림으로 알린다", async () => {
+        const w = world({online: () => false});
+        await w.accounts.login(ACCOUNT);
+        await w.tick();
+        w.engine.suspend();
+        await w.engine.resume();
+        expect(w.engine.running).toBe(false);
+        expect(w.logs("1분이 지나도 인터넷에 연결되지 않아 감시를 멈췄습니다")).toBe(1);
+        expect(w.notices).toEqual(["Hamboogie 감시 중지"]);
+    });
+
+    it("깨어나 네트워크를 기다리는 사이 사용자가 감시를 멈추면 다시 시작하지 않는다", async () => {
+        const w = world({online: () => false});
+        await w.accounts.login(ACCOUNT);
+        await w.tick();
+        w.engine.suspend();
+        const waiting = w.engine.resume();
+        w.engine.stop();
+        await waiting;
+        expect(w.engine.running).toBe(false);
+        expect(w.notices).toEqual([]);
     });
 });

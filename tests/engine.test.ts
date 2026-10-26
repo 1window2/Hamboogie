@@ -755,3 +755,61 @@ describe("Engine 오래된 글", () => {
         expect(logged(logger, "분 지난 글이라 자동으로 줄 서지 않음")).toBe(true);
     });
 });
+
+describe("Engine 판단 도중 잠자기", () => {
+    const noWait = {sleep: async () => {}, checkNetwork: async () => true};
+
+    it("판단하는 사이 잠들었다 깨어나 실패하면 알리지 않고, 짧게 잤으면 한 번 더 판단한다", async () => {
+        const {engine, calls, check, logger, recorded} = withGallery({2: {title: "치킨 나눔", body: "줄"}, 3: {title: "잡담", body: ""}}, {loggedIn: true});
+        const internals = engine as unknown as {deps: EngineDeps; llm: LlmGate; watchers: Map<string, unknown>};
+        Object.assign(internals.deps, noWait);
+        internals.watchers.set(gallery.id, setTimeout(() => {}, 0));
+        const real = internals.llm.provider;
+        let first = true;
+        internals.llm.provider = () => {
+            const provider = real() as {decide: (post: unknown) => Promise<unknown>; decideMany: (posts: unknown[]) => Promise<unknown>};
+            return {
+                decide: provider.decide,
+                decideMany: async (posts: unknown[]) => {
+                    if (first) {
+                        first = false;
+                        // 요청하는 사이 컴퓨터가 잠들었다 깨어나 요청이 실패한 상황입니다.
+                        engine.suspend();
+                        await engine.resume();
+                        throw new Error("Gemini 응답 시간 초과 (30초)");
+                    }
+                    return provider.decideMany(posts);
+                }
+            } as never;
+        };
+        await check({...gallery, keywords: ["나눔"]}, []);
+        await check({...gallery, keywords: ["나눔"]}, [2, 3]);
+        expect(logged(logger, "판단 불가, 알림 전송")).toBe(false);
+        expect(calls.filter((call) => call[0] === "묶음")).toHaveLength(1);
+        await vi.waitFor(() => expect(recorded).toEqual([expect.objectContaining({postNo: 2, outcome: "success"})]));
+        engine.stop();
+    });
+
+    it("판단하는 사이 5분 넘게 잠들었으면 다시 판단하지 않고 알리지도 않는다", async () => {
+        const {engine, calls, check, logger, written} = withGallery({2: {title: "치킨 나눔", body: "줄"}}, {loggedIn: true});
+        const internals = engine as unknown as {deps: EngineDeps; llm: LlmGate; watchers: Map<string, unknown>};
+        Object.assign(internals.deps, noWait);
+        internals.watchers.set(gallery.id, setTimeout(() => {}, 0));
+        internals.llm.provider = () => ({
+            decide: async () => {
+                calls.push(["단독"]);
+                engine.suspend(Date.now() - 6 * 60 * 1000);
+                await engine.resume();
+                throw new Error("Gemini 응답 시간 초과 (30초)");
+            },
+            decideMany: async () => []
+        }) as never;
+        await check({...gallery, keywords: ["나눔"]}, []);
+        await check({...gallery, keywords: ["나눔"]}, [2]);
+        expect(calls).toHaveLength(1);
+        expect(logged(logger, "판단 불가, 알림 전송")).toBe(false);
+        expect(logged(logger, "판단하는 사이 컴퓨터가 잠들어")).toBe(true);
+        expect(written).toEqual([]);
+        engine.stop();
+    });
+});

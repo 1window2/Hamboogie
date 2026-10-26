@@ -1,6 +1,6 @@
 import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
-import {app, BrowserWindow, ipcMain, Notification, powerMonitor, powerSaveBlocker, shell, type IpcMainInvokeEvent} from "electron";
+import {app, BrowserWindow, ipcMain, net, Notification, powerMonitor, powerSaveBlocker, shell, type IpcMainInvokeEvent} from "electron";
 import {PROVIDERS} from "@shared/settings";
 import type {AccountConfig, AppState, DcconPackage, SecretKey, Settings} from "@shared/types";
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
@@ -109,6 +109,19 @@ async function main(): Promise<void> {
         logger,
         settings: () => settingsStore.get(),
         onStateChanged: () => pushState(),
+        // 인터페이스가 켜져 있는지만이 아니라 실제로 인터넷에 닿는지 봅니다. 디시가 아닌 연결 확인용 주소를 씁니다.
+        checkNetwork: async () => {
+            if (!net.isOnline()) return false;
+            try {
+                const response = await fetch("https://www.gstatic.com/generate_204", {signal: AbortSignal.timeout(5000)});
+                return response.status === 204;
+            } catch {
+                return false;
+            }
+        },
+        desktopNotice: (title, body) => {
+            if (Notification.isSupported()) new Notification({title, body}).show();
+        },
         recordJudgment: (record) => judgments.append(record),
         usage: new LlmUsage(() => usageStore.load(), (record) => {
             usageStore.save(record);
@@ -156,10 +169,12 @@ async function main(): Promise<void> {
         }
     }
 
-    // 잠들고 깨어난 시각을 남겨, 감시가 비는 이유를 로그로 알 수 있게 합니다. 깨어나면 밀린 확인이 바로 돌고,
-    // 그사이 로그인이 풀렸으면 다시 로그인합니다(네트워크가 아직 없으면 잠시 뒤 자동으로 다시 시도).
-    powerMonitor.on("suspend", () => logger.info("컴퓨터가 잠들어 감시가 잠시 멈춥니다."));
-    powerMonitor.on("resume", () => logger.info("컴퓨터가 깨어나 감시를 이어갑니다."));
+    // 잠들면 확인을 멈추고, 깨어나면 네트워크가 붙은 뒤에 이어갑니다(5분 넘게 잤으면 그사이 글은 버림, 1분 안에 네트워크가 없으면 감시 중지).
+    powerMonitor.on("suspend", () => {
+        engine.suspend();
+        pushState();
+    });
+    powerMonitor.on("resume", () => void engine.resume().finally(() => pushState()));
 
     function pushState(): void {
         syncSleepBlocker();

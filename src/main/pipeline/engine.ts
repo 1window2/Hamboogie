@@ -28,6 +28,14 @@ const MAX_BATCH_POSTS = 40;
 const BODY_READ_GAP_MS = 500;
 /** 올라온 지 이보다 오래된 글에는 자동으로 줄 서지 않습니다. 오래 쉬었다가 다시 확인할 때 지난 나눔에 줄 서지 않기 위해서입니다. */
 const STALE_POST_MS = 60 * 60 * 1000;
+/** 깨어난 뒤 네트워크가 다시 붙기를 처음 기다리는 시간입니다. */
+const WAKE_SETTLE_MS = 10 * 1000;
+/** 깨어난 뒤 이 시간 안에 네트워크가 붙지 않으면 감시를 멈춥니다. */
+const WAKE_NETWORK_LIMIT_MS = 60 * 1000;
+/** 네트워크가 붙었는지 다시 확인하는 간격입니다. */
+const WAKE_NETWORK_RETRY_MS = 5 * 1000;
+/** 이보다 오래 잠들었으면 그사이 글은 버리고 기준 글을 새로 잡습니다. */
+const LONG_SLEEP_MS = 5 * 60 * 1000;
 /** 일시적인 오류로 자동 재로그인을 기다리는 동안 "로그인 필요"를 알리지 않고 기다리는 시간입니다. */
 const LOGIN_RECOVERY_QUIET_MS = 10 * 60 * 1000;
 /** 목록 확인이 연달아 실패할 때 다음 확인까지 기다리는 최대 시간입니다. */
@@ -102,6 +110,12 @@ export interface EngineDeps {
     recordJudgment?(record: JudgmentRecord): void;
     /** 테스트에서 시각을 바꿀 수 있게 합니다. */
     now?(): number;
+    /** 인터넷에 실제로 연결돼 있는지 확인합니다. 잠자기에서 깨어난 뒤 확인을 이어가도 되는지 볼 때 씁니다. */
+    checkNetwork?(): Promise<boolean>;
+    /** 컴퓨터 알림을 띄웁니다. 네트워크가 없어 Discord로 알릴 수 없을 때 씁니다. */
+    desktopNotice?(title: string, body: string): void;
+    /** 테스트에서 기다리는 시간을 줄일 수 있게 합니다. */
+    sleep?(ms: number): Promise<void>;
 }
 
 /** LLM에 보낸 내용과 판단 원문 기록입니다. */
@@ -195,6 +209,13 @@ export class Engine {
     /** 설정한 시각에 감시를 멈추는 타이머입니다. */
     private readonly autoStop: AutoStopTimer;
     private readonly now: () => number;
+    /**
+     * 컴퓨터가 잠들어 있거나, 깨어나서 네트워크를 기다리는 중입니다. 이동안에는 확인을 멈추고 디시·LLM에 요청하지 않습니다.
+     * `since`는 잠든 시각, `awake`는 확인을 이어가도 될 때(또는 감시를 멈췄을 때) 풀리는 약속입니다.
+     */
+    private asleep: {since: number; awake: Promise<void>; release: () => void} | null = null;
+    /** 마지막으로 잠들었던 구간입니다. 그 구간에 걸친 LLM 판단이 실패하면 알리지 않습니다. */
+    private lastSleep: {from: number; to: number} | null = null;
 
     constructor(private readonly deps: EngineDeps) {
         this.llm = new LlmGate(deps, (message) => this.alert("LLM 요청 한도 소진", message));
@@ -249,6 +270,61 @@ export class Engine {
         this.refreshAutoStop(true);
     }
 
+    /** 컴퓨터가 잠들 때 부릅니다. 깨어날 때까지 확인을 멈춥니다(반쯤 깨어난 짧은 순간에도 요청하지 않습니다). */
+    suspend(at = this.now()): void {
+        if (!this.running || this.asleep) return;
+        let release = () => {};
+        const awake = new Promise<void>((resolve) => (release = resolve));
+        this.asleep = {since: at, awake, release};
+        this.deps.logger.info("컴퓨터가 잠들어 감시를 멈춥니다. 깨어나면 네트워크를 확인하고 이어갑니다.");
+    }
+
+    /**
+     * 컴퓨터가 깨어날 때 부릅니다. 10초 기다린 뒤 네트워크가 실제로 붙었는지 보고, 붙었으면 확인을 이어갑니다.
+     * 5분 넘게 잠들었으면 그사이 글은 버리고 기준 글을 새로 잡습니다. 1분이 지나도 네트워크가 없으면 감시를 멈추고 알립니다.
+     */
+    async resume(): Promise<void> {
+        const sleeping = this.asleep;
+        if (!sleeping) return;
+        const wokeAt = this.now();
+        const slept = wokeAt - sleeping.since;
+        this.lastSleep = {from: sleeping.since, to: wokeAt};
+        const {logger} = this.deps;
+        const wait = this.deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+        logger.info(`컴퓨터가 깨어났습니다(${Math.round(slept / 60000)}분 잠듦). 네트워크가 붙기를 기다립니다.`);
+        await wait(WAKE_SETTLE_MS);
+        let online = false;
+        while (this.asleep === sleeping) {
+            online = await (this.deps.checkNetwork?.() ?? Promise.resolve(true)).catch(() => false);
+            if (online || this.now() - wokeAt >= WAKE_NETWORK_LIMIT_MS) break;
+            await wait(WAKE_NETWORK_RETRY_MS);
+        }
+        // 기다리는 사이 사용자가 감시를 멈췄으면 할 일이 없습니다.
+        if (this.asleep !== sleeping) return;
+        if (!online) {
+            const message = "컴퓨터가 깨어난 뒤 1분이 지나도 인터넷에 연결되지 않아 감시를 멈췄습니다. 네트워크를 확인하고 감시를 다시 시작하세요.";
+            logger.warn(message);
+            this.deps.desktopNotice?.("Hamboogie 감시 중지", message);
+            this.stop();
+            this.deps.onStateChanged?.();
+            return;
+        }
+        if (slept > LONG_SLEEP_MS) {
+            // 잠든 사이 올라온 글은 버립니다. 다음 확인에서 지금의 최신 글을 기준으로 다시 잡습니다.
+            this.lastSeen.clear();
+            logger.info(`${Math.round(slept / 60000)}분 동안 잠들어 있었으므로 그사이 글은 건너뛰고 기준 글을 새로 잡습니다.`);
+        }
+        logger.info("네트워크가 연결되어 감시를 이어갑니다.");
+        this.asleep = null;
+        sleeping.release();
+        for (const configId of this.watchers.keys()) this.schedule(configId, this.runId, 0);
+    }
+
+    /** 이 시각에 시작한 일이 잠자기 구간에 걸쳐 있었는지입니다. */
+    private sleptSince(startedAt: number): boolean {
+        return this.asleep !== null || (this.lastSleep !== null && startedAt <= this.lastSleep.to);
+    }
+
     /** 자동으로 멈출 시각(ms)입니다. 감시 중이 아니거나 자동 중지가 꺼져 있으면 null입니다. */
     get autoStopAt(): number | null {
         return this.autoStop.at;
@@ -280,6 +356,10 @@ export class Engine {
     /** 감시를 멈추고 예약해 둔 줄 서기도 취소합니다. 분석 중이던 글에도 댓글을 달지 않습니다. */
     stop(): void {
         const wasRunning = this.watchers.size > 0;
+        // 잠자기에서 깨어나 네트워크를 기다리던 중이면 기다림을 끝냅니다.
+        const sleeping = this.asleep;
+        this.asleep = null;
+        sleeping?.release();
         this.haltWatchers(true);
         this.epoch++;
         for (const [timer, pending] of this.scheduled) {
@@ -340,6 +420,8 @@ export class Engine {
             if (runId === this.runId) this.watchers.delete(configId);
             return;
         }
+        // 잠들어 있거나 깨어나서 네트워크를 기다리는 중이면 확인하지 않습니다. 깨어나 네트워크가 붙으면 다시 예약합니다.
+        if (this.asleep) return;
         // 감시 중에 갤러리 ID를 바꿨는데 아직 확인하지 않았으면 그 갤러리 감시를 멈춥니다.
         const problems = galleryProblems(gallery);
         if (problems.length > 0) {
@@ -622,20 +704,41 @@ export class Engine {
                 logger.warn(`무료 등급 하루 LLM 요청 수를 다 써서 새 글 ${candidates.length - start}개는 판단하지 못했습니다.`, context);
                 return;
             }
-            const startedAt = Date.now();
+            let startedAt = this.now();
             let decisions: (Decision | null)[];
-            try {
+            const decide = async () => {
                 await this.llm.request(gallery.galleryId);
                 const posts = group.map(({post, title, body, postedAt}) => ({no: post.no, title, body, postedAt}));
-                decisions = group.length === 1 ? [await provider.decide(posts[0]!)] : await provider.decideMany(posts);
+                return group.length === 1 ? [await provider.decide(posts[0]!)] : await provider.decideMany(posts);
+            };
+            try {
+                decisions = await decide();
             } catch (error) {
-                logger.warn(`새 글 ${group.length}개를 판단하지 못했습니다: ${errorMessage(error)}`, context);
-                await failAll(group, errorMessage(error));
-                continue;
+                // 판단하는 사이 컴퓨터가 잠들었다 깨어나 실패한 것이면 알리지 않습니다. 짧게 잤으면 깨어나 네트워크가 붙은 뒤 한 번 더 판단하고,
+                // 오래 잤으면(기준 글을 새로 잡았으므로) 버립니다.
+                if (!this.sleptSince(startedAt)) {
+                    logger.warn(`새 글 ${group.length}개를 판단하지 못했습니다: ${errorMessage(error)}`, context);
+                    await failAll(group, errorMessage(error));
+                    continue;
+                }
+                await this.asleep?.awake;
+                const sleep = this.lastSleep;
+                if (epoch !== this.epoch || !sleep || sleep.to - sleep.from > LONG_SLEEP_MS) {
+                    logger.info(`판단하는 사이 컴퓨터가 잠들어 새 글 ${group.length}개는 건너뜁니다.`, context);
+                    continue;
+                }
+                try {
+                    startedAt = this.now();
+                    decisions = await decide();
+                } catch (retryError) {
+                    logger.warn(`잠자기에서 깨어난 뒤 다시 판단했지만 새 글 ${group.length}개를 판단하지 못했습니다: ${errorMessage(retryError)}`, context);
+                    await failAll(group, errorMessage(retryError));
+                    continue;
+                }
             }
             const found = group.filter((_, index) => decisions[index]?.is_giveaway).length;
             if (found > 0) this.recordJudgment(gallery, "batch", group, decisions);
-            logger.info(`새 글 ${group.length}개를 LLM 요청 한 번으로 판단: 나눔 ${found}개 (${((Date.now() - startedAt) / 1000).toFixed(1)}초)`, context);
+            logger.info(`새 글 ${group.length}개를 LLM 요청 한 번으로 판단: 나눔 ${found}개 (${((this.now() - startedAt) / 1000).toFixed(1)}초)`, context);
             for (const [index, candidate] of group.entries()) {
                 const decision = decisions[index] ?? null;
                 const postContext = {...context, postNo: candidate.post.no};
@@ -866,6 +969,8 @@ export class Engine {
             this.record(gallery, post, "failure", reason, test);
         };
 
+        // 예약해 둔 줄 서기가 잠든 사이 시각이 되었으면, 깨어나 네트워크가 붙은 뒤에 섭니다(감시를 멈췄으면 아래에서 취소됩니다).
+        if (live && this.asleep) await this.asleep.awake;
         let attempts = plan.attempts;
         if (live) {
             const checked = this.revalidate(gallery, plan);
