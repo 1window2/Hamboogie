@@ -34,7 +34,7 @@ describe("settings normalize", () => {
 
     it("감시 간격은 10초~1시간으로 맞추고, 없는 계정은 대기 목록에서 뺀다", () => {
         const gallery = {...newGallery("g"), intervalSec: 3, accountIds: ["a", "ghost"]};
-        const result = normalizeGallery(gallery, [{id: "a", loginId: "x", memberTypeOverride: "auto"}]);
+        const result = normalizeGallery(gallery, [{id: "a", loginId: "x", memberTypeOverride: "auto", defaultDccons: []}]);
         expect(result.intervalSec).toBe(10);
         expect(result.accountIds).toEqual(["a"]);
         expect(normalizeGallery({...gallery, intervalSec: 99999}, []).intervalSec).toBe(3600);

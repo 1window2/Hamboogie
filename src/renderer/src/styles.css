@@ -523,3 +523,49 @@ textarea {
     align-self: flex-end;
     margin-bottom: 2px;
 }
+
+/* 기본 디시콘 고르기 */
+.dccon-chip img {
+    border-radius: 4px;
+    object-fit: contain;
+}
+
+.dccon-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.dccon-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+    gap: 6px;
+    max-height: 360px;
+    overflow-y: auto;
+}
+
+.dccon-item {
+    aspect-ratio: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    border: 2px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--muted);
+    padding: 2px;
+}
+
+.dccon-item img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.dccon-item.selected {
+    border-color: var(--accent);
+}

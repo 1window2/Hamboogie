@@ -28,6 +28,7 @@ function decision(patch: Partial<Decision> = {}): Decision {
         member_requirement: "any",
         starts_at: null,
         ends_at: null,
+        text_only: false,
         needs_extra_action: false,
         reason: "테스트",
         ...patch
@@ -125,9 +126,56 @@ describe("makePlan 상대 시각", () => {
             .toMatchObject({kind: "comment", notBefore: kst(14, 9) + seconds + START_MARGIN_MS});
     });
 
+    it("작성 시각을 초까지 모르면 그만큼 마감을 앞당겨 본다", () => {
+        // 14:29:30에 본 "14:30까지"는 그냥이면 서지만, 작성 시각이 59초까지 늦게 잡혔을 수 있으면 마감이 지난 것으로 봅니다.
+        const seen = kst(14, 29) + 30 * 1000;
+        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], seen, POST).kind).toBe("comment");
+        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], seen, POST, 59 * 1000).kind).toBe("skip");
+    });
+
     it("'30분까지'를 바꾼 마감을 지키고, 지났으면 서지 않는다", () => {
         expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], kst(14, 19), POST)).toMatchObject({kind: "comment", deadline: kst(14, 30)});
         expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], kst(14, 31), POST).kind).toBe("skip");
+    });
+});
+
+describe("makePlan 시작 시각 빠짐", () => {
+    it("글에 '~시부터', '~분 뒤부터'가 있는데 시작 시각이 비어 있으면 서지 않고 알린다", () => {
+        for (const text of ["버거 나눔 오후 9시부터 줄 받음", "21:00부터 줄", "9시 반부터 줄", "10분 뒤부터 줄"]) {
+            expect(makePlan(decision(), gallery, [gonick], NOW, text)).toMatchObject({kind: "notify", reason: expect.stringContaining("시작 시각")});
+        }
+        expect(makePlan(decision({starts_at: "21:00"}), gallery, [gonick], NOW, "오후 9시부터 줄").kind).toBe("comment");
+        expect(makePlan(decision(), gallery, [gonick], NOW, "버거 3개 나눔 30분까지 줄").kind).toBe("comment");
+    });
+});
+
+describe("makePlan 기본 디시콘", () => {
+    const burger = {packageIdx: 1, detailIdx: 11, title: "1", packageTitle: "음식콘"};
+    const pizza = {packageIdx: 1, detailIdx: 12, title: "2", packageTitle: "음식콘"};
+    const withDefaults: CandidateAccount = {id: "a", memberType: "gonick", dccons: [burger, pizza], defaultDccons: [burger, pizza]};
+    const contents = (plan: ReturnType<typeof makePlan>) => (plan.kind === "comment" ? plan.attempts.map((attempt) => attempt.content) : plan.kind);
+
+    it("문구 지정이 없는 줄에는 기본 디시콘 가운데 무작위로 하나를 단다", () => {
+        expect(contents(makePlan(decision(), gallery, [withDefaults], NOW, POST, 0, () => 0))).toEqual([{type: "dccon", dccon: burger}]);
+        expect(contents(makePlan(decision(), gallery, [withDefaults], NOW, POST, 0, () => 0.99))).toEqual([{type: "dccon", dccon: pizza}]);
+    });
+
+    it("글이 디시콘 댓글을 인정하지 않으면 '줄'을 단다", () => {
+        expect(contents(makePlan(decision({text_only: true}), gallery, [withDefaults], NOW, POST))).toEqual([{type: "text", text: "줄"}]);
+    });
+
+    it("기본 디시콘이 없는 계정은 지금처럼 '줄'을 단다", () => {
+        expect(contents(makePlan(decision(), gallery, [gonick], NOW, POST))).toEqual([{type: "text", text: "줄"}]);
+    });
+
+    it("요구 문구가 있으면 기본 디시콘이 아니라 그 문구를 단다", () => {
+        const post = "치킨 나눔 댓글에 치킨 먹고싶다 라고 쓰면 줄";
+        expect(contents(makePlan(decision({line_text: "치킨 먹고싶다"}), gallery, [withDefaults], NOW, post))).toEqual([{type: "text", text: "치킨 먹고싶다"}]);
+    });
+
+    it("종류를 정하지 않은 디시콘 줄은 기본 디시콘으로, 기본 디시콘이 없으면 알린다", () => {
+        expect(contents(makePlan(decision({line_method: "dccon"}), gallery, [withDefaults], NOW, POST, 0, () => 0))).toEqual([{type: "dccon", dccon: burger}]);
+        expect(makePlan(decision({line_method: "dccon"}), gallery, [gonick], NOW, POST)).toMatchObject({kind: "notify", reason: expect.stringContaining("기본 디시콘")});
     });
 });
 

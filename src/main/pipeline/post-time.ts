@@ -2,7 +2,8 @@ const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * 디시가 준 작성 시각 문자열(한국 시간)을 읽습니다. "2026.10.25 16:19:33", "2026-10-25 16:19", "16:19"처럼
+ * 디시가 준 작성 시각 문자열(한국 시간)을 읽습니다. 실제로 확인한 형식(2026-10-25)은 글 읽기가 "2025.04.23 13:41"(초 없음),
+ * 목록이 지난 글이면 "2025.04.23"(날짜만, 읽지 않음)입니다. "2026.10.25 16:19:33", "2026-10-25 16:19", "16:19"처럼
  * 날짜나 초가 빠진 형식도 읽고, 초가 없으면 그 분의 마지막 초(59초)로 봅니다. 날짜가 없으면 `detectedAt`과 같은 날(그보다
  * 늦으면 전날)로 봅니다. 읽을 수 없으면 null입니다.
  */
@@ -34,12 +35,27 @@ function latestPossible(raw: string, detectedAt: number): number | null {
  * 읽을 수 있어도 글을 감지한 시각보다 늦게 잡지 않고, 읽을 수 없거나 하루 넘게 차이 나면 감지한 시각을 씁니다.
  */
 export function estimatePostedAt(raw: (string | undefined)[], detectedAt: number): number {
+    return postedAtRange(raw, detectedAt).latest;
+}
+
+/** 작성 시각을 모를 때 실제 작성 시각이 감지한 시각보다 이만큼까지 이를 수 있다고 봅니다(보통의 감시 간격). */
+const UNKNOWN_SLACK_MS = 60 * 1000;
+
+/**
+ * 글을 올린 시각이 있을 수 있는 범위입니다. `latest`는 위의 추정값이고, `earliest`는 초를 모를 때 그 분의 0초,
+ * 아예 모를 때 감지한 시각의 1분 전입니다. 상대 마감("5분 후 마감")은 `latest` 기준으로 계산되므로, 마감은 그 차이만큼
+ * 앞당겨 봐야 마감 뒤에 줄 서지 않습니다.
+ */
+export function postedAtRange(raw: (string | undefined)[], detectedAt: number): {earliest: number; latest: number} {
     for (const text of raw) {
         if (!text) continue;
         const at = latestPossible(text, detectedAt);
-        if (at !== null && at >= detectedAt - DAY_MS) return Math.min(at, detectedAt);
+        if (at === null || at < detectedAt - DAY_MS) continue;
+        const latest = Math.min(at, detectedAt);
+        const precise = /\d{1,2}:\d{2}:\d{2}/.test(text);
+        return {latest, earliest: Math.min(latest, precise ? at : at - 59 * 1000)};
     }
-    return detectedAt;
+    return {latest: detectedAt, earliest: detectedAt - UNKNOWN_SLACK_MS};
 }
 
 /** LLM에 넘길 한국 시간 "YYYY-MM-DD HH:MM:SS"입니다. */

@@ -97,8 +97,27 @@ export function isCaptchaFailure(error: unknown): boolean {
     return error instanceof CaptchaRequiredError;
 }
 
+/** 로그인 만료로 다시 로그인을 시도하는 최소 간격입니다(계정마다). */
+const LOGIN_RECOVERY_GAP_MS = 30 * 60 * 1000;
+/** 일시적인 오류로 로그인하지 못했을 때 다시 시도하는 간격입니다. 실패할 때마다 두 배로 늘립니다. */
+const LOGIN_RETRY_FIRST_MS = 60 * 1000;
+const LOGIN_RETRY_MAX_MS = 30 * 60 * 1000;
+
+/**
+ * 다시 시도하면 풀릴 수 있는 로그인 실패인지입니다. 디시가 응답으로 거절한 것(비밀번호 불일치, OTP·캡차 필요 등)은
+ * 다시 시도하면 계정이 잠길 수 있어 제외하고, 네트워크 오류·시간 초과·서버 오류와 app_id 거절만 다시 시도합니다.
+ * 컴퓨터가 잠들었다 깨어난 직후처럼 네트워크가 아직 붙지 않았을 때가 대표적입니다.
+ */
+export function isTransientLoginFailure(error: unknown): boolean {
+    return !(error instanceof ApiError) || isAppIdFailure(error);
+}
+
 /** 등록된 계정의 로그인 상태와 세션을 관리합니다. */
 export class AccountManager {
+    /** 로그인 만료로 계정마다 마지막으로 다시 로그인을 시도한 시각입니다. */
+    private readonly lastRecovery = new Map<string, number>();
+    /** 일시적인 오류로 로그인하지 못해 자동으로 다시 시도할 계정입니다. `maintain`이 때가 되면 로그인합니다. */
+    private readonly retries = new Map<string, {account: AccountConfig; at: number; delayMs: number; since: number}>();
     private readonly sessions = new Map<string, LoggedIn>();
     private readonly statuses = new Map<string, AccountStatus>();
     /** OTP를 요구받은 클라이언트입니다. OTP는 요구받은 클라이언트(같은 기기 정보)로 보내야 합니다. */
@@ -188,6 +207,7 @@ export class AccountManager {
             // app_id를 받은 뒤에 저장해야 앱을 다시 켰을 때 app_id를 또 발급받지 않습니다.
             await saveDevice(this.secrets, deviceKey, client);
             this.sessions.set(account.id, loggedIn);
+            this.retries.delete(account.id);
             return this.setStatus(account.id, this.loggedInStatus(account, loggedIn));
         } catch (error) {
             this.sessions.delete(account.id);
@@ -202,11 +222,35 @@ export class AccountManager {
                     message: otp ? `OTP 인증 실패: ${error.message}` : "OTP 번호를 입력하세요."
                 });
             }
+            if (isTransientLoginFailure(error)) return this.scheduleRetry(account, error);
+            this.retries.delete(account.id);
             const message = error instanceof CaptchaRequiredError
                 ? "로그인에 캡차 입력이 필요합니다. 디시 앱이나 웹에서 한 번 로그인한 뒤 다시 시도하세요."
                 : `로그인 실패: ${errorMessage(error)}`;
             return this.setStatus(account.id, {state: "error", message});
         }
+    }
+
+    /** 일시적인 오류로 로그인하지 못한 계정을 1분, 2분, 4분…(최대 30분) 뒤에 자동으로 다시 로그인하도록 잡아 둡니다. */
+    private scheduleRetry(account: AccountConfig, error: unknown): AccountStatus {
+        if (isAppIdFailure(error)) this.refuseAppId(error);
+        const previous = this.retries.get(account.id);
+        const delayMs = previous ? Math.min(previous.delayMs * 2, LOGIN_RETRY_MAX_MS) : LOGIN_RETRY_FIRST_MS;
+        const since = previous?.since ?? this.now();
+        const at = this.now() + delayMs;
+        this.retries.set(account.id, {account, at, delayMs, since});
+        const minutes = Math.max(1, Math.round(delayMs / 60000));
+        return this.setStatus(account.id, {
+            state: "error",
+            message: `일시적인 오류로 로그인하지 못했습니다. ${minutes}분 뒤 자동으로 다시 로그인합니다. (${errorMessage(error)})`,
+            retryAt: at,
+            failingSince: since
+        });
+    }
+
+    /** 일시적인 오류로 자동 재로그인을 기다리는 계정인지입니다. */
+    isRetrying(accountId: string): boolean {
+        return this.retries.has(accountId);
     }
 
     private setStatus(accountId: string, status: AccountStatus): AccountStatus {
@@ -242,7 +286,8 @@ export class AccountManager {
                         packageIdx: item.package_idx,
                         detailIdx: item.detail_idx,
                         title: item.title ?? "",
-                        packageTitle: tabs[index]?.title ?? ""
+                        packageTitle: tabs[index]?.title ?? "",
+                        ...(item.img ? {img: item.img} : {})
                     }]
                     : []));
             loggedIn.dcconError = undefined;
@@ -268,6 +313,17 @@ export class AccountManager {
      */
     async maintain(accounts: AccountConfig[]): Promise<boolean> {
         let changed = false;
+        // 일시적인 오류로 로그인하지 못한 계정은 때가 되면 다시 로그인합니다(잠자기에서 깨어난 직후 네트워크가 없었을 때 등).
+        for (const [id, retry] of [...this.retries]) {
+            if (this.now() < retry.at || this.sessions.has(id) || !this.appId.canTry()) continue;
+            const account = accounts.find((item) => item.id === id);
+            if (!account) {
+                this.retries.delete(id);
+                continue;
+            }
+            await this.login(account);
+            changed = true;
+        }
         for (const [id, loggedIn] of this.sessions) {
             if (!loggedIn.dcconError || !this.appId.canTry()) continue;
             if (loggedIn.dcconRetryAt !== undefined && this.now() < loggedIn.dcconRetryAt) continue;
@@ -306,17 +362,22 @@ export class AccountManager {
     }
 
     /**
-     * 라이브러리의 자동 재로그인까지 실패한 계정을 처리합니다(비밀번호 변경 등).
-     * 라이브러리는 재로그인할 때 OTP 토큰을 넘기지 못하므로, 저장된 OTP 토큰이 있으면 한 번만 직접 다시 로그인해 봅니다.
-     * 살리지 못하면 세션을 버려, 글 읽기는 다음 계정으로 넘기고 확인할 때마다 로그인을 다시 시도해 계정이 잠기는 일을 막습니다.
-     * 다시 로그인했으면 true, 세션을 버렸으면 false입니다.
+     * 라이브러리의 자동 재로그인까지 실패한 계정을 처리합니다. 로그인 세션은 반나절쯤 지나면 만료되는데, 라이브러리는 같은
+     * 클라이언트로 다시 로그인만 하고(OTP 토큰도 넘기지 못함) 그것만으로는 풀리지 않을 때가 있습니다. 그래서 로그인 버튼과
+     * 같은 전체 로그인(새 클라이언트, app_id 새로 받기)을 한 번 해 봅니다. 비밀번호가 바뀐 경우처럼 계속 실패할 때 확인할 때마다
+     * 로그인을 시도해 계정이 잠기지 않도록, 계정마다 30분에 한 번까지만 합니다. 살리지 못하면 세션을 버려 글 읽기는 다음 계정으로
+     * 넘깁니다. 다시 로그인했으면 true, 세션을 버렸으면 false입니다.
      */
     async recoverLogin(accountId: string, reason: string): Promise<boolean> {
         const loggedIn = this.sessions.get(accountId);
         if (!loggedIn) return false;
-        if (this.secrets.get(`otp:${accountId}`)) {
+        const last = this.lastRecovery.get(accountId);
+        if (last === undefined || this.now() - last >= LOGIN_RECOVERY_GAP_MS) {
+            this.lastRecovery.set(accountId, this.now());
             const status = await this.login(loggedIn.account);
             if (status.state === "logged_in") return true;
+            // OTP를 다시 입력해야 하거나, 일시적인 오류라 자동으로 다시 로그인할 예정이면 그 안내를 그대로 둡니다.
+            if (status.state === "otp_required" || this.retries.has(accountId)) return false;
         }
         this.sessions.delete(accountId);
         this.setStatus(accountId, {state: "error", message: `로그인이 풀렸습니다. 계정 탭에서 다시 로그인하세요. (${reason})`});
@@ -335,7 +396,10 @@ export class AccountManager {
             const account = accounts.find((item) => item.id === id);
             const loggedIn = this.sessions.get(id);
             if (!account || !loggedIn) return [];
-            return [{id, memberType: this.memberType(account, loggedIn), dccons: loggedIn.dccons}];
+            // 기본 디시콘은 지금 가진 것만 씁니다(설정한 뒤 디시콘을 지웠거나 기간이 끝났을 수 있습니다).
+            const defaults = (account.defaultDccons ?? []).flatMap((ref) =>
+                loggedIn.dccons.filter((dccon) => dccon.packageIdx === ref.packageIdx && dccon.detailIdx === ref.detailIdx).slice(0, 1));
+            return [{id, memberType: this.memberType(account, loggedIn), dccons: loggedIn.dccons, defaultDccons: defaults}];
         });
     }
 
@@ -408,6 +472,11 @@ export class AccountManager {
         await client.comments.write(galleryId, postNo, message);
     }
 
+    /** 로그인된 계정이 가진 디시콘입니다. 로그인할 때 불러 둔 목록이라 디시에 요청하지 않습니다. */
+    ownedDccons(accountId: string): OwnedDccon[] {
+        return this.sessions.get(accountId)?.dccons ?? [];
+    }
+
     nickname(accountId: string): string {
         return this.sessions.get(accountId)?.nickname ?? accountId;
     }
@@ -415,6 +484,7 @@ export class AccountManager {
     async remove(accountId: string): Promise<void> {
         this.removed.add(accountId);
         this.sessions.delete(accountId);
+        this.retries.delete(accountId);
         this.awaitingOtp.delete(accountId);
         this.statuses.delete(accountId);
         // 앞부분이 같은 다른 키까지 지우지 않도록 정확한 키만 지웁니다.

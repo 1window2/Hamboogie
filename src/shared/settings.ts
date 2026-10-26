@@ -1,4 +1,4 @@
-import type {AccountConfig, AutoStop, GalleryConfig, LlmProviderId, Settings} from "./types";
+import type {AccountConfig, AutoStop, DcconRef, GalleryConfig, LlmProviderId, Settings} from "./types";
 
 export const INTERVAL_MIN_SEC = 10;
 export const INTERVAL_MAX_SEC = 60 * 60;
@@ -102,13 +102,31 @@ export function normalizeGallery(saved: GalleryConfig, accounts: AccountConfig[]
 }
 
 /** 계정 ID는 앱이 만든 UUID입니다. 비밀 정보 키에 쓰이므로 다른 형식은 받지 않습니다. */
+/** 계정마다 정할 수 있는 기본 디시콘 수입니다. */
+export const DEFAULT_DCCONS_MAX = 20;
+
+/** 이전 버전 설정(기본 디시콘 없음)이나 잘못된 값을 걸러 냅니다. 같은 디시콘은 한 번만 둡니다. */
+function normalizeDccons(dccons: DcconRef[] | undefined): DcconRef[] {
+    if (!Array.isArray(dccons)) return [];
+    const seen = new Set<string>();
+    return dccons.filter((dccon) => {
+        if (!Number.isInteger(dccon?.packageIdx) || !Number.isInteger(dccon?.detailIdx)) return false;
+        const key = `${dccon.packageIdx}:${dccon.detailIdx}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    }).slice(0, DEFAULT_DCCONS_MAX).map(({packageIdx, detailIdx, title, packageTitle}) => ({
+        packageIdx, detailIdx, title: String(title ?? ""), packageTitle: String(packageTitle ?? "")
+    }));
+}
+
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** 저장 전에 설정값을 허용 범위로 맞춥니다. */
 export function normalizeSettings(settings: Settings): Settings {
     const accounts = settings.accounts
         .filter((account) => ACCOUNT_ID_PATTERN.test(account.id))
-        .map((account) => ({...account, loginId: account.loginId.trim()}));
+        .map((account) => ({...account, loginId: account.loginId.trim(), defaultDccons: normalizeDccons(account.defaultDccons)}));
     return {
         ...settings,
         accounts,

@@ -2,6 +2,7 @@ import {useState} from "react";
 import type {AccountConfig, AccountStatus, AccountView, AppState, Settings} from "@shared/types";
 import type {DraftSetter} from "../App";
 import {isCommitEnter} from "../components/keys";
+import {DefaultDccons} from "../components/DefaultDccons";
 
 interface Props {
     draft: Settings;
@@ -34,7 +35,7 @@ export function AccountsTab({draft, setDraft, state, run}: Props) {
 
     // 비밀번호와 로그인은 저장된 계정에만 쓸 수 있으므로, 계정 추가와 삭제는 다른 변경 사항과 함께 바로 저장합니다.
     function addAccount() {
-        const account: AccountConfig = {id: crypto.randomUUID(), loginId: "", memberTypeOverride: "auto"};
+        const account: AccountConfig = {id: crypto.randomUUID(), loginId: "", memberTypeOverride: "auto", defaultDccons: []};
         void run(() => window.hamboogie.saveSettings({...draft, accounts: [...draft.accounts, account]}));
     }
 
@@ -110,6 +111,9 @@ function AccountCard({account, view, onChange, run, onRemove, saved}: {
                     <small className="muted">자동 판별이 틀리면 직접 지정하세요. "고닉만" 같은 줄 조건에 쓰입니다.</small>
                 </label>
             </div>
+            {status.state === "logged_in" && status.dcconCount > 0 && (
+                <DefaultDccons accountId={account.id} selected={account.defaultDccons} onChange={(defaultDccons) => onChange({defaultDccons})}/>
+            )}
             <div className="row">
                 <span className={status.state === "error" || status.state === "otp_required" ? "error-text" : status.state === "logged_in" ? "ok-text" : "muted"}>
                     {statusText(status)}

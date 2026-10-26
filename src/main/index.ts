@@ -1,8 +1,8 @@
 import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
-import {app, BrowserWindow, ipcMain, Notification, shell, type IpcMainInvokeEvent} from "electron";
+import {app, BrowserWindow, ipcMain, Notification, powerMonitor, powerSaveBlocker, shell, type IpcMainInvokeEvent} from "electron";
 import {PROVIDERS} from "@shared/settings";
-import type {AccountConfig, AppState, SecretKey, Settings} from "@shared/types";
+import type {AccountConfig, AppState, DcconPackage, SecretKey, Settings} from "@shared/types";
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
 import {AccountManager} from "./dc/accounts";
 import {AppIdBackoff} from "./dc/app-id-backoff";
@@ -15,6 +15,7 @@ import {flushAllJson, HistoryStore, JudgmentLog, Ledger, SecretStore, SettingsSt
 import {createTray} from "./tray";
 import {startUpdater, type Updater} from "./updater";
 import {errorMessage} from "@shared/errors";
+import {DcconImages} from "./dc/dccon-images";
 
 
 /** 앱 화면에서 온 IPC만 받는 등록 함수입니다. */
@@ -92,7 +93,7 @@ async function main(): Promise<void> {
             // 그사이 이미 다른 이유로 내려놓은 계정이면 할 일이 없습니다.
             const accountId = accounts.accountOf(client);
             if (!accountId) return "none";
-            const outcome = await accounts.recoverLogin(accountId, reason) ? "recovered" : "expired";
+            const outcome = await accounts.recoverLogin(accountId, reason) ? "recovered" : accounts.isRetrying(accountId) ? "retrying" : "expired";
             tray?.update();
             return outcome;
         },
@@ -143,7 +144,25 @@ async function main(): Promise<void> {
     let tray: {update(): void} | null = null;
     let updater: Updater | null = null;
 
+    // 감시하는 동안에는 자리를 비워도 컴퓨터가 저절로 잠들지 않게 합니다(잠들면 감시가 멈춥니다).
+    // 화면은 꺼져도 됩니다. 노트북 덮개를 닫아 잠드는 것은 막을 수 없습니다.
+    let sleepBlocker: number | null = null;
+    function syncSleepBlocker(): void {
+        if (engine.running && sleepBlocker === null) {
+            sleepBlocker = powerSaveBlocker.start("prevent-app-suspension");
+        } else if (!engine.running && sleepBlocker !== null) {
+            powerSaveBlocker.stop(sleepBlocker);
+            sleepBlocker = null;
+        }
+    }
+
+    // 잠들고 깨어난 시각을 남겨, 감시가 비는 이유를 로그로 알 수 있게 합니다. 깨어나면 밀린 확인이 바로 돌고,
+    // 그사이 로그인이 풀렸으면 다시 로그인합니다(네트워크가 아직 없으면 잠시 뒤 자동으로 다시 시도).
+    powerMonitor.on("suspend", () => logger.info("컴퓨터가 잠들어 감시가 잠시 멈춥니다."));
+    powerMonitor.on("resume", () => logger.info("컴퓨터가 깨어나 감시를 이어갑니다."));
+
     function pushState(): void {
+        syncSleepBlocker();
         window?.webContents.send("state", state());
         tray?.update();
     }
@@ -203,6 +222,22 @@ async function main(): Promise<void> {
         pushState();
     }
 
+    // 기본 디시콘을 고르는 화면용입니다. 목록은 로그인할 때 불러 둔 것이라 디시에 요청하지 않고,
+    // 이미지는 그 계정이 가진 디시콘의 이미지만 받습니다.
+    const dcconImages = new DcconImages();
+    handle("getDccons", (_event, accountId: string): DcconPackage[] => {
+        const packages = new Map<number, DcconPackage>();
+        for (const dccon of accounts.ownedDccons(accountId)) {
+            const entry = packages.get(dccon.packageIdx) ?? {packageIdx: dccon.packageIdx, title: dccon.packageTitle, items: []};
+            entry.items.push({detailIdx: dccon.detailIdx, title: dccon.title, img: dccon.img ?? ""});
+            packages.set(dccon.packageIdx, entry);
+        }
+        return [...packages.values()];
+    });
+    handle("getDcconImages", (_event, accountId: string, urls: string[]) => {
+        const owned = new Set(accounts.ownedDccons(accountId).flatMap((dccon) => (dccon.img ? [dccon.img] : [])));
+        return dcconImages.load((Array.isArray(urls) ? urls : []).filter((url) => typeof url === "string" && owned.has(url)));
+    });
     handle("login", async (_event, accountId: string, otp?: string) => {
         const account = settingsStore.get().accounts.find((item) => item.id === accountId);
         if (!account) throw new Error("계정을 찾을 수 없습니다.");
@@ -219,12 +254,12 @@ async function main(): Promise<void> {
     });
     handle("start", () => {
         engine.start();
-        tray?.update();
+        pushState();
         return state();
     });
     handle("stop", () => {
         engine.stop();
-        tray?.update();
+        pushState();
         return state();
     });
     handle("testWebhook", async () => {
@@ -341,7 +376,8 @@ async function main(): Promise<void> {
         if (!account.loginId || !secrets.has(`account:${account.id}`)) continue;
         await loginAccount(account);
         const status = accounts.status(account.id);
-        if (status.state === "otp_required" || status.state === "error") failed.push(`${account.loginId}: ${status.message}`);
+        // 네트워크가 아직 없을 때처럼 일시적인 오류면 자동으로 다시 로그인하므로 알리지 않습니다.
+        if (status.state === "otp_required" || (status.state === "error" && status.retryAt === undefined)) failed.push(`${account.loginId}: ${status.message}`);
     }
     if (failed.length > 0) await engine.alert("계정 자동 로그인 실패", `앱에서 다시 로그인해야 줄을 설 수 있습니다.\n${failed.join("\n")}`);
 }

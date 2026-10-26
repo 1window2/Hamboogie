@@ -5,7 +5,7 @@ import {DC_APP_VERSION_CODE} from "../src/main/dc/app-version";
 import {AppIdBackoff} from "../src/main/dc/app-id-backoff";
 import type {AccountConfig} from "@shared/types";
 
-const ACCOUNT: AccountConfig = {id: "acc1", loginId: "tester", memberTypeOverride: "auto"};
+const ACCOUNT: AccountConfig = {id: "acc1", loginId: "tester", memberTypeOverride: "auto", defaultDccons: []};
 
 /** 메모리에만 저장하는 비밀 정보 저장소입니다. */
 function memorySecrets(initial: Record<string, string> = {}) {
@@ -31,6 +31,8 @@ interface FakeServer {
     clientsCreated: number;
     /** true면 저장된 기기 정보로 만든 클라이언트는 app_id 발급을 거절당합니다. */
     savedDeviceBroken: boolean;
+    /** false면 OTP 없이 로그인됩니다(OTP를 쓰지 않는 계정). */
+    otpRequired?: boolean;
 }
 
 const APP_ID_REFUSED = () => new DCInsideError('app_id 발급 실패: {"result":false,"cause":"2114 DC Error Description :service id mismatched."}');
@@ -40,7 +42,7 @@ function fakeClientFactory(server: FakeServer) {
         async login(_id: string, _password: string, options: LoginOptions = {}) {
             server.loginCalls.push(options);
             const viaToken = options.otpToken === server.validOtpToken;
-            if (!viaToken && options.otp !== "123456") throw new OtpRequiredError("OTP가 필요합니다.", null);
+            if (server.otpRequired !== false && !viaToken && options.otp !== "123456") throw new OtpRequiredError("OTP가 필요합니다.", null);
             return {type: "login", id: _id, password: _password, userId: "tester", result: {
                 result: true, user_id: "tester", name: "테스트닉", is_gonick: 1,
                 otp_token: options.otp ? server.validOtpToken : undefined
@@ -137,7 +139,7 @@ describe("AccountManager 댓글 작성", () => {
         expect(secrets.data["otp:acc1"]).toBeUndefined();
     });
 
-    it("OTP 토큰이 없는 계정은 라이브러리의 자동 재로그인이 이미 실패했으므로 다시 로그인하지 않고 내려놓는다", async () => {
+    it("댓글을 달다 로그인이 풀렸는데 다시 로그인하려니 OTP가 필요하면, 한 번만 시도하고 내려놓은 뒤 OTP 입력을 기다린다", async () => {
         const {server, manager} = setup({"otp:acc1": "token-abc"});
         await manager.login(ACCOUNT);
         // 로그인 뒤 OTP 토큰이 지워진 상황입니다.
@@ -145,8 +147,9 @@ describe("AccountManager 댓글 작성", () => {
         server.expireWrites = 1;
         const before = server.loginCalls.length;
         await expect(manager.writeComment("acc1", "asgeir", 1, {type: "text", text: "줄"})).rejects.toThrow("다시 로그인하세요");
-        expect(server.loginCalls.length).toBe(before);
+        expect(server.loginCalls.length).toBe(before + 1);
         expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])).toBeNull();
+        expect(manager.status("acc1").state).toBe("otp_required");
     });
 
     it("댓글 요청을 보내기 전(디시콘 준비 등)에 난 오류는 달리지 않은 것이 확실한 실패로 바꾼다", async () => {
@@ -258,7 +261,7 @@ describe("AccountManager 계정 삭제", () => {
 describe("AccountManager 글 읽기 계정", () => {
     it("갤러리의 대기 계정 중 우선순위 순서로 처음 로그인된 계정으로 읽고, 없으면 null", async () => {
         const {manager} = setup({"otp:acc1": "token-abc"});
-        const other: AccountConfig = {id: "acc0", loginId: "other", memberTypeOverride: "auto"};
+        const other: AccountConfig = {id: "acc0", loginId: "other", memberTypeOverride: "auto", defaultDccons: []};
         expect(manager.readingClient([other, ACCOUNT], ["acc0", "acc1"])).toBeNull();
         await manager.login(ACCOUNT);
         expect(manager.readingClient([other, ACCOUNT], ["acc0", "acc1"])?.accountId).toBe("acc1");
@@ -277,6 +280,23 @@ describe("dcinside.js 2.0.2 오류 분류", () => {
     it("이미 받아 둔 app_id로 보낸 요청이 앱 버전 때문에 거절돼도 app_id 거절로 본다", () => {
         expect(isAppIdFailure(new ApiError("앱을 계속 이용하시려면 스토어에서 최신 버전으로 업데이트해 주세요.", null))).toBe(true);
         expect(isAppIdFailure(new ApiError("존재하지 않는 게시물입니다.", null))).toBe(false);
+    });
+
+    it("OTP를 쓰지 않는 계정도 로그인이 풀리면 다시 로그인하되, 30분 안에 또 풀리면 내려놓는다", async () => {
+        let now = 1_000_000;
+        const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0, savedDeviceBroken: false, otpRequired: false};
+        const manager = new AccountManager(memorySecrets({"account:acc1": "pw"}), fakeClientFactory(server), new AppIdBackoff(() => now), () => now);
+        await manager.login(ACCOUNT);
+        expect(await manager.recoverLogin("acc1", "certification_login")).toBe(true);
+        expect(server.loginCalls).toHaveLength(2);
+        now += 10 * 60 * 1000;
+        expect(await manager.recoverLogin("acc1", "certification_login")).toBe(false);
+        expect(server.loginCalls).toHaveLength(2);
+        expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])).toBeNull();
+        // 30분이 지나 다시 로그인한 뒤 또 풀리면 그때는 다시 시도합니다.
+        now += 30 * 60 * 1000;
+        await manager.login(ACCOUNT);
+        expect(await manager.recoverLogin("acc1", "certification_login")).toBe(true);
     });
 
     it("로그인이 풀린 계정은 저장된 OTP 토큰이 있으면 한 번 다시 로그인하고, 없으면 내려놓는다", async () => {

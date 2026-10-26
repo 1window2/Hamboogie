@@ -1,20 +1,21 @@
 import type {DCInside, PostItem} from "@green-1052/dcinside.js";
 import {errorMessage} from "@shared/errors";
-import {effectiveRpm, FREE_DAILY_LLM_REQUESTS, galleryProblems, nextAutoStopAt, PROVIDER_LABELS} from "@shared/settings";
+import {FREE_DAILY_LLM_REQUESTS, galleryProblems, nextAutoStopAt} from "@shared/settings";
 import type {GalleryConfig, GalleryStatus, HistoryEntry, Settings} from "@shared/types";
 import {isAppIdFailure, isCaptchaFailure, isDefiniteCommentFailure, isLoginExpired, type AccountManager} from "../dc/accounts";
 import type {AppIdBackoff} from "../dc/app-id-backoff";
 import {isOutdatedAppError, OUTDATED_APP_MESSAGE, OUTDATED_PAUSE_MS} from "../dc/app-version";
 import {htmlToText} from "../dc/text";
 import {buildBatchMessage, buildUserMessage, type Decision} from "../llm/decision";
-import {createProvider, LlmQuotaExhaustedError, type LlmProvider, type PostInput} from "../llm/providers";
-import {RateLimiter} from "../llm/rate-limit";
-import {LlmUsage} from "../llm/usage";
+import {LlmGate} from "../llm/gate";
+import type {LlmProvider, PostInput} from "../llm/providers";
+import type {LlmUsage} from "../llm/usage";
 import type {Logger} from "../logger";
 import {sendDiscordNotice} from "../notify/discord";
 import type {Ledger, SecretStore} from "../store";
+import {AutoStopTimer, clockText} from "./auto-stop";
 import {findKeyword, matchesKeywords} from "./keyword-filter";
-import {estimatePostedAt} from "./post-time";
+import {postedAtRange} from "./post-time";
 import {eligible, END_MARGIN_MS, makePlan, type Plan} from "./planner";
 
 /** 한 번 확인할 때 최대로 넘겨볼 목록 페이지 수입니다. */
@@ -25,15 +26,16 @@ const MAX_BATCH_POSTS = 40;
 
 /** 본문을 연달아 읽을 때 사이에 둘 간격입니다. 새 글이 많을 때 요청이 한꺼번에 몰리지 않게 합니다. */
 const BODY_READ_GAP_MS = 500;
-/** 자동 중지 시각이 됐는지 다시 확인하는 최대 간격입니다. */
-const AUTO_STOP_CHECK_MS = 60 * 1000;
-
-/** 로그에 남길 시각입니다. 오늘이 아니면 "내일"을 붙입니다. */
-function clockText(at: number, now: number): string {
-    const date = new Date(at);
-    const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-    return date.toDateString() === new Date(now).toDateString() ? time : `내일 ${time}`;
-}
+/** 올라온 지 이보다 오래된 글에는 자동으로 줄 서지 않습니다. 오래 쉬었다가 다시 확인할 때 지난 나눔에 줄 서지 않기 위해서입니다. */
+const STALE_POST_MS = 60 * 60 * 1000;
+/** 일시적인 오류로 자동 재로그인을 기다리는 동안 "로그인 필요"를 알리지 않고 기다리는 시간입니다. */
+const LOGIN_RECOVERY_QUIET_MS = 10 * 60 * 1000;
+/** 목록 확인이 연달아 실패할 때 다음 확인까지 기다리는 최대 시간입니다. */
+const FAILURE_BACKOFF_MAX_MS = 30 * 60 * 1000;
+/** 목록 확인이 이만큼 연달아 실패하면 Discord로 한 번 알립니다. */
+const FAILURE_ALERT_AFTER = 5;
+/** 확인 한 번에 본문 읽기가 이만큼 실패하면 남은 글은 다음 확인 때 다시 읽습니다. */
+const READ_FAILURES_PER_TICK = 2;
 
 export interface NewPost {
     no: number;
@@ -62,6 +64,8 @@ interface Candidate {
     detectedAt: number;
     /** 글을 올린 시각 추정값입니다. 확실하지 않으면 늦은 쪽(감지한 시각)으로 잡습니다. */
     postedAt: number;
+    /** 작성 시각 추정값이 실제보다 늦을 수 있는 최대 시간입니다. 마감을 이만큼 앞당겨 봅니다. */
+    postedSlackMs: number;
     /** 본문에 나온 작성 시각 문자열입니다. */
     dateTime?: string;
 }
@@ -77,10 +81,11 @@ export interface EngineDeps {
     resetReader(gallery: GalleryConfig): Promise<void>;
     /**
      * 글을 읽던 클라이언트의 로그인이 풀려 라이브러리의 자동 재로그인도 실패했을 때 부릅니다.
-     * 저장된 OTP 토큰으로 다시 로그인했으면 "recovered", 그 계정을 내려놓았으면 "expired",
+     * 다시 로그인했으면 "recovered", 일시적인 오류로 다시 로그인하지 못해 자동으로 또 시도할 예정이면 "retrying",
+     * 그 계정을 내려놓았으면 "expired",
      * 로그인하지 않은 읽기용 클라이언트라 할 일이 없으면 "none"입니다.
      */
-    onReaderLoginExpired(client: DCInside, reason: string): Promise<"recovered" | "expired" | "none">;
+    onReaderLoginExpired(client: DCInside, reason: string): Promise<"recovered" | "retrying" | "expired" | "none">;
     /** app_id 발급 거절 대기 규칙입니다. 거절은 IP 단위라 계정들과 함께 씁니다. */
     appId: AppIdBackoff;
     accounts: AccountManager;
@@ -161,12 +166,8 @@ export class Engine {
     private epoch = 0;
     /** 갤러리 설정 항목 id별 마지막 확인 결과입니다. */
     private readonly statuses = new Map<string, GalleryStatus>();
-    /** 같은 서비스/모델/키라면 LLM 클라이언트를 다시 만들지 않습니다. */
-    private provider: {key: string; instance: LlmProvider} | null = null;
-    /** 갤러리와 상관없이 앱 전체의 LLM 요청 수를 셉니다. */
-    private readonly limiter = new RateLimiter(() => effectiveRpm(this.deps.settings().llm));
-    /** 오늘 보낸 LLM 요청 수입니다. */
-    private readonly usage: LlmUsage;
+    /** LLM 요청 창구입니다(클라이언트, 분당·하루 한도, 한도 소진 시 쉬기). */
+    private readonly llm: LlmGate;
     /** 개발 모드 테스트용입니다. 켜 두면 감시로 찾은 글에 처음 줄을 서는 데 성공하는 즉시 감시를 멈춥니다. */
     stopAfterFirstSuccess = false;
     /** 무료 등급 하루 LLM 요청 수를 다 써서 감시를 쉰다고 이미 알렸는지입니다. */
@@ -178,21 +179,27 @@ export class Engine {
     private outdatedNotified = false;
     /** 로그인된 계정이 없어 감시를 쉰다고 이미 알렸는지입니다. 로그인되면 다시 알릴 수 있게 됩니다. */
     private readonly notLoggedInWarned = new Set<string>();
-    /** 마지막으로 글을 읽은 클라이언트입니다. */
-    private lastReader: DCInside | null = null;
-    /** LLM 요청 한도를 다 써서 쉬는 중이면 다시 시도해도 되는 시각과 이유입니다. */
-    private llmPause: {until: number; message: string} | null = null;
+    /** 갤러리 설정 항목 id별로 목록 확인이 연달아 실패한 횟수입니다. 실패가 이어지면 다음 확인을 늦춥니다. */
+    private readonly listFailures = new Map<string, number>();
+    /** app_id 거절로 확인을 쉰다고 이미 로그에 남겼는지입니다. */
+    private appIdPauseLogged = false;
+    /**
+     * 읽기 요청이 실패했을 때 그 요청을 보낸 클라이언트입니다. 여러 갤러리를 함께 확인하면 요청이 섞이므로,
+     * 로그인 만료를 처리할 때 "마지막으로 읽은 클라이언트"가 아니라 실패한 요청의 클라이언트를 씁니다.
+     */
+    private readonly failedReaders = new WeakMap<object, DCInside>();
     /** 진행 중인 LLM 판단입니다. 목록 확인이 판단을 기다리지 않도록 따로 돌립니다. */
     private readonly inflight = new Set<Promise<void>>();
     /** 감시를 시작한 시각입니다. 감시 중에 다시 시작해도 바뀌지 않아 "N분 후" 자동 중지가 처음 시작한 때부터 셉니다. */
     private startedAt: number | null = null;
-    /** 자동으로 멈출 시각과 그때까지 기다리는 타이머입니다. */
-    private autoStop: {at: number; timer: ReturnType<typeof setTimeout>} | null = null;
+    /** 설정한 시각에 감시를 멈추는 타이머입니다. */
+    private readonly autoStop: AutoStopTimer;
     private readonly now: () => number;
 
     constructor(private readonly deps: EngineDeps) {
-        this.usage = deps.usage ?? new LlmUsage(() => null, () => {});
+        this.llm = new LlmGate(deps, (message) => this.alert("LLM 요청 한도 소진", message));
         this.now = deps.now ?? Date.now;
+        this.autoStop = new AutoStopTimer(this.now, () => void this.stopAutomatically());
     }
 
     get running(): boolean {
@@ -213,6 +220,8 @@ export class Engine {
      * 그래서 감시 중에 다시 시작해도 그사이 올라온 글을 건너뛰지 않습니다. 시작할 수 없는 갤러리는 로그에 이유를 남기고 건너뜁니다.
      */
     start(): void {
+        // 감시가 모두 멈춰 있었다면(갤러리를 꺼서 감시가 0개가 된 경우 포함) 자동 중지 시간을 지금부터 셉니다.
+        const wasRunning = this.running;
         this.haltWatchers(false);
         const keys = new Set(this.deps.settings().galleries.map((gallery) => this.seenKey(gallery)));
         for (const key of this.lastSeen.keys()) if (!keys.has(key)) this.lastSeen.delete(key);
@@ -235,14 +244,14 @@ export class Engine {
             this.startedAt = null;
         } else {
             logger.info(`갤러리 ${this.watchers.size}개 감시를 시작합니다.`);
-            this.startedAt ??= this.now();
+            if (!wasRunning || this.startedAt === null) this.startedAt = this.now();
         }
         this.refreshAutoStop(true);
     }
 
     /** 자동으로 멈출 시각(ms)입니다. 감시 중이 아니거나 자동 중지가 꺼져 있으면 null입니다. */
     get autoStopAt(): number | null {
-        return this.autoStop?.at ?? null;
+        return this.autoStop.at;
     }
 
     /**
@@ -250,38 +259,14 @@ export class Engine {
      * @param announce 멈출 시각을 로그에 남깁니다. 설정을 저장했을 때는 시각이 바뀐 경우에만 남깁니다.
      */
     refreshAutoStop(announce = false): void {
-        const previous = this.autoStop?.at ?? null;
-        this.clearAutoStop();
-        if (this.startedAt === null || !this.running) return;
-        const at = nextAutoStopAt(this.deps.settings().autoStop, this.startedAt, this.now());
+        const previous = this.autoStop.at;
+        const at = this.startedAt !== null && this.running ? nextAutoStopAt(this.deps.settings().autoStop, this.startedAt, this.now()) : null;
+        this.autoStop.set(at);
         if (at === null) {
-            if (previous !== null) this.deps.logger.info("감시 자동 중지를 껐습니다.");
-            return;
+            if (previous !== null && this.running) this.deps.logger.info("감시 자동 중지를 껐습니다.");
+        } else if (announce || at !== previous) {
+            this.deps.logger.info(`${clockText(at, this.now())}에 감시를 자동으로 멈춥니다.`);
         }
-        this.armAutoStop(at);
-        if (announce || at !== previous) this.deps.logger.info(`${clockText(at, this.now())}에 감시를 자동으로 멈춥니다.`);
-    }
-
-    /**
-     * 컴퓨터가 잠들었다 깨거나 시계가 바뀌어도 늦지 않게, 길게 한 번 기다리지 않고 최대 1분마다 시각을 다시 확인합니다.
-     */
-    private armAutoStop(at: number): void {
-        const wait = Math.min(Math.max(at - this.now(), 0), AUTO_STOP_CHECK_MS);
-        const timer = setTimeout(() => {
-            if (this.autoStop?.timer !== timer) return;
-            if (this.now() < at) {
-                this.armAutoStop(at);
-                return;
-            }
-            this.autoStop = null;
-            void this.stopAutomatically();
-        }, wait);
-        this.autoStop = {at, timer};
-    }
-
-    private clearAutoStop(): void {
-        if (this.autoStop) clearTimeout(this.autoStop.timer);
-        this.autoStop = null;
     }
 
     private async stopAutomatically(): Promise<void> {
@@ -304,7 +289,7 @@ export class Engine {
         }
         this.scheduled.clear();
         this.startedAt = null;
-        this.clearAutoStop();
+        this.autoStop.clear();
         if (wasRunning) this.deps.logger.info("감시를 멈췄습니다.");
     }
 
@@ -328,11 +313,16 @@ export class Engine {
     }
 
     /** 글을 읽을 클라이언트입니다. 로그인이 풀렸을 때 어느 계정인지 알 수 있게 마지막으로 쓴 것을 기억합니다. */
-    private reader(gallery: GalleryConfig): DCInside {
+    /** 그 갤러리의 대기 계정으로 읽기 요청을 보냅니다. 실패하면 어느 클라이언트의 요청이었는지 기억해 둡니다. */
+    private async read<T>(gallery: GalleryConfig, request: (client: DCInside) => Promise<T>): Promise<T> {
         const client = this.deps.reader(gallery);
         if (!client) throw new NotLoggedInError();
-        this.lastReader = client;
-        return client;
+        try {
+            return await request(client);
+        } catch (error) {
+            if (typeof error === "object" && error !== null) this.failedReaders.set(error, client);
+            throw error;
+        }
     }
 
     private schedule(configId: string, runId: number, delayMs: number): void {
@@ -358,28 +348,61 @@ export class Engine {
             this.deps.onStateChanged?.();
             return;
         }
+        let delayMs: number | null = null;
         try {
             if (await this.deps.accounts.maintain(this.deps.settings().accounts)) this.deps.onStateChanged?.();
             // 로그인된 계정이 없으면 디시에 요청하지 않습니다. 로그인이 풀린 채 요청을 쌓지 않기 위해서입니다.
             if (!this.deps.reader(gallery)) {
-                // 앱을 켠 직후처럼 대기 계정이 아직 로그인하는 중이면 알리지 않고 다음 확인을 기다립니다.
-                if (!gallery.accountIds.some((id) => this.deps.accounts.status?.(id)?.state === "logging_in")) await this.warnNotLoggedIn(gallery);
+                // 앱을 켠 직후처럼 대기 계정이 아직 로그인하는 중이거나, 잠자기에서 깨어난 직후처럼 일시적인 오류로 자동 재로그인을
+                // 기다리는 중이면(10분까지) 알리지 않고 다음 확인을 기다립니다. 그보다 오래 실패하면 감시가 멈춰 있다고 알립니다.
+                if (!gallery.accountIds.some((id) => this.recoveringLogin(id))) await this.warnNotLoggedIn(gallery);
             // 무료 등급 하루 LLM 요청 수를 다 썼으면 판단할 수 없으므로 디시에도 요청하지 않고 초기화될 때까지 쉽니다.
-            } else if (!this.usage.canUse(this.dailyLimit())) {
+            // 다시 확인할 때 그동안 쌓인 옛 글을 판단하지 않도록 기준 글을 새로 잡습니다.
+            } else if (!this.llm.canUseToday()) {
+                this.lastSeen.delete(this.seenKey(gallery));
                 await this.warnDailyLimit();
+            // LLM 서비스의 한도(하루 한도, 결제 한도)를 다 써서 쉬는 중이어도 같습니다.
+            } else if (this.llm.paused) {
+                this.lastSeen.delete(this.seenKey(gallery));
             // app_id 발급이 거절된 뒤에는 잠시 목록 확인을 쉽니다. 다시 시도해 봐야 거절만 늘어납니다.
             } else if (this.deps.appId.canTry()) {
                 this.notLoggedInWarned.delete(gallery.id);
                 this.dailyLimitWarned = false;
                 await this.checkGallery(gallery, runId);
+                this.listFailures.delete(configId);
+                this.appIdPauseLogged = false;
+            } else if (!this.appIdPauseLogged) {
+                // 다른 계정의 요청이 app_id 거절을 받아 함께 쉬는 중입니다. 감시가 멈춘 것처럼 보이지 않게 한 번 남깁니다.
+                this.appIdPauseLogged = true;
+                this.deps.logger.warn("디시 앱 인증(app_id) 거절로 잠시 목록 확인을 쉽니다.", {galleryId: gallery.galleryId});
             }
         } catch (error) {
             this.deps.logger.error(`목록 확인 실패: ${errorMessage(error)}`, {galleryId: gallery.galleryId});
-            await this.recoverReader(error, gallery);
+            if (isLoginExpired(error) || isAppIdFailure(error) || error instanceof NotLoggedInError) {
+                await this.recoverReader(error, gallery);
+            } else {
+                delayMs = await this.backOff(configId, gallery);
+            }
         } finally {
             // 설정이 바뀌었을 수 있으니 다음 간격은 최신 설정에서 읽습니다.
-            if (runId === this.runId) this.schedule(configId, runId, (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
+            if (runId === this.runId) this.schedule(configId, runId, delayMs ?? (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
         }
+    }
+
+    /**
+     * 차단 페이지나 서버 오류처럼 다시 해 봐도 같을 수 있는 실패가 이어지면, 다음 확인을 감시 간격의 2배, 4배…(최대 30분)로 늦춥니다.
+     * 차단된 상태에서 요청을 계속 쌓지 않기 위해서입니다. 여러 번 이어지면 한 번 알립니다.
+     */
+    private async backOff(configId: string, gallery: GalleryConfig): Promise<number> {
+        const failures = (this.listFailures.get(configId) ?? 0) + 1;
+        this.listFailures.set(configId, failures);
+        const intervalMs = (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000;
+        const delayMs = Math.min(intervalMs * 2 ** failures, Math.max(intervalMs, FAILURE_BACKOFF_MAX_MS));
+        this.deps.logger.warn(`목록 확인이 ${failures}번 연달아 실패해 ${Math.round(delayMs / 1000)}초 뒤 다시 확인합니다.`, {galleryId: gallery.galleryId});
+        if (failures === FAILURE_ALERT_AFTER) {
+            await this.alert("디시 목록 확인이 계속 실패합니다", `${gallery.galleryId} 갤러리 목록 확인이 ${failures}번 연달아 실패했습니다. 디시 접속이 막혔을 수 있습니다. 감시 간격을 늘려 다시 시도합니다.`);
+        }
+        return delayMs;
     }
 
     private seenKey(gallery: GalleryConfig): string {
@@ -401,7 +424,7 @@ export class Engine {
         let reachedLastSeen = false;
 
         for (let page = 1; page <= MAX_PAGES_PER_TICK; page++) {
-            const response = await this.reader(gallery).articles.list({gallery: gallery.galleryId, page});
+            const response = await this.read(gallery, (client) => client.articles.list({gallery: gallery.galleryId, page}));
             this.deps.appId.succeed();
             const items = (response.gall_list ?? []).filter((item: PostItem) => typeof item.no === "number" && !item.fixtop);
             for (const item of items) collected.set(item.no!, {no: item.no!, title: item.subject ?? "", ...(item.date_time ? {dateTime: item.date_time} : {})});
@@ -422,7 +445,12 @@ export class Engine {
             this.deps.onStateChanged?.();
         };
         if (lastSeen === undefined) {
-            const newest = Math.max(0, ...collected.keys());
+            // 목록이 비어 오면 기준 글을 잡지 않고 다음 확인 때 다시 잡습니다. #0을 기준으로 잡으면 다음 확인에서 옛 글 전부를 새 글로 보게 됩니다.
+            if (collected.size === 0) {
+                logger.warn("목록이 비어 있어 기준 글을 잡지 못했습니다. 다음 확인 때 다시 잡습니다.", {galleryId: gallery.galleryId});
+                return;
+            }
+            const newest = Math.max(...collected.keys());
             this.lastSeen.set(key, newest);
             logger.info(`감시 시작. 기준 글 #${newest} 이후의 새 글만 확인합니다.`, {galleryId: gallery.galleryId});
             report(0, 0);
@@ -432,7 +460,7 @@ export class Engine {
         const epoch = this.epoch;
         let judged = 0;
         try {
-            const found = await this.collect(gallery, posts, runId, epoch);
+            const found = await this.collect(gallery, posts, runId);
             // 확인하는 사이 감시가 다시 시작됐으면 이 결과는 버립니다. 다음 확인에서 다시 봅니다.
             if (!found || runId !== this.runId) return;
             if (found.last !== null) this.lastSeen.set(key, found.last);
@@ -449,7 +477,7 @@ export class Engine {
      * 본문은 키워드에 걸린 글은 늘 읽고, 나머지는 최근 글부터 본문 요청 상한까지 읽습니다(본문 확인을 끄면 키워드에 걸린 글만).
      * 본문을 읽지 않은 글은 제목만 보냅니다. `last`는 끝까지 본 마지막 글 번호입니다.
      */
-    private async collect(gallery: GalleryConfig, posts: NewPost[], runId: number, epoch: number) {
+    private async collect(gallery: GalleryConfig, posts: NewPost[], runId: number) {
         const {ledger, logger} = this.deps;
         const fresh = posts.filter((post) => !ledger.has(gallery.galleryId, post.no) && !this.excludedBy(gallery, post.title));
         const keyword = new Set(gallery.keywords.length === 0 ? [] : fresh.filter((post) => matchesKeywords(post.title, gallery.keywords)).map((post) => post.no));
@@ -463,9 +491,10 @@ export class Engine {
         }
 
         const result = {candidates: [] as Candidate[], last: null as number | null};
+        const failures = {reads: 0};
         for (const post of posts) {
             if (runId !== this.runId) return null;
-            const outcome = await this.inspect(gallery, post, keyword.has(post.no), read.has(post.no), epoch);
+            const outcome = await this.inspect(gallery, post, keyword.has(post.no), read.has(post.no), failures);
             if (outcome === "retry") break;
             if (outcome !== "done") result.candidates.push(outcome);
             result.last = post.no;
@@ -477,7 +506,7 @@ export class Engine {
      * 글 하나를 LLM에 보낼 수 있게 준비합니다. `read`이면 본문을 읽고, 아니면 제목만 씁니다.
      * 넘길 글이면 "done", 지금은 읽을 수 없어 다음에 다시 봐야 하면 "retry"입니다.
      */
-    private async inspect(gallery: GalleryConfig, post: NewPost, titleKeyword: boolean, read: boolean, epoch: number): Promise<"done" | "retry" | Candidate> {
+    private async inspect(gallery: GalleryConfig, post: NewPost, titleKeyword: boolean, read: boolean, failures: {reads: number}): Promise<"done" | "retry" | Candidate> {
         const {ledger, logger} = this.deps;
         if (ledger.has(gallery.galleryId, post.no)) return "done";
         const context = {galleryId: gallery.galleryId, postNo: post.no};
@@ -487,7 +516,8 @@ export class Engine {
             return "done";
         }
         const detectedAt = Date.now();
-        const titleOnly: Candidate = {post, title: post.title, body: "", bodyRead: false, keyword: titleKeyword, detectedAt, postedAt: estimatePostedAt([post.dateTime], detectedAt)};
+        const listed = postedAtRange([post.dateTime], detectedAt);
+        const titleOnly: Candidate = {post, title: post.title, body: "", bodyRead: false, keyword: titleKeyword, detectedAt, postedAt: listed.latest, postedSlackMs: listed.latest - listed.earliest};
         if (!read) return titleOnly;
         if (!this.deps.appId.canTry()) return "retry";
 
@@ -496,7 +526,7 @@ export class Engine {
         let body: string;
         let dateTime: string | undefined;
         try {
-            const article = await this.reader(gallery).articles.read(gallery.galleryId, post.no);
+            const article = await this.read(gallery, (client) => client.articles.read(gallery.galleryId, post.no));
             title = article.view_info?.subject ?? post.title;
             dateTime = article.view_info?.date_time;
             body = htmlToText(article.view_main?.memo ?? "");
@@ -510,7 +540,12 @@ export class Engine {
                 await this.recoverReader(error, gallery);
                 return "retry";
             }
-            // 그 밖의 이유로 본문을 못 읽었으면 제목만 판단합니다(본문을 못 본 글은 자동으로 줄 서지 않습니다).
+            // 차단이나 서버 오류처럼 계속 실패할 수 있는 오류가 이번 확인에서 이어지면, 요청을 쌓지 않도록 남은 글은 다음 확인 때 다시 읽습니다.
+            if (++failures.reads >= READ_FAILURES_PER_TICK) {
+                logger.warn(`본문 읽기가 연달아 실패해 이 글부터는 다음 확인 때 다시 읽습니다: ${errorMessage(error)}`, context);
+                return "retry";
+            }
+            // 이 글만의 문제(성인 인증 글 등)일 수 있으니 제목만 판단하고 넘어갑니다(본문을 못 본 글은 자동으로 줄 서지 않습니다).
             logger.warn(`본문을 읽지 못해 제목만 판단합니다: ${errorMessage(error)}`, context);
             return titleOnly;
         }
@@ -521,17 +556,25 @@ export class Engine {
             return "done";
         }
         const keyword = titleKeyword || (gallery.keywords.length > 0 && findKeyword(body, gallery.keywords) !== null);
-        return {post, title, body, bodyRead: true, keyword, detectedAt, postedAt: estimatePostedAt([dateTime, post.dateTime], detectedAt), ...(dateTime ? {dateTime} : {})};
+        const posted = postedAtRange([dateTime, post.dateTime], detectedAt);
+        return {post, title, body, bodyRead: true, keyword, detectedAt, postedAt: posted.latest, postedSlackMs: posted.latest - posted.earliest, ...(dateTime ? {dateTime} : {})};
     }
 
     /** 무료 등급 하루 LLM 요청 수를 다 써서 감시를 쉰다고 한 번만 알립니다. */
     private async warnDailyLimit(): Promise<void> {
         if (this.dailyLimitWarned) return;
         this.dailyLimitWarned = true;
-        const reset = new Date(this.usage.resetAt).toLocaleTimeString("ko-KR", {hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Seoul"});
+        const reset = new Date(this.llm.usage.resetAt).toLocaleTimeString("ko-KR", {hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Seoul"});
         const message = `무료 등급 하루 LLM 요청 수(${FREE_DAILY_LLM_REQUESTS}회)를 다 써서 한국 시간 ${reset}까지 감시를 쉽니다. 감시 간격을 늘리면 하루에 더 오래 감시할 수 있고, 유료 요금제를 쓰면 이 제한이 없습니다.`;
         this.deps.logger.warn(message);
         await this.alert("감시 일시 중지: 하루 LLM 요청 수 소진", message);
+    }
+
+    /** 이 계정이 로그인하는 중이거나, 일시적인 오류로 자동 재로그인을 기다린 지 얼마 안 됐는지입니다. */
+    private recoveringLogin(accountId: string): boolean {
+        const status = this.deps.accounts.status?.(accountId);
+        if (status?.state === "logging_in") return true;
+        return status?.state === "error" && status.failingSince !== undefined && this.now() - status.failingSince < LOGIN_RECOVERY_QUIET_MS;
     }
 
     /** 로그인된 계정이 없어 감시를 쉰다고 한 번만 알립니다. */
@@ -567,7 +610,7 @@ export class Engine {
         };
         let provider: LlmProvider;
         try {
-            provider = this.llm();
+            provider = this.llm.provider();
         } catch (error) {
             logger.warn(`새 글 ${candidates.length}개를 판단하지 못했습니다: ${errorMessage(error)}`, context);
             return failAll(candidates, errorMessage(error));
@@ -575,14 +618,14 @@ export class Engine {
         let giveaways = 0;
         for (let start = 0; start < candidates.length; start += MAX_BATCH_POSTS) {
             const group = candidates.slice(start, start + MAX_BATCH_POSTS);
-            if (!this.usage.canUse(this.dailyLimit())) {
+            if (!this.llm.canUseToday()) {
                 logger.warn(`무료 등급 하루 LLM 요청 수를 다 써서 새 글 ${candidates.length - start}개는 판단하지 못했습니다.`, context);
                 return;
             }
             const startedAt = Date.now();
             let decisions: (Decision | null)[];
             try {
-                await this.request(gallery);
+                await this.llm.request(gallery.galleryId);
                 const posts = group.map(({post, title, body, postedAt}) => ({no: post.no, title, body, postedAt}));
                 decisions = group.length === 1 ? [await provider.decide(posts[0]!)] : await provider.decideMany(posts);
             } catch (error) {
@@ -624,11 +667,11 @@ export class Engine {
      * 기다리지 않고(선착순을 놓치지 않게) 자동으로 서지 않고 알립니다.
      */
     private async confirm(gallery: GalleryConfig, provider: LlmProvider, candidate: Candidate): Promise<Plan> {
-        if (this.limiter.available() === 0 || !this.usage.canUse(this.dailyLimit())) {
+        if (!this.llm.hasSlotNow() || !this.llm.canUseToday()) {
             return {kind: "notify", reason: "여러 글을 묶어 판단한 결과라 따로 확인해야 하는데 남은 LLM 요청이 없어 직접 확인이 필요함"};
         }
         try {
-            await this.request(gallery);
+            await this.llm.request(gallery.galleryId);
             const decision = await provider.decide({no: candidate.post.no, title: candidate.title, body: candidate.body, postedAt: candidate.postedAt});
             this.recordJudgment(gallery, "confirm", [candidate], [decision]);
             this.deps.logger.info(`2차 확인: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`,
@@ -662,35 +705,18 @@ export class Engine {
         });
     }
 
-    /** 무료 등급이면 하루 LLM 요청 수 한도, 유료 요금제면 0(제한 없음)입니다. */
-    private dailyLimit(): number {
-        return this.deps.settings().llm.paidPlan ? 0 : FREE_DAILY_LLM_REQUESTS;
-    }
-
     /** 오늘 쓴 LLM 요청 수와 한도입니다. 화면에 보여줍니다. */
     llmUsage(): {count: number; limit: number; resetAt: number} {
-        return {count: this.usage.count, limit: this.dailyLimit(), resetAt: this.usage.resetAt};
+        return this.llm.view();
     }
 
-    /** LLM 요청 하나를 보낼 자리를 받고 오늘 쓴 요청 수에 셉니다. */
-    private async request(gallery?: GalleryConfig): Promise<void> {
-        await this.slot(gallery);
-        this.usage.add();
-    }
-
-    /** 분당 요청 한도 안에서 LLM 요청 자리를 하나 받습니다. 한도에 닿았으면 로그를 남기고 기다립니다. */
-    private async slot(gallery?: GalleryConfig): Promise<void> {
-        if (this.limiter.available() === 0) {
-            const limit = effectiveRpm(this.deps.settings().llm);
-            this.deps.logger.info(`LLM 분당 요청 한도(${limit}회)에 닿아 잠시 기다립니다.`, gallery ? {galleryId: gallery.galleryId} : undefined);
+    private planFor(gallery: GalleryConfig, decision: Decision, candidate: {title: string; body: string; bodyRead?: boolean; detectedAt: number; postedAt?: number; postedSlackMs?: number}): Plan {
+        if (decision.is_giveaway && candidate.postedAt !== undefined && candidate.detectedAt - candidate.postedAt > STALE_POST_MS) {
+            return {kind: "skip", reason: `올라온 지 ${Math.round((candidate.detectedAt - candidate.postedAt) / 60000)}분 지난 글이라 자동으로 줄 서지 않음`};
         }
-        await this.limiter.acquire();
-    }
-
-    private planFor(gallery: GalleryConfig, decision: Decision, candidate: {title: string; body: string; bodyRead?: boolean; detectedAt: number}): Plan {
         const settings = this.deps.settings();
         const accounts = this.deps.accounts.candidates(settings.accounts, gallery.accountIds);
-        const plan = makePlan(decision, gallery, accounts, candidate.detectedAt, `${candidate.title}\n${candidate.body}`);
+        const plan = makePlan(decision, gallery, accounts, candidate.detectedAt, `${candidate.title}\n${candidate.body}`, candidate.postedSlackMs ?? 0);
         // 본문을 읽지 않은 글은 본문에 봇 색출 문구나 다른 조건이 있어도 알 수 없으므로, 자동으로 서지 않고 알립니다.
         if (plan.kind === "comment" && candidate.bodyRead === false) {
             return {kind: "notify", reason: "본문 요청 상한을 넘어 본문을 확인하지 못했습니다. 글을 직접 확인하세요."};
@@ -705,11 +731,16 @@ export class Engine {
     private async recoverReader(error: unknown, gallery: GalleryConfig): Promise<void> {
         // 읽던 계정의 로그인이 풀렸으면(비밀번호 변경 등) 그 계정을 내려놓아, 확인할 때마다 로그인을 다시 시도하지 않게 합니다.
         if (isLoginExpired(error)) {
-            const outcome = this.lastReader ? await this.deps.onReaderLoginExpired(this.lastReader, errorMessage(error)) : "none";
+            const client = typeof error === "object" && error !== null ? this.failedReaders.get(error) : undefined;
+            const outcome = client ? await this.deps.onReaderLoginExpired(client, errorMessage(error)) : "none";
             this.deps.onStateChanged?.();
             if (outcome === "recovered") {
-                this.deps.logger.info("글을 읽던 계정의 로그인이 풀려 저장된 OTP 토큰으로 다시 로그인했습니다.");
+                this.deps.logger.info("글을 읽던 계정의 로그인이 풀려 다시 로그인했습니다.");
+            } else if (outcome === "retrying") {
+                this.deps.logger.warn(`글을 읽던 계정의 로그인이 풀렸는데 지금은 다시 로그인하지 못해(네트워크 등) 잠시 뒤 자동으로 다시 시도합니다: ${errorMessage(error)}`);
             } else if (outcome === "expired") {
+                // 바로 아래 알림으로 알렸으니, 대기 계정이 더 없어 쉬게 되어도 "로그인 필요"를 또 보내지 않습니다.
+                this.notLoggedInWarned.add(gallery.id);
                 this.deps.logger.warn(`글을 읽던 계정의 로그인이 풀려 다음 계정으로 읽습니다: ${errorMessage(error)}`);
                 await this.alert("디시 로그인이 풀렸습니다", "글을 읽던 계정의 로그인이 풀렸습니다. 계정 탭에서 다시 로그인하세요.");
             }
@@ -717,9 +748,8 @@ export class Engine {
         }
         if (!isAppIdFailure(error)) return;
         const outdated = isOutdatedAppError(error);
-        const pauseMs = outdated ? OUTDATED_PAUSE_MS : this.deps.appId.pauseMs;
-        const minutes = Math.round(pauseMs / 60000);
-        const needsFreshDevice = this.deps.appId.fail(pauseMs);
+        const needsFreshDevice = this.deps.appId.fail(outdated ? OUTDATED_PAUSE_MS : undefined);
+        const minutes = Math.round(this.deps.appId.lastPauseMs / 60000);
         // 앱 버전이 낮아 거절된 것이면 기기 정보를 새로 받아도 풀리지 않습니다. 쉬면서 한 번만 알립니다.
         if (outdated) {
             this.deps.logger.error(`${OUTDATED_APP_MESSAGE} ${minutes}분 뒤 다시 확인합니다.`);
@@ -744,17 +774,18 @@ export class Engine {
 
     /** 여러 글을 감시할 때와 같은 방식(글이 하나면 하나만 판단)으로 LLM 요청 한 번에 판단합니다. 응답에 빠진 글은 null입니다. */
     async decideBatch(posts: PostInput[]): Promise<(Decision | null)[]> {
-        const provider = this.llm();
-        await this.request();
+        const provider = this.llm.provider();
+        await this.llm.request();
         return posts.length === 1 ? [await provider.decide(posts[0]!)] : provider.decideMany(posts);
     }
 
     /** 글 내용을 LLM으로 판단하고 행동 계획을 세웁니다. LLM 호출이 실패하면 알림 계획을 돌려줍니다. */
     async analyze(gallery: GalleryConfig, title: string, body: string, detectedAt: number): Promise<Analysis> {
         try {
-            const provider = this.llm();
-            await this.request(gallery);
-            const decision = await provider.decide({title, body});
+            const provider = this.llm.provider();
+            await this.llm.request(gallery.galleryId);
+            // 실제 감시처럼 글을 올린 시각을 함께 보냅니다. 방금 올라온 글로 보고 감지한 시각을 씁니다.
+            const decision = await provider.decide({title, body, postedAt: detectedAt});
             return {decision, plan: this.planFor(gallery, decision, {title, body, detectedAt})};
         } catch (error) {
             return {decision: null, plan: {kind: "notify", reason: `글 분석 실패: ${errorMessage(error)}`}};
@@ -799,51 +830,6 @@ export class Engine {
                 this.scheduled.set(timer, {gallery, post, test: !live});
             }
         }
-    }
-
-    /** 지금 설정의 LLM 클라이언트입니다. API 키가 없으면 오류를 던집니다. */
-    /**
-     * 지금 설정의 LLM 클라이언트입니다. API 키가 없거나, 요청 한도를 다 써서 쉬는 중이면 오류를 던집니다.
-     * 한도를 다 썼다는 오류가 오면 초기화될 때까지 LLM 요청을 멈추고 한 번만 알립니다.
-     */
-    private llm(): LlmProvider {
-        if (this.llmPause && Date.now() < this.llmPause.until) throw new LlmQuotaExhaustedError(this.llmPause.message, this.llmPause.until);
-        const {llm} = this.deps.settings();
-        const apiKey = this.deps.secrets.get(`llm:${llm.provider}`);
-        if (!apiKey) throw new Error(`${PROVIDER_LABELS[llm.provider]} API 키가 설정되지 않았습니다.`);
-        const model = llm.models[llm.provider];
-        const key = `${llm.provider}\n${model}\n${apiKey}`;
-        if (this.provider?.key !== key) {
-            // 서비스나 키를 바꿨으면 이전 키의 한도와는 상관없으므로 쉬던 것을 풉니다.
-            this.llmPause = null;
-            this.provider = {key, instance: this.watchQuota(createProvider(llm.provider, apiKey, model))};
-        }
-        return this.provider.instance;
-    }
-
-    /** LLM 호출에서 한도 소진 오류가 나오면 쉬기 시작하도록 감쌉니다. */
-    private watchQuota(provider: LlmProvider): LlmProvider {
-        const guard = async <T>(call: () => Promise<T>): Promise<T> => {
-            try {
-                return await call();
-            } catch (error) {
-                if (error instanceof LlmQuotaExhaustedError) await this.pauseLlm(error);
-                throw error;
-            }
-        };
-        return {
-            decide: (post) => guard(() => provider.decide(post)),
-            decideMany: (posts) => guard(() => provider.decideMany(posts))
-        };
-    }
-
-    private async pauseLlm(error: LlmQuotaExhaustedError): Promise<void> {
-        const alreadyPaused = this.llmPause !== null && Date.now() < this.llmPause.until;
-        this.llmPause = {until: error.until, message: error.message};
-        if (alreadyPaused) return;
-        const message = `${error.message} 그때까지 LLM 판단을 멈춥니다. 그동안 키워드에 걸린 글은 판단 없이 알림으로 보내고, 키워드 없는 글 골라내기는 건너뜁니다.`;
-        this.deps.logger.warn(message);
-        await this.alert("LLM 요청 한도 소진", message);
     }
 
     /**

@@ -96,10 +96,15 @@ export function describeLlmError(provider: string, error: unknown): string {
     return `${provider} ${STATUS_MESSAGES[status] ?? "오류"} (${status}): ${detail}`;
 }
 
-/** Gemini 오류가 다시 시도할 만하면 기다릴 시간을 돌려줍니다. 429는 응답의 "Please retry in 6.8s"를, 503(일시적 과부하)은 2초를 씁니다. */
+/**
+ * Gemini 오류가 다시 시도할 만하면 기다릴 시간을 돌려줍니다. 429는 응답의 "Please retry in 6.8s"를 쓰고,
+ * 서버 쪽 일시적 오류(500, 502, 503 과부하, 504 처리 시간 초과)와 응답 시간 초과는 2초 뒤 한 번 더 보냅니다.
+ * 판단에 실패한 글은 키워드가 있어야만 알림으로 넘어가므로, 그사이 올라온 나눔을 놓치지 않기 위해서입니다.
+ */
 function retryDelayMs(error: unknown): number | null {
     const status = (error as {status?: unknown} | null)?.status;
-    if (status === 503) return 2000;
+    if (status === 500 || status === 502 || status === 503 || status === 504) return 2000;
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return 2000;
     if (status !== 429 || !(error instanceof Error)) return null;
     const match = /retry in ([\d.]+)s/i.exec(error.message);
     return match ? Math.ceil(Number(match[1]) * 1000) : null;

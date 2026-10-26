@@ -4,7 +4,7 @@ import {providerFrom} from "../src/main/llm/providers";
 
 const base = {
     is_giveaway: true, is_food: true, line_method: "text", line_text: null, dccon_keyword: null,
-    member_requirement: "any", starts_at: null, ends_at: null, needs_extra_action: false
+    member_requirement: "any", starts_at: null, ends_at: null, text_only: false, needs_extra_action: false
 };
 
 describe("묶음 판단", () => {

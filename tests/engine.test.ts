@@ -3,11 +3,13 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, describe, expect, it, vi} from "vitest";
 import {defaultSettings, newGallery, nextAutoStopAt, normalizeSettings} from "@shared/settings";
+import {formatKst} from "../src/main/pipeline/post-time";
 import type {GalleryConfig, HistoryEntry, Settings} from "@shared/types";
 import {AuthExpiredError, CaptchaRequiredError} from "@green-1052/dcinside.js";
 import {CommentNotPostedError} from "../src/main/dc/accounts";
 import {LlmQuotaExhaustedError} from "../src/main/llm/providers";
 import {LlmUsage} from "../src/main/llm/usage";
+import type {LlmGate} from "../src/main/llm/gate";
 import {AppIdBackoff} from "../src/main/dc/app-id-backoff";
 import {Engine, type EngineDeps} from "../src/main/pipeline/engine";
 import {Logger} from "../src/main/logger";
@@ -190,20 +192,27 @@ describe("Engine dcinside.js 2.0.2 오류 대응", () => {
                     return outcome;
                 }
             });
-            await (env.engine as unknown as {tick(configId: string, runId: number): Promise<void>}).tick(gallery.id, 0);
+            const tick = (env.engine as unknown as {tick(configId: string, runId: number): Promise<void>}).tick.bind(env.engine);
+            await tick(gallery.id, 0);
+            // 그 계정을 내려놓아 이제 로그인된 대기 계정이 없는 상황입니다.
+            Object.assign(deps, {reader: () => null});
+            await tick(gallery.id, 0);
             env.engine.stop();
             return {calls, logger: env.logger};
         };
         const expired = await run("expired");
         expect(expired.calls).toEqual([client]);
+        // "로그인이 풀렸습니다"를 알렸으니 "로그인 필요"는 또 알리지 않습니다.
+        expect(logged(expired.logger, "로그인된 계정이 없어 디시에 요청하지 않고")).toBe(false);
         expect(logged(expired.logger, "다음 계정으로 읽습니다")).toBe(true);
         // 웹훅이 없어 알림 대신 남는 경고로 알림 시도를 확인합니다.
         expect(logged(expired.logger, "Discord 웹훅이 설정되지 않아")).toBe(true);
 
+        // 내려놓을 계정이 없으면 "로그인이 풀렸습니다"를 알리지 않습니다(로그인된 계정이 없다는 안내는 따로 나갑니다).
         const anonymous = await run("none");
-        expect(logged(anonymous.logger, "Discord 웹훅이 설정되지 않아")).toBe(false);
+        expect(logged(anonymous.logger, "다음 계정으로 읽습니다")).toBe(false);
         const recovered = await run("recovered");
-        expect(logged(recovered.logger, "OTP 토큰으로 다시 로그인")).toBe(true);
+        expect(logged(recovered.logger, "로그인이 풀려 다시 로그인했습니다")).toBe(true);
     });
 });
 
@@ -245,25 +254,23 @@ describe("Engine 로그인 필수", () => {
 describe("Engine LLM 한도 소진", () => {
     it("한도를 다 썼다는 오류가 오면 초기화될 때까지 LLM에 묻지 않고, 한 번만 알린다", async () => {
         const env = setup();
-        const engine = env.engine as unknown as {llm: () => unknown; provider: unknown; deps: EngineDeps};
+        const engine = env.engine as unknown as {llm: LlmGate; deps: EngineDeps};
         let calls = 0;
         const quota = new LlmQuotaExhaustedError("Gemini 요청 한도를 다 썼습니다.", Date.now() + 60_000);
-        // 실제 llm()이 감싸는 경로를 타도록, 만든 클라이언트 자리에 가짜를 넣습니다.
+        // 실제 LLM 창구가 클라이언트를 감싸는 경로를 타도록, 만들어지는 클라이언트만 가짜로 바꿉니다.
         Object.assign(engine.deps, {secrets: {get: () => "key"}});
-        const realLlm = (engine.llm as () => unknown).bind(env.engine);
-        realLlm();
-        const wrap = (env.engine as unknown as {watchQuota(provider: unknown): unknown}).watchQuota.bind(env.engine);
-        (engine.provider as {instance: unknown}).instance = wrap({
+        engine.llm.create = () => ({
             decide: async () => {
                 calls++;
                 throw quota;
-            }
+            },
+            decideMany: async () => []
         });
         const analyze = () => env.engine.analyze(gallery, "나눔", "", Date.now());
         expect((await analyze()).plan).toMatchObject({kind: "notify", reason: expect.stringContaining("한도를 다 썼습니다")});
         expect((await analyze()).plan).toMatchObject({kind: "notify"});
         expect(calls).toBe(1);
-        expect(env.logger.recent().filter((entry) => entry.message.includes("LLM 판단을 멈춥니다"))).toHaveLength(1);
+        expect(env.logger.recent().filter((entry) => entry.message.includes("LLM 판단과 디시 목록 확인을 멈춥니다"))).toHaveLength(1);
     });
 });
 
@@ -292,7 +299,7 @@ describe("Engine 성공 알림", () => {
 
 const GIVEAWAY = {
     is_giveaway: true, is_food: true, line_method: "text" as const, line_text: null, dccon_keyword: null,
-    member_requirement: "any" as const, starts_at: null, ends_at: null, needs_extra_action: false, reason: "나눔"
+    member_requirement: "any" as const, starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, reason: "나눔"
 };
 const NOT_GIVEAWAY = {...GIVEAWAY, is_giveaway: false, reason: "잡담"};
 
@@ -311,16 +318,19 @@ interface GalleryOptions {
 }
 
 /** 목록, 본문, LLM을 가짜로 바꾼 감시를 돌립니다. 첫 확인으로 기준점을 잡은 뒤 `articles`의 글이 새로 올라온 것으로 봅니다. */
-function withGallery(articles: Record<number, {title: string; body: string}>, options: GalleryOptions = {}) {
+/** body가 READ_ERROR인 글은 본문을 읽을 때 서버 오류가 납니다. date는 글 읽기에 나오는 작성 시각입니다. */
+const READ_ERROR = "!오류";
+
+function withGallery(articles: Record<number, {title: string; body: string; date?: string}>, options: GalleryOptions = {}) {
     const reads: number[] = [];
     /** LLM 요청입니다. 묶음은 ["묶음", 제목...], 글 하나는 ["단독", 제목]입니다. */
     const calls: string[][] = [];
     const env = setup();
     if (options.paidRpm !== undefined) env.update({llm: {...defaultSettings().llm, paidPlan: true, requestsPerMinute: options.paidRpm}});
     let listed: number[] = [];
-    const engine = env.engine as unknown as {deps: EngineDeps; readGapMs: number; usage: LlmUsage; llm: () => unknown; idle(): Promise<void>; checkGallery(gallery: GalleryConfig, runId: number): Promise<void>};
+    const engine = env.engine as unknown as {deps: EngineDeps; readGapMs: number; llm: LlmGate; idle(): Promise<void>; checkGallery(gallery: GalleryConfig, runId: number): Promise<void>};
     engine.readGapMs = 0;
-    if (options.usage) engine.usage = options.usage;
+    if (options.usage) engine.llm.usage = options.usage;
     const giveaway = options.giveaway ?? ((post) => `${post.title}${post.body}`.includes("나눔"));
     const confirm = options.confirm ?? giveaway;
     Object.assign(engine.deps, {
@@ -329,13 +339,14 @@ function withGallery(articles: Record<number, {title: string; body: string}>, op
                 list: async () => ({gall_list: listed.map((no) => ({no, subject: articles[no]?.title ?? "기존 글"})).reverse()}),
                 read: async (_gallery: string, no: number) => {
                     reads.push(no);
-                    return {view_info: {subject: articles[no]!.title}, view_main: {memo: articles[no]!.body}};
+                    if (articles[no]!.body === READ_ERROR) throw new Error("HTTP 500");
+                    return {view_info: {subject: articles[no]!.title, date_time: articles[no]!.date}, view_main: {memo: articles[no]!.body}};
                 }
             }
         })
     });
     if (options.loggedIn) Object.assign(engine.deps.accounts, {candidates: () => [{id: "a", memberType: "gonick", dccons: []}]});
-    engine.llm = () => ({
+    engine.llm.provider = () => ({
         decide: async (post: {title: string; body: string}) => {
             calls.push(["단독", post.title]);
             return confirm(post) ? GIVEAWAY : NOT_GIVEAWAY;
@@ -480,7 +491,7 @@ describe("Engine 무료 등급 하루 LLM 요청 수", () => {
         const {engine, logger} = setup();
         let listCalls = 0;
         Object.assign((engine as unknown as {deps: EngineDeps}).deps, {reader: () => ({articles: {list: async () => (listCalls++, {gall_list: []})}})});
-        (engine as unknown as {usage: LlmUsage}).usage = exhausted();
+        (engine as unknown as {llm: LlmGate}).llm.usage = exhausted();
         const tick = (engine as unknown as {tick(configId: string, runId: number): Promise<void>}).tick.bind(engine);
         await tick(gallery.id, 0);
         await tick(gallery.id, 0);
@@ -626,11 +637,121 @@ describe("Engine 감시 자동 중지", () => {
         expect(engine.running).toBe(false);
     });
 
+    it("갤러리를 꺼서 감시가 0개가 됐다가 다시 시작하면 그때부터 센다", async () => {
+        const {engine} = watching({mode: "after", afterMinutes: 60});
+        await vi.advanceTimersByTimeAsync(40 * 60 * 1000);
+        // 자동 중지 전에 감시가 모두 꺼진 상황입니다(stop()을 거치지 않음).
+        (engine as unknown as {haltWatchers(forget: boolean): void}).haltWatchers(false);
+        expect(engine.running).toBe(false);
+        engine.start();
+        // 처음 시작한 22:00이 아니라 다시 시작한 22:40부터 60분입니다.
+        expect(engine.autoStopAt).toBe(new Date(2026, 9, 25, 23, 40).getTime());
+        engine.stop();
+    });
+
     it("직접 멈추면 자동 중지 예약도 없어지고, 멈춰 있을 때 설정을 저장해도 예약하지 않는다", () => {
         const {engine} = watching({mode: "after", afterMinutes: 30});
         engine.stop();
         expect(engine.autoStopAt).toBeNull();
         engine.refreshAutoStop();
         expect(engine.autoStopAt).toBeNull();
+    });
+});
+
+describe("Engine 디시 요청 줄이기", () => {
+    type Internals = {deps: EngineDeps; tick(configId: string, runId: number): Promise<void>; llm: LlmGate; checkGallery(gallery: GalleryConfig, runId: number): Promise<void>};
+
+    it("여러 갤러리를 함께 확인해도 로그인 만료는 실패한 요청을 보낸 계정에 처리한다", async () => {
+        const env = setup();
+        const other: GalleryConfig = {...newGallery("g2"), galleryId: "other", checkedId: "other", accountIds: ["b"]};
+        env.update({galleries: [gallery, other]});
+        const expiring = {articles: {list: () => new Promise((_resolve, reject) => setTimeout(() => reject(new AuthExpiredError("login", "로그인이 필요합니다.", null)), 20))}};
+        const healthy = {articles: {list: async () => ({gall_list: [{no: 5, subject: "글"}]})}};
+        const handled: unknown[] = [];
+        const engine = env.engine as unknown as Internals;
+        Object.assign(engine.deps, {
+            reader: (target: GalleryConfig) => (target.galleryId === "gf2" ? expiring : healthy),
+            onReaderLoginExpired: async (client: unknown) => {
+                handled.push(client);
+                return "expired";
+            }
+        });
+        // gf2의 목록 요청이 응답을 기다리는 사이 다른 갤러리가 목록을 읽습니다.
+        await Promise.all([engine.tick(gallery.id, 0), engine.tick(other.id, 0)]);
+        env.engine.stop();
+        expect(handled).toEqual([expiring]);
+    });
+
+    it("차단·서버 오류로 목록 확인이 이어서 실패하면 다음 확인을 늦추고, 5번째에 한 번 알린다", async () => {
+        const env = setup();
+        let requests = 0;
+        const engine = env.engine as unknown as Internals;
+        Object.assign(engine.deps, {reader: () => ({articles: {list: async () => {
+            requests++;
+            throw new Error("HTTP 403");
+        }}})});
+        for (let i = 0; i < 6; i++) await engine.tick(gallery.id, 0);
+        env.engine.stop();
+        const waits = env.logger.recent().filter((entry) => entry.message.includes("연달아 실패해")).map((entry) => Number(/(\d+)초 뒤/.exec(entry.message)![1]));
+        // 기본 감시 간격 5분의 2배, 4배…, 최대 30분입니다.
+        expect(waits).toEqual([600, 1200, 1800, 1800, 1800, 1800]);
+        expect(requests).toBe(6);
+        expect(env.logger.recent().filter((entry) => entry.message.includes("Discord 웹훅이 설정되지 않아"))).toHaveLength(1);
+    });
+
+    it("한 번 확인할 때 본문 읽기가 두 번 실패하면 남은 글은 다음 확인 때 읽는다", async () => {
+        const {check, reads} = withGallery({2: {title: "치킨 나눔", body: READ_ERROR}, 3: {title: "피자 나눔", body: READ_ERROR}, 4: {title: "버거 나눔", body: "줄"}});
+        const watched = {...gallery, keywords: ["나눔"]};
+        await check(watched, []);
+        await check(watched, [2, 3, 4]);
+        expect(reads).toEqual([2, 3]);
+        // 다음 확인에서는 실패했던 3번부터 다시 읽습니다.
+        await check(watched, [2, 3, 4]);
+        expect(reads).toEqual([2, 3, 3, 4]);
+    });
+
+    it("첫 확인에서 목록이 비어 오면 기준 글을 잡지 않고 다음 확인 때 다시 잡는다", async () => {
+        const env = setup();
+        const engine = env.engine as unknown as Internals;
+        let items: {no: number; subject: string}[] = [];
+        let reads = 0;
+        Object.assign(engine.deps, {reader: () => ({articles: {
+            list: async () => ({gall_list: items}),
+            read: async () => {
+                reads++;
+                return {view_info: {subject: "나눔"}, view_main: {memo: ""}};
+            }
+        }})});
+        await engine.checkGallery({...gallery, keywords: ["나눔"]}, 0);
+        expect(logged(env.logger, "목록이 비어 있어 기준 글을 잡지 못했습니다")).toBe(true);
+        items = [{no: 30, subject: "나눔"}, {no: 29, subject: "나눔"}];
+        await engine.checkGallery({...gallery, keywords: ["나눔"]}, 0);
+        expect(logged(env.logger, "기준 글 #30")).toBe(true);
+        expect(reads).toBe(0);
+    });
+
+    it("LLM 서비스 한도를 다 써서 쉬는 동안에는 디시에도 요청하지 않는다", async () => {
+        const env = setup();
+        const engine = env.engine as unknown as Internals;
+        let requests = 0;
+        Object.assign(engine.deps, {reader: () => ({articles: {list: async () => {
+            requests++;
+            return {gall_list: []};
+        }}})});
+        engine.llm.pause = {until: Date.now() + 60 * 60 * 1000, message: "하루 한도"};
+        await engine.tick(gallery.id, 0);
+        env.engine.stop();
+        expect(requests).toBe(0);
+    });
+});
+
+describe("Engine 오래된 글", () => {
+    it("올라온 지 1시간이 넘은 나눔 글에는 자동으로 줄 서지 않는다", async () => {
+        const old = formatKst(Date.now() - 2 * 60 * 60 * 1000).replace(/-/g, ".").slice(0, 16);
+        const fresh = formatKst(Date.now()).replace(/-/g, ".").slice(0, 16);
+        const {run, written, logger} = withGallery({2: {title: "치킨 나눔", body: "줄", date: old}, 3: {title: "피자 나눔", body: "줄", date: fresh}}, {loggedIn: true});
+        await run({...gallery, keywords: ["나눔"]});
+        await vi.waitFor(() => expect(written).toEqual([["a", 3]]));
+        expect(logged(logger, "분 지난 글이라 자동으로 줄 서지 않음")).toBe(true);
     });
 });

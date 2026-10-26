@@ -47,12 +47,33 @@ export interface GalleryCheckResult {
     isMinor: boolean;
 }
 
+/** 디시콘 하나입니다. 디시콘 이름은 대부분 "1", "2" 같은 번호라서 패키지 번호와 디시콘 번호로 가리킵니다. */
+export interface DcconRef {
+    packageIdx: number;
+    detailIdx: number;
+    /** 화면에 보여줄 디시콘 이름과 패키지 이름입니다. */
+    title: string;
+    packageTitle: string;
+}
+
+/** 계정이 가진 디시콘 패키지 하나입니다. */
+export interface DcconPackage {
+    packageIdx: number;
+    title: string;
+    items: {detailIdx: number; title: string; img: string}[];
+}
+
 export interface AccountConfig {
     id: string;
     /** 디시 로그인 아이디입니다. 비밀번호는 별도의 암호화 저장소에 둡니다. */
     loginId: string;
     /** `auto`이면 로그인 응답으로 판별합니다. */
     memberTypeOverride: "auto" | MemberType;
+    /**
+     * 정해진 문구나 디시콘을 요구하지 않는 줄에 "줄" 대신 달 디시콘입니다. 여러 개면 무작위로 하나를 씁니다.
+     * 비어 있거나, 글이 디시콘 댓글을 인정하지 않으면 "줄"을 씁니다.
+     */
+    defaultDccons: DcconRef[];
 }
 
 export interface LlmConfig {
@@ -93,7 +114,11 @@ export type AccountStatus =
     | {state: "logging_in"}
     | {state: "otp_required"; message: string}
     | {state: "logged_in"; nickname: string; memberType: MemberType | null; dcconCount: number; dcconError?: string}
-    | {state: "error"; message: string};
+    /**
+     * `retryAt`이 있으면 일시적인 오류(네트워크, 서버 오류, app_id 거절)라 그 시각에 자동으로 다시 로그인합니다.
+     * `failingSince`는 그렇게 실패하기 시작한 시각입니다.
+     */
+    | {state: "error"; message: string; retryAt?: number; failingSince?: number};
 
 export interface AccountView extends AccountConfig {
     hasPassword: boolean;
@@ -191,6 +216,10 @@ export interface HamboogieApi {
     setSecret(key: SecretKey, value: string): Promise<AppState>;
     /** `otp`는 OTP 6자리입니다. 상태가 `otp_required`일 때만 넘깁니다. */
     login(accountId: string, otp?: string): Promise<AppState>;
+    /** 로그인된 계정이 가진 디시콘을 패키지별로 돌려줍니다. 디시에 요청하지 않습니다. */
+    getDccons(accountId: string): Promise<DcconPackage[]>;
+    /** 그 계정이 가진 디시콘의 이미지를 data: 주소로 받아 옵니다(디시 이미지 서버 요청). 받지 못한 것은 빠집니다. */
+    getDcconImages(accountId: string, urls: string[]): Promise<Record<string, string>>;
     /** 갤러리가 실제로 있는지 확인하고 이름과 마이너 여부를 돌려줍니다. 없으면 실패합니다. */
     /** 갤러리가 실제로 있는지 확인합니다. 그 갤러리의 대기 계정(`accountIds`) 중 로그인된 계정으로만 요청합니다. */
     checkGallery(galleryId: string, accountIds: string[]): Promise<GalleryCheckResult>;
@@ -215,6 +244,8 @@ export interface HamboogieApi {
     /** 개발 모드 전용입니다. 이 글에 그 갤러리의 대기 계정이 단 댓글을 지웁니다. */
     devDeleteMyComments(galleryId: string, postNo: number): Promise<{account: string; deleted: {no?: number; memo?: string}[]; left: number}>;
     /** 개발 모드 전용입니다. 더미 글 여러 개를 LLM 요청 한 번으로 판단합니다. */
+    devOwnedDccons(recent?: boolean): Promise<unknown>;
+    devAddFreeDccon(loginId: string, packageIdx: number): Promise<unknown>;
     devBatchTest(posts: {title: string; body: string; no?: number; postedAt?: number}[]): Promise<{elapsedMs: number; decisions: (Record<string, unknown> | null)[]}>;
 }
 
