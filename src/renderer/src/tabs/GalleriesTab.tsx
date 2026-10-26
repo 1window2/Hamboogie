@@ -1,5 +1,5 @@
 import {useEffect, useState} from "react";
-import {BODY_READ_LIMIT_SAFE, estimatedWatchHours, GALLERY_ID_PATTERN, FREE_DAILY_LLM_REQUESTS, INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
+import {BODY_READ_LIMIT_SAFE, DEFAULT_KEYWORDS, estimatedWatchHours, GALLERY_ID_PATTERN, FREE_DAILY_LLM_REQUESTS, INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
 import type {AccountView, GalleryConfig, GalleryStatus, Settings} from "@shared/types";
 import type {DraftSetter} from "../App";
 import {NumberInput} from "../components/NumberInput";
@@ -168,7 +168,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                 </fieldset>
             </div>
 
-            <KeywordEditor label="우선 키워드" keywords={gallery.keywords} onChange={(keywords) => onChange({keywords})}
+            <KeywordEditor label="우선 키워드" keywords={gallery.keywords} onChange={(keywords) => onChange({keywords})} defaults={DEFAULT_KEYWORDS}
                            placeholder="키워드 입력 (쉼표로 여러 개)"
                            notice={<small className="muted">
                                키워드와 상관없이 새 글은 전부 LLM이 판단합니다. 제목에 키워드가 있는 글은 본문 요청 상한과 상관없이 본문을 먼저 읽고,

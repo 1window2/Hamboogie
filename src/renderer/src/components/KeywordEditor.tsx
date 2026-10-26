@@ -10,6 +10,8 @@ interface Props {
     placeholder: string;
     /** 목록 위에 보여줄 안내(경고 등)입니다. */
     notice?: ReactNode;
+    /** 있으면 "기본 키워드로 바꾸기" 버튼을 보여줍니다. 예전 버전에서 만든 갤러리는 기본 키워드가 바뀌어도 그대로라, 직접 맞출 수 있게 합니다. */
+    defaults?: readonly string[];
 }
 
 /**
@@ -19,7 +21,7 @@ interface Props {
  * 다시 그려지는데, 값을 상태로 들고 있으면 한글을 조합하는 도중에 다시 그려질 때 입력칸 값이 조합 전 값으로 되돌려져
  * 조합 중이던 글자가 사라집니다("싸단"을 치면 "싸ㄴ"만 남음). 입력칸 값을 건드리는 것은 추가 후 비울 때뿐입니다.
  */
-export function KeywordEditor({label, keywords, onChange, placeholder, notice}: Props) {
+export function KeywordEditor({label, keywords, onChange, placeholder, notice, defaults}: Props) {
     const inputRef = useRef<HTMLInputElement>(null);
     /** 입력칸에 아직 추가하지 않은 새 키워드가 있는지입니다. 공백·쉼표뿐이거나 이미 있는 키워드면 false입니다. */
     const [pending, setPending] = useState(false);
@@ -38,9 +40,24 @@ export function KeywordEditor({label, keywords, onChange, placeholder, notice}: 
         setPending(false);
     }
 
+    const isDefault = defaults !== undefined && defaults.length === keywords.length && defaults.every((keyword, index) => keyword === keywords[index]);
+
+    function resetToDefaults() {
+        if (!defaults) return;
+        if (!confirm(`${label}를 기본 목록 ${defaults.length}개로 바꿀까요? 지금 목록(${keywords.length}개)은 사라집니다.\n\n${defaults.join(", ")}`)) return;
+        onChange(normalizeKeywords([...defaults]));
+    }
+
     return (
         <div className="field">
-            <span>{label} ({keywords.length}/{KEYWORD_MAX})</span>
+            <span className="row">
+                {label} ({keywords.length}/{KEYWORD_MAX})
+                {defaults && (
+                    <button type="button" className="button small push-right" disabled={isDefault} title={isDefault ? "이미 기본 목록입니다" : undefined} onClick={resetToDefaults}>
+                        기본 키워드로 바꾸기
+                    </button>
+                )}
+            </span>
             {notice}
             {keywords.length > 0 && (
                 <div className="chips">
