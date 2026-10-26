@@ -1,8 +1,8 @@
 import {mkdtempSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {describe, expect, it} from "vitest";
-import {AuthExpiredError, type DCInside, type DeviceCredentials} from "@green-1052/dcinside.js";
+import {afterEach, describe, expect, it, vi} from "vitest";
+import {AuthExpiredError, OtpRequiredError, type DCInside, type DeviceCredentials} from "@green-1052/dcinside.js";
 import {defaultSettings, newGallery} from "@shared/settings";
 import type {AccountConfig, GalleryConfig, Settings} from "@shared/types";
 import {AccountManager} from "../src/main/dc/accounts";
@@ -21,7 +21,7 @@ const MINUTE = 60 * 1000;
 function world(network: {online: () => boolean} = {online: () => true}) {
     let now = Date.UTC(2026, 9, 26, 3, 0);
     const notices: string[] = [];
-    const server = {online: true, loginWorks: true, valid: new Set<number>(), lists: 0, logins: 0};
+    const server = {online: true, loginWorks: true, valid: new Set<number>(), lists: 0, logins: 0, started: 0, otp: false, loginHold: null as Promise<void> | null, hold: null as Promise<void> | null};
     let nextClient = 0;
     const factory = (_credentials?: DeviceCredentials) => {
         const id = ++nextClient;
@@ -29,6 +29,8 @@ function world(network: {online: () => boolean} = {online: () => true}) {
         return {
             async login(userId: string, password: string) {
                 server.logins++;
+                if (server.loginHold) await server.loginHold;
+                if (server.otp) throw new OtpRequiredError("OTP가 필요합니다.", null);
                 if (!server.online || !server.loginWorks) throw offline();
                 server.valid.add(id);
                 return {type: "login", id: userId, password, userId, result: {result: true, user_id: userId, name: "깡계", is_gonick: 0}};
@@ -37,6 +39,8 @@ function world(network: {online: () => boolean} = {online: () => true}) {
             dccons: {list: async () => ({tab: [], list: []})},
             articles: {
                 async list() {
+                    server.started++;
+                    if (server.hold) await server.hold;
                     if (!server.online) throw offline();
                     if (!server.valid.has(id)) throw new AuthExpiredError("login", "certification_login");
                     server.lists++;
@@ -81,9 +85,10 @@ function world(network: {online: () => boolean} = {online: () => true}) {
         // 기다리는 동안 시계만 그만큼 흐르게 합니다.
         sleep: async (ms) => void (now += ms)
     });
-    const tick = () => (engine as unknown as {tick(configId: string, runId: number): Promise<void>}).tick(gallery.id, 0);
+    const internals = engine as unknown as {runId: number; tick(configId: string, runId: number): Promise<void>; schedule(configId: string, runId: number, delayMs: number): void};
+    const tick = () => internals.tick(gallery.id, internals.runId);
     const logs = (text: string) => logger.recent().filter((entry) => entry.message.includes(text)).length;
-    return {server, accounts, engine, tick, logs, notices, advance: (ms: number) => (now += ms), sleep: () => server.valid.clear()};
+    return {server, accounts, engine, internals, gallery, settings, tick, logs, notices, advance: (ms: number) => (now += ms), sleep: () => server.valid.clear()};
 }
 
 describe("잠자기에서 깨어난 뒤 저절로 복구", () => {
@@ -219,5 +224,116 @@ describe("잠자기 동안 멈추고 깨어나면 네트워크를 확인한 뒤 
         await waiting;
         expect(w.engine.running).toBe(false);
         expect(w.notices).toEqual([]);
+    });
+});
+
+describe("감시 중 설정 반영과 확인 겹침 방지", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it("감시 중에 저장한 갤러리 설정을 바로 반영한다: 끄면 빼고, 새로 켜면 더한다", async () => {
+        vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+        const w = world();
+        await w.accounts.login(ACCOUNT);
+        w.engine.start();
+        expect(w.engine.running).toBe(true);
+        const second: GalleryConfig = {...w.gallery, id: "g2", galleryId: "asgeir", checkedId: "asgeir", enabled: false};
+        w.settings.galleries.push(second);
+        w.engine.syncGalleries();
+        expect(w.logs("감시에 추가했습니다")).toBe(0);
+        second.enabled = true;
+        w.engine.syncGalleries();
+        expect(w.logs("감시에 추가했습니다")).toBe(1);
+        w.gallery.enabled = false;
+        second.enabled = false;
+        w.engine.syncGalleries();
+        expect(w.engine.running).toBe(false);
+        expect(w.logs("감시하는 갤러리가 없어 감시를 멈췄습니다")).toBe(1);
+    });
+
+    it("갤러리 ID 확인이 필요해 감시에서 뺀 갤러리도, 고친 뒤 다시 시작하면 확인한다", async () => {
+        const w = world();
+        await w.accounts.login(ACCOUNT);
+        w.gallery.checkedId = "other";
+        await w.tick();
+        expect(w.logs("감시를 멈춤: 갤러리 탭에서 갤러리 ID를 확인해야 합니다.")).toBe(1);
+        w.gallery.checkedId = w.gallery.galleryId;
+        const lists = w.server.lists;
+        await w.tick();
+        expect(w.server.lists).toBe(lists + 1);
+        w.engine.stop();
+    });
+
+    it("확인하는 도중 다시 예약돼도(깨어남 등) 확인이 두 줄로 겹쳐 돌지 않는다", async () => {
+        vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+        const w = world();
+        await w.accounts.login(ACCOUNT);
+        let release = () => {};
+        w.server.hold = new Promise<void>((resolve) => (release = resolve));
+        w.engine.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(w.server.started).toBe(1);
+        // 첫 확인이 응답을 기다리는 사이 같은 갤러리가 다시 예약돼도, 앞선 확인이 끝날 때까지 디시에 또 요청하지 않습니다.
+        w.internals.schedule(w.gallery.id, w.internals.runId, 0);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(w.server.started).toBe(1);
+        w.server.hold = null;
+        release();
+        await vi.advanceTimersByTimeAsync(5 * MINUTE);
+        // 1분 간격이면 5분 동안 여섯 번 안팎입니다. 두 줄로 돌면 그 두 배가 됩니다.
+        expect(w.server.lists).toBeLessThanOrEqual(7);
+        expect(w.server.lists).toBeGreaterThanOrEqual(5);
+        w.engine.stop();
+    });
+});
+
+describe("다시 로그인 겹침", () => {
+    it("같은 계정의 다시 로그인이 동시에 요청되면 한 번만 로그인하고 둘 다 성공으로 본다", async () => {
+        const w = world();
+        await w.accounts.login(ACCOUNT);
+        const logins = w.server.logins;
+        w.sleep();
+        const results = await Promise.all([w.accounts.recoverLogin("acc1", "세션 만료"), w.accounts.recoverLogin("acc1", "세션 만료")]);
+        expect(results).toEqual([true, true]);
+        expect(w.server.logins - logins).toBe(1);
+    });
+});
+
+describe("OTP가 필요해지면 자동 재로그인을 멈춤", () => {
+    it("네트워크 오류로 다시 로그인을 기다리다 OTP를 요구받으면, 더는 비밀번호 로그인을 보내지 않는다", async () => {
+        const w = world();
+        await w.accounts.login(ACCOUNT);
+        await w.tick();
+        w.sleep();
+        w.server.loginWorks = false;
+        await w.tick();
+        expect(w.accounts.isRetrying("acc1")).toBe(true);
+        w.server.otp = true;
+        w.advance(MINUTE);
+        await w.tick();
+        expect(w.accounts.status("acc1").state).toBe("otp_required");
+        expect(w.accounts.isRetrying("acc1")).toBe(false);
+        const logins = w.server.logins;
+        for (let i = 0; i < 10; i++) {
+            w.advance(5 * MINUTE);
+            await w.tick();
+        }
+        expect(w.server.logins).toBe(logins);
+        w.engine.stop();
+    });
+
+    it("다시 로그인하는 도중 로그인을 내려놓으면(아이디 변경) 끝난 로그인 결과를 버린다", async () => {
+        const w = world();
+        await w.accounts.login(ACCOUNT);
+        w.sleep();
+        let release = () => {};
+        w.server.loginHold = new Promise<void>((resolve) => (release = resolve));
+        const recovering = w.accounts.recoverLogin("acc1", "세션 만료");
+        await Promise.resolve();
+        w.accounts.logout("acc1");
+        w.server.loginHold = null;
+        release();
+        await recovering;
+        expect(w.accounts.status("acc1").state).toBe("logged_out");
+        expect(w.accounts.readingClient([ACCOUNT], ["acc1"])).toBeNull();
     });
 });

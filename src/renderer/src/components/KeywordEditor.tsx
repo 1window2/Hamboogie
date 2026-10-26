@@ -23,11 +23,12 @@ interface Props {
  */
 export function KeywordEditor({label, keywords, onChange, placeholder, notice, defaults}: Props) {
     const inputRef = useRef<HTMLInputElement>(null);
-    /** 입력칸에 아직 추가하지 않은 새 키워드가 있는지입니다. 공백·쉼표뿐이거나 이미 있는 키워드면 false입니다. */
-    const [pending, setPending] = useState(false);
+    /** 입력칸 글자의 사본입니다. 입력칸 값으로 되돌려 쓰지 않고, 아직 추가하지 않은 키워드가 있는지 볼 때만 씁니다. */
+    const [text, setText] = useState("");
     const full = keywords.length >= KEYWORD_MAX;
     const existing = new Set(keywords.map(keywordKey));
-    const hasNew = (text: string) => splitKeywords(text).some((keyword) => !existing.has(keywordKey(keyword)));
+    /** 입력칸에 아직 추가하지 않은 새 키워드가 있는지입니다. 목록이 바뀌면(칩 삭제, 기본값으로 바꾸기) 다시 계산됩니다. */
+    const pending = splitKeywords(text).some((keyword) => !existing.has(keywordKey(keyword)));
 
     function add() {
         const element = inputRef.current;
@@ -37,7 +38,7 @@ export function KeywordEditor({label, keywords, onChange, placeholder, notice, d
         // 대소문자·공백·글자 형태만 다른 키워드는 이미 있는 것으로 봅니다.
         onChange(normalizeKeywords([...keywords, ...added]));
         element.value = "";
-        setPending(false);
+        setText("");
     }
 
     const isDefault = defaults !== undefined && defaults.length === keywords.length && defaults.every((keyword, index) => keyword === keywords[index]);
@@ -71,7 +72,7 @@ export function KeywordEditor({label, keywords, onChange, placeholder, notice, d
             )}
             <div className="row">
                 <input ref={inputRef} aria-label={label} defaultValue="" disabled={full} placeholder={full ? `최대 ${KEYWORD_MAX}개입니다` : placeholder}
-                       onInput={(event) => setPending(hasNew(event.currentTarget.value))}
+                       onInput={(event) => setText(event.currentTarget.value)}
                        onKeyDown={(event) => isCommitEnter(event) && add()}/>
                 <button className="button small" disabled={full || !pending} onClick={add}>추가</button>
             </div>

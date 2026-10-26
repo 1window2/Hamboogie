@@ -76,6 +76,7 @@ export function normalizeKeywords(keywords: string[]): string[] {
     const seen = new Set<string>();
     const result: string[] = [];
     for (const raw of keywords) {
+        if (typeof raw !== "string") continue;
         const keyword = normalizeText(raw).trim();
         const key = keywordKey(keyword);
         if (!key || seen.has(key)) continue;
@@ -86,23 +87,29 @@ export function normalizeKeywords(keywords: string[]): string[] {
     return result;
 }
 
+/** 배열이 아니면 빈 배열로 봅니다(손상되거나 손으로 고친 설정 파일 대비). */
+function list<T>(value: T[] | undefined | null): T[] {
+    return Array.isArray(value) ? value : [];
+}
+
 export function normalizeGallery(saved: GalleryConfig, accounts: AccountConfig[]): GalleryConfig {
     const accountIds = new Set(accounts.map((account) => account.id));
     // 1.1.x에 있던 "골라내기" 설정은 모든 새 글을 묶어 판단하게 되면서 없어졌습니다.
     const {screenUnmatched: _removed, ...gallery} = saved as GalleryConfig & {screenUnmatched?: boolean};
     return {
         ...gallery,
-        galleryId: galleryIdFromInput(gallery.galleryId),
+        enabled: gallery.enabled === true,
+        galleryId: galleryIdFromInput(String(gallery.galleryId ?? "")),
         intervalSec: clamp(gallery.intervalSec, INTERVAL_MIN_SEC, INTERVAL_MAX_SEC),
         delaySec: clamp(gallery.delaySec, 0, DELAY_MAX_SEC),
         category: gallery.category === "all" ? "all" : "food",
-        keywords: normalizeKeywords(gallery.keywords),
+        keywords: normalizeKeywords(list(gallery.keywords)),
         // 이전 버전에서 저장한 설정에는 제외 키워드가 없습니다.
-        excludeKeywords: normalizeKeywords(gallery.excludeKeywords ?? []),
+        excludeKeywords: normalizeKeywords(list(gallery.excludeKeywords)),
         // 이전 버전에서 저장한 설정에는 없으므로 기본(켜짐)으로 봅니다.
         scanBody: gallery.scanBody ?? true,
         bodyReadLimit: clamp(gallery.bodyReadLimit, 0, BODY_READ_LIMIT_MAX, BODY_READ_LIMIT_DEFAULT),
-        accountIds: [...new Set(gallery.accountIds)].filter((id) => accountIds.has(id))
+        accountIds: [...new Set(list(gallery.accountIds))].filter((id) => accountIds.has(id))
     };
 }
 
@@ -129,21 +136,29 @@ const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 /** 저장 전에 설정값을 허용 범위로 맞춥니다. */
 export function normalizeSettings(settings: Settings): Settings {
-    const accounts = settings.accounts
-        .filter((account) => ACCOUNT_ID_PATTERN.test(account.id))
-        .map((account) => ({...account, loginId: account.loginId.trim(), defaultDccons: normalizeDccons(account.defaultDccons)}));
+    const accounts = list(settings.accounts)
+        .filter((account) => typeof account?.id === "string" && ACCOUNT_ID_PATTERN.test(account.id))
+        .map((account): AccountConfig => ({
+            ...account,
+            loginId: String(account.loginId ?? "").trim(),
+            memberTypeOverride: account.memberTypeOverride === "gonick" || account.memberTypeOverride === "semi" ? account.memberTypeOverride : "auto",
+            defaultDccons: normalizeDccons(account.defaultDccons)
+        }));
+    const llm: Partial<Settings["llm"]> = settings.llm ?? {};
     return {
         ...settings,
         accounts,
-        galleries: settings.galleries.map((gallery) => normalizeGallery(gallery, accounts)),
+        galleries: list(settings.galleries)
+            .filter((gallery) => typeof gallery?.id === "string" && gallery.id !== "")
+            .map((gallery) => normalizeGallery(gallery, accounts)),
         llm: {
-            provider: PROVIDERS.includes(settings.llm.provider) ? settings.llm.provider : "gemini",
+            provider: llm.provider && PROVIDERS.includes(llm.provider) ? llm.provider : "gemini",
             // 모델 이름을 비우면 기본 모델을 씁니다. 화면에도 기본 모델이 안내 문구로 보입니다.
-            models: Object.fromEntries(PROVIDERS.map((id) => [id, settings.llm.models?.[id]?.trim() || DEFAULT_MODELS[id]])) as Record<LlmProviderId, string>,
-            paidPlan: settings.llm.paidPlan === true,
-            requestsPerMinute: clamp(settings.llm.requestsPerMinute, 0, LLM_RPM_MAX, FREE_LLM_RPM)
+            models: Object.fromEntries(PROVIDERS.map((id) => [id, String(llm.models?.[id] ?? "").trim() || DEFAULT_MODELS[id]])) as Record<LlmProviderId, string>,
+            paidPlan: llm.paidPlan === true,
+            requestsPerMinute: clamp(llm.requestsPerMinute as number, 0, LLM_RPM_MAX, FREE_LLM_RPM)
         },
-        discordWebhookUrl: settings.discordWebhookUrl.trim(),
+        discordWebhookUrl: String(settings.discordWebhookUrl ?? "").trim(),
         notifyOnSuccess: settings.notifyOnSuccess === true,
         autoStop: normalizeAutoStop(settings.autoStop)
     };
@@ -201,7 +216,7 @@ export function nextAutoStopAt(autoStop: AutoStop, startedAt: number, now: numbe
 }
 
 /** 디시 갤러리 ID 형식입니다(영문, 숫자, 밑줄). */
-export const GALLERY_ID_PATTERN = /^[A-Za-z0-9_$]+$/;
+export const GALLERY_ID_PATTERN = /^[A-Za-z0-9_]+$/;
 
 /** 감시를 시작하기 전에 갤러리 설정의 문제를 찾습니다. */
 export function galleryProblems(gallery: GalleryConfig): string[] {

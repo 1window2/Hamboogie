@@ -2,7 +2,7 @@
  * 기본 디시콘을 고르는 화면에 보여줄 디시콘 이미지를 받아 옵니다.
  *
  * 앱 화면은 외부 이미지를 띄우지 않으므로(보안 설정) 여기서 받아 data: 주소로 넘깁니다. 받는 것은 계정이 실제로 가진
- * 디시콘의 이미지 주소뿐이고, 한 번 받은 이미지는 앱을 끌 때까지 다시 받지 않습니다. 디시 이미지 서버는 디시 페이지에서
+ * 디시콘의 이미지 주소뿐이고, 한 번 받은 이미지는 앱을 끌 때까지 다시 받지 않습니다(최근 것 위주로 CACHE_MAX개까지). 디시 이미지 서버는 디시 페이지에서
  * 온 요청만 이미지를 주므로 Referer를 붙입니다.
  */
 const IMAGE_HOST = /^dcimg\d*\.dcinside\.(com|co\.kr)$/i;
@@ -10,6 +10,8 @@ const IMAGE_HOST = /^dcimg\d*\.dcinside\.(com|co\.kr)$/i;
 const MAX_PER_CALL = 200;
 const CONCURRENCY = 4;
 const MAX_BYTES = 2 * 1024 * 1024;
+/** 기억해 둘 이미지 수입니다. 넘으면 가장 먼저 받은 것부터 잊습니다. */
+const CACHE_MAX = 1000;
 
 export function isDcconImageUrl(url: string): boolean {
     try {
@@ -39,6 +41,7 @@ export class DcconImages {
                 const data = await this.fetchOne(url);
                 if (data) {
                     this.cache.set(url, data);
+                    if (this.cache.size > CACHE_MAX) this.cache.delete(this.cache.keys().next().value!);
                     result[url] = data;
                 }
             }

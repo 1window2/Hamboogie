@@ -1,15 +1,12 @@
 import {useEffect, useState} from "react";
 import type {HistoryEntry} from "@shared/types";
+import {postUrl} from "@shared/time";
 
 const pad = (value: number) => String(value).padStart(2, "0");
 
 function formatTime(time: number): string {
     const date = new Date(time);
     return `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function postUrl(entry: HistoryEntry): string {
-    return `https://m.dcinside.com/board/${entry.galleryId}/${entry.postNo}`;
 }
 
 export function HistoryTab() {
@@ -44,7 +41,7 @@ export function HistoryTab() {
                                         {entry.outcome === "success" ? "성공" : "실패"}
                                     </span>
                                     {entry.test && <span className="badge">테스트</span>}
-                                    <a href={postUrl(entry)} target="_blank" rel="noreferrer">{entry.title || `#${entry.postNo}`}</a>
+                                    <a href={postUrl(entry.galleryId, entry.postNo)} target="_blank" rel="noreferrer">{entry.title || `#${entry.postNo}`}</a>
                                     <span className="muted push-right">{entry.galleryId} · {formatTime(entry.time)}</span>
                                 </div>
                                 <div className="history-detail">{entry.detail}</div>

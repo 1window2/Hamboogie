@@ -124,6 +124,8 @@ export class AccountManager {
     private readonly awaitingOtp = new Map<string, DCInside>();
     /** 삭제된 계정입니다. 재로그인 도중 삭제되면 로그인 결과를 버립니다. */
     private readonly removed = new Set<string>();
+    /** 로그인을 내려놓을 때마다 늘어납니다. 그 전에 시작한 로그인의 결과는 버립니다. */
+    private readonly generations = new Map<string, number>();
     /** 마지막 app_id 거절의 이유입니다. 쉬는 동안 막을 때 같은 이유로 알립니다(앱 버전 거절과 일시적 거절 구분). */
     private refusal = APP_ID_REFUSED_MESSAGE;
     /** 진행 중인 로그인입니다. 같은 계정의 재로그인이 겹치면 하나만 하고 결과를 함께 씁니다. */
@@ -172,6 +174,9 @@ export class AccountManager {
         }
 
         this.statuses.set(account.id, {state: "logging_in"});
+        // 로그인하는 사이 계정이 삭제됐거나 로그인을 내려놓았으면(아이디 변경) 결과를 버립니다. 비밀 정보도 다시 저장하지 않습니다.
+        const generation = this.generations.get(account.id) ?? 0;
+        const dropped = () => this.removed.has(account.id) || (this.generations.get(account.id) ?? 0) !== generation;
         const deviceKey = `device:${account.id}` as const;
         const otpKey = `otp:${account.id}` as const;
         const otpToken = otp ? undefined : this.secrets.get(otpKey) ?? undefined;
@@ -180,8 +185,7 @@ export class AccountManager {
         this.awaitingOtp.delete(account.id);
         try {
             const session = await client.login(account.loginId, password, otp ? {otp} : {otpToken});
-            // 로그인하는 사이 계정이 삭제됐으면 결과를 버립니다. 비밀 정보도 다시 저장하지 않습니다.
-            if (this.removed.has(account.id)) return {state: "logged_out"};
+            if (dropped()) return {state: "logged_out"};
             // OTP로 로그인하면 다음부터 OTP 없이 통과할 수 있는 토큰을 줍니다.
             if (session.result.otp_token) await this.secrets.set(otpKey, session.result.otp_token);
             const isGonick = session.result.is_gonick;
@@ -197,22 +201,24 @@ export class AccountManager {
             // 기기 정보를 새로 받는 로그인은 그 자체가 오래 이어진 거절을 풀려는 시도라 예외입니다.
             if (freshDevice || this.appId.canTry()) {
                 if (await this.loadDccons(loggedIn) === "login_expired") {
+                    if (dropped()) return {state: "logged_out"};
                     return this.setStatus(account.id, {state: "error", message: "로그인 직후 세션이 끊겼습니다. 잠시 뒤 다시 로그인하세요."});
                 }
             } else {
                 loggedIn.dcconError = this.refusal;
             }
-            // 로그인하는 사이 계정이 삭제됐으면 결과를 버립니다(기기 정보를 다시 저장하지 않습니다).
-            if (this.removed.has(account.id)) return {state: "logged_out"};
+            if (dropped()) return {state: "logged_out"};
             // app_id를 받은 뒤에 저장해야 앱을 다시 켰을 때 app_id를 또 발급받지 않습니다.
             await saveDevice(this.secrets, deviceKey, client);
             this.sessions.set(account.id, loggedIn);
             this.retries.delete(account.id);
             return this.setStatus(account.id, this.loggedInStatus(account, loggedIn));
         } catch (error) {
+            if (dropped()) return {state: "logged_out"};
             this.sessions.delete(account.id);
-            if (this.removed.has(account.id)) return {state: "logged_out"};
             if (error instanceof OtpRequiredError) {
+                // OTP를 직접 넣어야 하므로 자동 재로그인을 그만둡니다(계속 시도하면 확인할 때마다 비밀번호 로그인이 나갑니다).
+                this.retries.delete(account.id);
                 this.awaitingOtp.set(account.id, client);
                 await saveDevice(this.secrets, deviceKey, client);
                 // 저장된 토큰으로 실패했다면 만료된 것이므로 지웁니다.
@@ -246,6 +252,16 @@ export class AccountManager {
             retryAt: at,
             failingSince: since
         });
+    }
+
+    /** 로그인 세션을 버립니다(설정에서 아이디를 바꾼 경우). 다시 로그인해야 그 아이디로 쓰입니다. */
+    logout(accountId: string): void {
+        this.generations.set(accountId, (this.generations.get(accountId) ?? 0) + 1);
+        this.pendingLogins.delete(accountId);
+        this.sessions.delete(accountId);
+        this.awaitingOtp.delete(accountId);
+        this.retries.delete(accountId);
+        this.setStatus(accountId, {state: "logged_out"});
     }
 
     /** 일시적인 오류로 자동 재로그인을 기다리는 계정인지입니다. */
@@ -369,6 +385,9 @@ export class AccountManager {
      * 넘깁니다. 다시 로그인했으면 true, 세션을 버렸으면 false입니다.
      */
     async recoverLogin(accountId: string, reason: string): Promise<boolean> {
+        // 다른 갤러리가 이미 이 계정으로 다시 로그인하는 중이면(같은 계정으로 읽는 갤러리 여럿이 함께 만료를 받은 경우) 그 결과를 따릅니다.
+        const pending = this.pendingLogins.get(accountId);
+        if (pending) return (await pending).state === "logged_in";
         const loggedIn = this.sessions.get(accountId);
         if (!loggedIn) return false;
         const last = this.lastRecovery.get(accountId);
@@ -376,6 +395,8 @@ export class AccountManager {
             this.lastRecovery.set(accountId, this.now());
             const status = await this.login(loggedIn.account);
             if (status.state === "logged_in") return true;
+            // 로그인하는 사이 계정을 지웠거나 로그인을 내려놓았으면(아이디 변경) 그대로 둡니다.
+            if (status.state === "logged_out") return false;
             // OTP를 다시 입력해야 하거나, 일시적인 오류라 자동으로 다시 로그인할 예정이면 그 안내를 그대로 둡니다.
             if (status.state === "otp_required" || this.retries.has(accountId)) return false;
         }

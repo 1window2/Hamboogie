@@ -2,6 +2,7 @@ import {describe, expect, it} from "vitest";
 import {normalizeKeywords} from "@shared/settings";
 import {galleryIdFromInput, isDiscordWebhookUrl, keywordKey, splitKeywords} from "@shared/text";
 import {findKeyword} from "../src/main/pipeline/keyword-filter";
+import {errorMessage} from "@shared/errors";
 
 describe("입력 글자 정리", () => {
     it("자모가 분리된 한글(macOS에서 복사)과 전각 문자도 같은 키워드로 본다", () => {
@@ -35,6 +36,15 @@ describe("입력 글자 정리", () => {
     it("Discord 웹훅 주소만 받는다", () => {
         expect(isDiscordWebhookUrl("https://discord.com/api/webhooks/1/abc")).toBe(true);
         expect(isDiscordWebhookUrl("http://discord.com/api/webhooks/1/abc")).toBe(false);
+        expect(isDiscordWebhookUrl("https://evil.example/api/webhooks/1/abc")).toBe(false);
         expect(isDiscordWebhookUrl("abc")).toBe(false);
+    });
+});
+
+describe("오류 문구", () => {
+    it("화면에서 받은 IPC 오류의 앞부분을 떼고 보여준다", () => {
+        expect(errorMessage(new Error("Error invoking remote method 'checkGallery': Error: 없는 갤러리입니다."))).toBe("없는 갤러리입니다.");
+        expect(errorMessage(new Error("Error invoking remote method 'save': TypeError: 잘못된 값"))).toBe("잘못된 값");
+        expect(errorMessage("그냥 문자열")).toBe("그냥 문자열");
     });
 });

@@ -1,5 +1,6 @@
 import type {GalleryConfig, MemberType} from "@shared/types";
 import {DEFAULT_COMMENT_TEXT} from "@shared/settings";
+import {DAY_MS, KST_OFFSET_MS} from "@shared/time";
 import type {Decision} from "../llm/decision";
 
 export interface OwnedDccon {
@@ -47,8 +48,6 @@ export const START_MARGIN_MS = 2000;
 export const END_MARGIN_MS = 2000;
 /** 지금보다 이른 시각이 이 범위 안이면 오늘 이미 지난 시각으로, 더 이르면 다음 날 시각으로 봅니다. */
 const PAST_WINDOW_MS = 6 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
-const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 /**
  * `HH:MM` 또는 `HH:MM:SS`(한국 시간)를 기준 시각 근처의 실제 시각으로 바꿉니다. 나눔 글의 시각은 보통 "오늘"을 뜻하므로

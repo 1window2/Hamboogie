@@ -6,6 +6,7 @@ import {NumberInput} from "../components/NumberInput";
 import {KeywordEditor} from "../components/KeywordEditor";
 import {AutoStopCard} from "../components/AutoStopCard";
 import {galleryIdFromInput} from "@shared/text";
+import {errorMessage} from "@shared/errors";
 
 interface Props {
     draft: Settings;
@@ -87,12 +88,11 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
             // 확인하는 사이 ID를 또 바꿨으면 이 결과는 버립니다.
             onChange({galleryId: id, checkedId: id, title: result.title, isMinor: result.isMinor}, (current) => current.galleryId.trim() === id);
         } catch (caught) {
-            setCheckError(caught instanceof Error ? caught.message.replace(/^Error invoking remote method '\w+': (Error: )?/, "") : String(caught));
+            setCheckError(errorMessage(caught));
         } finally {
             setChecking(false);
         }
     }
-
 
     function toggleAccount(accountId: string, checked: boolean) {
         onChange({accountIds: checked ? [...gallery.accountIds, accountId] : gallery.accountIds.filter((id) => id !== accountId)});

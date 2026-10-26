@@ -83,14 +83,20 @@ function startWindowsUpdater(
 ): void {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.on("update-available", (info) => set({state: "downloading", version: info.version, percent: 0}));
+    // 받아 둔 업데이트가 있으면, 다음 확인에서 오류가 나거나 같은 버전을 다시 받더라도 설치 버튼을 계속 보여 줍니다.
+    const update = (next: UpdateState) => {
+        if (current().state === "ready" && next.state !== "ready") return;
+        set(next);
+    };
+    autoUpdater.on("update-available", (info) => update({state: "downloading", version: info.version, percent: 0}));
     autoUpdater.on("download-progress", (progress) => {
         const now = current();
-        if (now.state === "downloading") set({...now, percent: Math.round(progress.percent)});
+        const percent = Math.round(progress.percent);
+        if (now.state === "downloading" && now.percent !== percent) set({...now, percent});
     });
     autoUpdater.on("update-downloaded", (info) => set({state: "ready", version: info.version}));
-    autoUpdater.on("error", (error) => set({state: "error", message: error.message}));
-    const check = () => void autoUpdater.checkForUpdates().catch((error: unknown) => set({state: "error", message: String(error)}));
+    autoUpdater.on("error", (error) => update({state: "error", message: error.message}));
+    const check = () => void autoUpdater.checkForUpdates().catch((error: unknown) => update({state: "error", message: String(error)}));
     check();
     setInterval(check, CHECK_INTERVAL_MS);
 }

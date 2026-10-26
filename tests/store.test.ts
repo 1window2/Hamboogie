@@ -1,8 +1,8 @@
-import {mkdtempSync, readFileSync} from "node:fs";
+import {mkdtempSync, readFileSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {describe, expect, it} from "vitest";
-import {Ledger} from "../src/main/store";
+import {Ledger, SettingsStore} from "../src/main/store";
 
 describe("Ledger", () => {
     it("빠르게 연달아 기록해도 파일이 깨지지 않고, 다시 열면 모두 남아 있다", async () => {
@@ -32,5 +32,25 @@ describe("HistoryStore", () => {
         await store.flush();
         expect(seen).toEqual([5, 6]);
         expect(new HistoryStore(dir).all().map((entry) => entry.outcome)).toEqual(["success", "failure"]);
+    });
+});
+
+describe("SettingsStore", () => {
+    const ACCOUNT_ID = "00000000-0000-4000-8000-000000000001";
+
+    it("손으로 고치다 망가진 설정 파일도 쓸 수 있는 값으로 맞춰 연다", () => {
+        const dir = mkdtempSync(join(tmpdir(), "hamboogie-settings-"));
+        writeFileSync(join(dir, "settings.json"), JSON.stringify({
+            accounts: [{id: ACCOUNT_ID}, null, {id: 5}],
+            galleries: [{id: "g", galleryId: "gf2", keywords: "나눔", accountIds: null}, {galleryId: "no-id"}],
+            llm: null,
+            discordWebhookUrl: 5
+        }));
+        const settings = new SettingsStore(dir).get();
+        expect(settings.accounts).toEqual([expect.objectContaining({id: ACCOUNT_ID, loginId: "", memberTypeOverride: "auto", defaultDccons: []})]);
+        expect(settings.galleries).toHaveLength(1);
+        expect(settings.galleries[0]).toMatchObject({id: "g", galleryId: "gf2", keywords: [], accountIds: [], enabled: false});
+        expect(settings.llm.provider).toBe("gemini");
+        expect(settings.discordWebhookUrl).toBe("5");
     });
 });

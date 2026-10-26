@@ -35,6 +35,7 @@ function setup(options: {notifyOnSuccess?: boolean; write?: (accountId: string, 
             candidates: () => [],
             maintain: async () => false,
             nickname: (id: string) => `계정${id}`,
+            status: () => ({state: "logged_out"}),
             writeComment: async (accountId: string, _galleryId: string, postNo: number) => {
                 await options.write?.(accountId, postNo);
                 written.push([accountId, postNo]);
@@ -422,6 +423,18 @@ describe("Engine 새 글 묶음 판단", () => {
         expect(batches(calls).map((batch) => batch.length)).toEqual([40, 5]);
     });
 
+    it("판단에 실패한 키워드 글이 여럿이면 알림 하나로 묶어 보낸다", async () => {
+        const {engine, run, ledger} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "피자 나눔", body: ""}, 4: {title: "잡담", body: ""}}, {batchFails: true});
+        const alert = vi.spyOn(engine, "alert");
+        await run({...gallery, keywords: ["나눔"]});
+        expect(alert.mock.calls.map((call) => call[0])).toEqual(["판단이 필요한 글 2개 (gf2)"]);
+        expect(alert.mock.calls[0]![4]).toEqual([
+            {title: "치킨 나눔", url: "https://m.dcinside.com/board/gf2/2"},
+            {title: "피자 나눔", url: "https://m.dcinside.com/board/gf2/3"}
+        ]);
+        expect([2, 3, 4].map((no) => ledger.has("gf2", no))).toEqual([true, true, false]);
+    });
+
     it("판단에 실패하면 키워드에 걸린 글만 알린다", async () => {
         const {run, ledger} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "잡담", body: ""}}, {batchFails: true});
         await run({...gallery, keywords: ["나눔"]});
@@ -758,6 +771,33 @@ describe("Engine 오래된 글", () => {
 
 describe("Engine 판단 도중 잠자기", () => {
     const noWait = {sleep: async () => {}, checkNetwork: async () => true};
+
+    it("5분 넘게 잠든 사이 시각이 지나 버린 줄 서기는 버리되, 마감이 남은 줄은 선다", async () => {
+        const {engine, written, recorded} = setup();
+        const internals = engine as unknown as {deps: EngineDeps; watchers: Map<string, unknown>};
+        Object.assign(internals.deps, noWait);
+        internals.watchers.set(gallery.id, setTimeout(() => {}, 0));
+        engine.suspend(Date.now() - 6 * 60_000);
+        await engine.resume();
+        // 잠든 사이(1분 전) 시각이 된 줄입니다. 하나는 마감이 없고, 하나는 마감이 10분 남았습니다.
+        await engine.dispatch(gallery, {no: 12, title: "선착 나눔"}, plan(-60_000), LIVE);
+        await engine.dispatch(gallery, {no: 13, title: "30분까지 나눔"}, plan(-60_000, {deadline: Date.now() + 10 * 60_000}), LIVE);
+        await vi.waitFor(() => expect(recorded).toHaveLength(2));
+        expect(recorded.find((entry) => entry.postNo === 12)).toMatchObject({outcome: "failure", detail: "잠든 사이 줄 서기 시각이 지나 취소함"});
+        expect(written).toEqual([["a", 13]]);
+        engine.stop();
+    });
+
+    it("깨어남이 두 번 알려져도(화면 잠금 해제 등) 이어가기는 한 번만 한다", async () => {
+        const {engine, logger} = setup();
+        const internals = engine as unknown as {deps: EngineDeps; watchers: Map<string, unknown>};
+        Object.assign(internals.deps, noWait);
+        internals.watchers.set(gallery.id, setTimeout(() => {}, 0));
+        engine.suspend();
+        await Promise.all([engine.resume(), engine.resume()]);
+        expect(logger.recent().filter((entry) => entry.message.includes("네트워크가 연결되어 감시를 이어갑니다"))).toHaveLength(1);
+        engine.stop();
+    });
 
     it("판단하는 사이 잠들었다 깨어나 실패하면 알리지 않고, 짧게 잤으면 한 번 더 판단한다", async () => {
         const {engine, calls, check, logger, recorded} = withGallery({2: {title: "치킨 나눔", body: "줄"}, 3: {title: "잡담", body: ""}}, {loggedIn: true});

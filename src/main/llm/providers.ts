@@ -221,7 +221,7 @@ function geminiStructured(apiKey: string, model: string): Structured {
     };
 }
 
-/** 구조화 응답 하나로 판단, 묶음 판단, 골라내기를 만듭니다. */
+/** 구조화 응답 하나로 판단과 묶음 판단을 만듭니다. */
 export function providerFrom(structured: Structured): LlmProvider {
     return {
         decide: (post) => structured({schema: DecisionSchema, name: "decision", system: SYSTEM_PROMPT, user: buildUserMessage(post.title, post.body, post.postedAt)}),

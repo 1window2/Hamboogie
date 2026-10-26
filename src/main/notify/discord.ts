@@ -1,15 +1,14 @@
 import {isDiscordWebhookUrl} from "@shared/text";
 
-export {isDiscordWebhookUrl};
-
 export interface DiscordNotice {
     title: string;
     description: string;
     url?: string;
     /** 성공 알림은 초록색, 나머지는 빨간색으로 표시합니다. */
     success?: boolean;
+    /** 본문 아래에 누를 수 있는 링크로 붙일 글들입니다. 주소는 앱이 만든 글 주소만 넣습니다. */
+    links?: {title: string; url: string}[];
 }
-
 
 /**
  * 글 제목이나 LLM 판단처럼 남이 쓴 내용이 링크나 서식으로 보이지 않게 마크다운 기호를 무력화합니다.
@@ -26,6 +25,14 @@ function truncate(text: string, max: number): string {
 }
 
 const WEBHOOK_TIMEOUT_MS = 10_000;
+const DESCRIPTION_MAX = 4000;
+
+/** 본문은 서식을 무력화하고, 링크로 붙일 글은 제목만 무력화해 [제목](주소)로 씁니다. */
+function describe(notice: DiscordNotice): string {
+    const links = (notice.links ?? []).map((link) => `[${truncate(escapeMarkdown(link.title), 100)}](${link.url})`).join("\n");
+    if (!links) return truncate(escapeMarkdown(notice.description), DESCRIPTION_MAX);
+    return `${truncate(escapeMarkdown(notice.description), Math.max(100, DESCRIPTION_MAX - links.length - 2))}\n\n${links}`.slice(0, DESCRIPTION_MAX);
+}
 
 /** Discord 웹훅으로 알림을 보냅니다. 실패하면 예외를 던집니다. */
 export async function sendDiscordNotice(webhookUrl: string, notice: DiscordNotice): Promise<void> {
@@ -41,7 +48,7 @@ export async function sendDiscordNotice(webhookUrl: string, notice: DiscordNotic
             allowed_mentions: {parse: []},
             embeds: [{
                 title: truncate(escapeMarkdown(notice.title), 256),
-                description: truncate(escapeMarkdown(notice.description), 4000),
+                description: describe(notice),
                 url: notice.url,
                 color: notice.success ? 0x3fa45b : 0xe0442e,
                 timestamp: new Date().toISOString()
