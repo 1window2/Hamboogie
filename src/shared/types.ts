@@ -246,6 +246,7 @@ export interface HamboogieApi {
     /** 개발 모드 전용입니다. 더미 글 여러 개를 LLM 요청 한 번으로 판단합니다. */
     devOwnedDccons(recent?: boolean): Promise<unknown>;
     devAddFreeDccon(loginId: string, packageIdx: number): Promise<unknown>;
+    devSimulateSleep(minutes: number, offline: boolean): Promise<{running: boolean; waitedSec: number}>;
     devBatchTest(posts: {title: string; body: string; no?: number; postedAt?: number}[]): Promise<{elapsedMs: number; decisions: (Record<string, unknown> | null)[]}>;
 }
 

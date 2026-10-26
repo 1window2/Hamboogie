@@ -15,7 +15,9 @@ describe("AppIdBackoff", () => {
         backoff.fail();
         backoff.succeed();
         expect(backoff.canTry()).toBe(true);
-        expect(backoff.failing).toBe(false);
+        // 성공하면 연속 거절 횟수가 초기화되어 다음 거절은 다시 5분만 쉽니다.
+        backoff.fail();
+        expect(backoff.lastPauseMs).toBe(5 * MINUTE);
     });
 
     it("거절이 이어질수록 쉬는 시간을 두 배로 늘린다(최대 1시간)", () => {

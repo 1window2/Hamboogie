@@ -32,6 +32,10 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # 태그와 package.json 버전이 다르면 앱이 자기 버전을 잘못 알아 업데이트 확인이 꼬이므로 멈춥니다.
+      - name: Check tag matches version
+        shell: bash
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

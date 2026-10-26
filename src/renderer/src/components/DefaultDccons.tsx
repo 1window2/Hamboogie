@@ -1,5 +1,6 @@
 import {useEffect, useState} from "react";
 import {DEFAULT_DCCONS_MAX} from "@shared/settings";
+import {errorMessage} from "@shared/errors";
 import type {DcconPackage, DcconRef} from "@shared/types";
 
 interface Props {
@@ -25,7 +26,7 @@ export function DefaultDccons({accountId, selected, onChange}: Props) {
 
     useEffect(() => {
         if (!open || packages) return;
-        void window.hamboogie.getDccons(accountId).then(setPackages, (caught: Error) => setError(caught.message));
+        void window.hamboogie.getDccons(accountId).then(setPackages, (caught: unknown) => setError(errorMessage(caught)));
     }, [open, packages, accountId]);
 
     const imageOf = (ref: {packageIdx: number; detailIdx: number}) => {
@@ -41,7 +42,7 @@ export function DefaultDccons({accountId, selected, onChange}: Props) {
             const loaded = await window.hamboogie.getDcconImages(accountId, missing);
             setImages((prev) => ({...prev, ...loaded}));
         } catch (caught) {
-            setError((caught as Error).message);
+            setError(errorMessage(caught));
         } finally {
             setLoading(false);
         }

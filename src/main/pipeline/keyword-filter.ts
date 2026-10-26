@@ -1,15 +1,13 @@
 import {keywordKey} from "@shared/text";
 
-/** 글과 키워드를 같은 형태로 맞춥니다(자모 분리 한글·전각 문자 통일, 공백 제거, 소문자). */
-function compact(text: string): string {
-    return keywordKey(text);
-}
-
-/** 글에 들어 있는 첫 번째 키워드를 돌려줍니다. 공백과 대소문자는 무시합니다. 없으면 null입니다. */
+/**
+ * 글에 들어 있는 첫 번째 키워드를 돌려줍니다. 없으면 null입니다. 글과 키워드를 같은 형태로 맞춰 비교합니다
+ * (자모 분리 한글·전각 문자 통일, 공백 제거, 소문자).
+ */
 export function findKeyword(text: string, keywords: string[]): string | null {
-    const target = compact(text);
+    const target = keywordKey(text);
     return keywords.find((keyword) => {
-        const needle = compact(keyword);
+        const needle = keywordKey(keyword);
         return needle.length > 0 && target.includes(needle);
     }) ?? null;
 }

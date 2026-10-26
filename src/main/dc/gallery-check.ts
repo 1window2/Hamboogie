@@ -11,7 +11,7 @@ import {errorMessage} from "@shared/errors";
  */
 export async function checkGallery(reader: DCInside, galleryId: string, appId?: AppIdBackoff): Promise<GalleryCheckResult> {
     const id = galleryId.trim();
-    if (!/^[A-Za-z0-9_$]+$/.test(id)) throw new Error("갤러리 ID는 영문, 숫자, _만 쓸 수 있습니다.");
+    if (!/^[A-Za-z0-9_]+$/.test(id)) throw new Error("갤러리 ID는 영문, 숫자, _만 쓸 수 있습니다.");
     let response;
     try {
         response = await reader.articles.list({gallery: id});

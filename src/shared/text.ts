@@ -22,9 +22,9 @@ export function splitKeywords(text: string): string[] {
  */
 export function galleryIdFromInput(text: string): string {
     const value = normalizeText(text).trim();
-    const query = /[?&]id=([A-Za-z0-9_$]+)/.exec(value);
+    const query = /[?&]id=([A-Za-z0-9_]+)/.exec(value);
     if (query) return query[1]!;
-    const mobile = /m\.dcinside\.com\/(?:board|mini)\/([A-Za-z0-9_$]+)/.exec(value);
+    const mobile = /m\.dcinside\.com\/(?:board|mini)\/([A-Za-z0-9_]+)/.exec(value);
     if (mobile) return mobile[1]!;
     return value.replace(/\s+/g, "");
 }

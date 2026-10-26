@@ -1,5 +1,4 @@
-const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
+import {DAY_MS, KST_OFFSET_MS} from "@shared/time";
 
 /**
  * 디시가 준 작성 시각 문자열(한국 시간)을 읽습니다. 실제로 확인한 형식(2026-10-25)은 글 읽기가 "2025.04.23 13:41"(초 없음),
@@ -29,21 +28,16 @@ function latestPossible(raw: string, detectedAt: number): number | null {
     return at;
 }
 
-/**
- * 글을 올린 시각을 추정합니다. LLM이 "30분까지", "10분 뒤부터" 같은 상대 시각을 실제 시각으로 바꾸는 기준입니다.
- * 확실하지 않을 때는 늦은 쪽으로 잡습니다. 그래야 "N분 뒤부터" 줄에 시작 전에 서는 일이 없습니다. 그래서 디시가 준 시각을
- * 읽을 수 있어도 글을 감지한 시각보다 늦게 잡지 않고, 읽을 수 없거나 하루 넘게 차이 나면 감지한 시각을 씁니다.
- */
-export function estimatePostedAt(raw: (string | undefined)[], detectedAt: number): number {
-    return postedAtRange(raw, detectedAt).latest;
-}
-
 /** 작성 시각을 모를 때 실제 작성 시각이 감지한 시각보다 이만큼까지 이를 수 있다고 봅니다(보통의 감시 간격). */
 const UNKNOWN_SLACK_MS = 60 * 1000;
 
 /**
- * 글을 올린 시각이 있을 수 있는 범위입니다. `latest`는 위의 추정값이고, `earliest`는 초를 모를 때 그 분의 0초,
- * 아예 모를 때 감지한 시각의 1분 전입니다. 상대 마감("5분 후 마감")은 `latest` 기준으로 계산되므로, 마감은 그 차이만큼
+ * 글을 올린 시각이 있을 수 있는 범위입니다.
+ *
+ * `latest`는 LLM이 "30분까지", "10분 뒤부터" 같은 상대 시각을 실제 시각으로 바꾸는 기준입니다. 확실하지 않을 때는 늦은 쪽으로
+ * 잡아야 "N분 뒤부터" 줄에 시작 전에 서는 일이 없습니다. 그래서 디시가 준 시각을 읽을 수 있어도 감지한 시각보다 늦게 잡지 않고,
+ * 읽을 수 없거나 하루 넘게 차이 나면 감지한 시각을 씁니다. `earliest`는 초를 모를 때 그 분의 0초, 아예 모를 때 감지한 시각의
+ * 1분 전입니다. 상대 마감("5분 후 마감")은 `latest` 기준으로 계산되므로, 마감은 그 차이만큼
  * 앞당겨 봐야 마감 뒤에 줄 서지 않습니다.
  */
 export function postedAtRange(raw: (string | undefined)[], detectedAt: number): {earliest: number; latest: number} {

@@ -1,6 +1,6 @@
 import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
-import {app, BrowserWindow, ipcMain, Notification, powerMonitor, powerSaveBlocker, shell, type IpcMainInvokeEvent} from "electron";
+import {app, BrowserWindow, dialog, ipcMain, net, Notification, powerMonitor, powerSaveBlocker, shell, type IpcMainInvokeEvent} from "electron";
 import {PROVIDERS} from "@shared/settings";
 import type {AccountConfig, AppState, DcconPackage, SecretKey, Settings} from "@shared/types";
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
@@ -16,7 +16,6 @@ import {createTray} from "./tray";
 import {startUpdater, type Updater} from "./updater";
 import {errorMessage} from "@shared/errors";
 import {DcconImages} from "./dc/dccon-images";
-
 
 /** 앱 화면에서 온 IPC만 받는 등록 함수입니다. */
 export type TrustedHandle = (channel: string, listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown) => void;
@@ -109,6 +108,17 @@ async function main(): Promise<void> {
         logger,
         settings: () => settingsStore.get(),
         onStateChanged: () => pushState(),
+        // 인터페이스가 켜져 있는지만이 아니라 실제로 인터넷에 닿는지 봅니다. 디시가 아닌 연결 확인용 주소를 씁니다.
+        // 연결 확인용 주소 두 곳 중 하나라도 응답하면 연결된 것으로 봅니다(한 곳이 막힌 망 대비).
+        checkNetwork: async () => {
+            if (!net.isOnline()) return false;
+            const probe = (url: string) => fetch(url, {signal: AbortSignal.timeout(5000)})
+                .then((response) => (response.status === 204 ? true : Promise.reject(new Error(String(response.status)))));
+            return Promise.any([probe("https://www.gstatic.com/generate_204"), probe("https://cp.cloudflare.com/generate_204")]).catch(() => false);
+        },
+        desktopNotice: (title, body) => {
+            if (Notification.isSupported()) new Notification({title, body}).show();
+        },
         recordJudgment: (record) => judgments.append(record),
         usage: new LlmUsage(() => usageStore.load(), (record) => {
             usageStore.save(record);
@@ -156,10 +166,15 @@ async function main(): Promise<void> {
         }
     }
 
-    // 잠들고 깨어난 시각을 남겨, 감시가 비는 이유를 로그로 알 수 있게 합니다. 깨어나면 밀린 확인이 바로 돌고,
-    // 그사이 로그인이 풀렸으면 다시 로그인합니다(네트워크가 아직 없으면 잠시 뒤 자동으로 다시 시도).
-    powerMonitor.on("suspend", () => logger.info("컴퓨터가 잠들어 감시가 잠시 멈춥니다."));
-    powerMonitor.on("resume", () => logger.info("컴퓨터가 깨어나 감시를 이어갑니다."));
+    // 잠들면 확인을 멈추고, 깨어나면 네트워크가 붙은 뒤에 이어갑니다(5분 넘게 잤으면 그사이 글은 버림, 1분 안에 네트워크가 없으면 감시 중지).
+    powerMonitor.on("suspend", () => {
+        engine.suspend();
+        pushState();
+    });
+    // 깨어남 신호가 빠지는 경우에 대비해, 화면 잠금을 풀거나 사용자가 돌아왔을 때도 깨어난 것으로 봅니다(이미 이어가는 중이면 무시).
+    for (const event of ["resume", "unlock-screen", "user-did-become-active"] as const) {
+        powerMonitor.on(event as "resume", () => void engine.resume().finally(() => pushState()));
+    }
 
     function pushState(): void {
         syncSleepBlocker();
@@ -196,10 +211,19 @@ async function main(): Promise<void> {
     handle("getHistory", () => history.all());
     handle("installUpdate", () => updater?.install());
     handle("saveSettings", async (_event, next: Settings) => {
-        const removed = settingsStore.get().accounts.filter((account) => !next.accounts.some((item) => item.id === account.id));
-        for (const account of removed) await accounts.remove(account.id);
+        const before = settingsStore.get().accounts;
+        // 먼저 저장해 봅니다. 저장이 실패하면 지운 계정의 비밀번호도 지우지 않습니다.
         await settingsStore.save(next);
+        const saved = settingsStore.get().accounts;
+        for (const account of before) {
+            const after = saved.find((item) => item.id === account.id);
+            if (!after) await accounts.remove(account.id);
+            // 로그인된 계정의 아이디를 바꿨으면 예전 아이디의 세션을 버립니다(다시 로그인해야 새 아이디로 쓰입니다).
+            else if (after.loginId !== account.loginId) accounts.logout(account.id);
+        }
+        engine.syncGalleries();
         engine.refreshAutoStop();
+        pushState();
         return state();
     });
     handle("setSecret", async (_event, key: SecretKey, value: string) => {
@@ -382,4 +406,8 @@ async function main(): Promise<void> {
     if (failed.length > 0) await engine.alert("계정 자동 로그인 실패", `앱에서 다시 로그인해야 줄을 설 수 있습니다.\n${failed.join("\n")}`);
 }
 
-void main();
+// 시작하다 오류가 나면 창도 트레이도 없이 떠 있게 되므로, 알리고 끝냅니다.
+main().catch((error: unknown) => {
+    dialog.showErrorBox("Hamboogie를 시작하지 못했습니다", errorMessage(error));
+    app.exit(1);
+});

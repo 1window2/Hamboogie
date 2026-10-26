@@ -72,7 +72,17 @@ export class SettingsStore {
     constructor(dir: string) {
         this.path = join(dir, "settings.json");
         const saved = readJson<Partial<Settings>>(this.path, {});
-        this.current = normalizeSettings({...defaultSettings(), ...saved});
+        try {
+            this.current = normalizeSettings({...defaultSettings(), ...saved});
+        } catch {
+            // 형태가 망가진 설정 파일이면 남겨 두고(settings.json.broken) 기본 설정으로 시작합니다.
+            try {
+                renameSync(this.path, `${this.path}.broken`);
+            } catch {
+                // 옮기지 못해도 기본 설정으로 시작합니다.
+            }
+            this.current = defaultSettings();
+        }
     }
 
     get(): Settings {

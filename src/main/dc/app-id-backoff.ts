@@ -28,10 +28,6 @@ export class AppIdBackoff {
         return this.now() >= this.pausedUntil;
     }
 
-    get failing(): boolean {
-        return this.firstFailureAt !== null;
-    }
-
     /**
      * 거절을 기록하고 쉽니다. 거절이 이어질 때마다 쉬는 시간을 두 배로 늘립니다(최대 1시간).
      * 기기 정보를 새로 받아야 할 만큼 오래 거절이 이어졌고, 최근 하루 안에 새로 받은 적이 없으면 true를 돌려줍니다.

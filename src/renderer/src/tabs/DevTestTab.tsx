@@ -53,7 +53,7 @@ export function DevTestTab() {
         try {
             setResult(await window.hamboogie.devTestRun({title, body, act}));
         } catch (caught) {
-            setError(caught instanceof Error ? caught.message.replace(/^Error invoking remote method '\w+': (Error: )?/, "") : String(caught));
+            setError(errorMessage(caught));
         } finally {
             setRunning(false);
         }

@@ -6,7 +6,7 @@ import {LlmTab} from "./tabs/LlmTab";
 import {LogsTab} from "./tabs/LogsTab";
 import {HistoryTab} from "./tabs/HistoryTab";
 import {DevTestTab} from "./tabs/DevTestTab";
-import {stopAtText} from "./components/AutoStopCard";
+import {clockText} from "@shared/time";
 import iconUrl from "./assets/icon.svg";
 import {errorMessage} from "@shared/errors";
 
@@ -67,7 +67,7 @@ export function App() {
                 {state.offline && <span className="badge failure" title="디시 대신 가짜 글과 가짜 계정을 씁니다">오프라인 모드</span>}
                 <nav className="tabs">
                     {TABS.map((item) => (
-                        <button key={item.id} className={tab === item.id ? "tab active" : "tab"} onClick={() => setTab(item.id)}>
+                        <button key={item.id} className={tab === item.id ? "tab active" : "tab"} aria-current={tab === item.id ? "page" : undefined} onClick={() => setTab(item.id)}>
                             {item.label}
                         </button>
                     ))}
@@ -75,7 +75,7 @@ export function App() {
                 <div className="header-actions">
                     <span className={state.running ? "badge running" : "badge"}>
                         {state.running ? `감시 중 · 갤러리 ${state.watching}개` : "멈춤"}
-                        {state.running && state.autoStopAt !== null && ` · ${stopAtText(state.autoStopAt)} 자동 중지`}
+                        {state.running && state.autoStopAt !== null && ` · ${clockText(state.autoStopAt)} 자동 중지`}
                     </span>
                     {state.running
                         ? <button className="button" onClick={() => run(() => window.hamboogie.stop(), true)}>감시 멈추기</button>
@@ -99,16 +99,13 @@ export function App() {
                     <a className="button primary small" href={state.update.url} target="_blank" rel="noreferrer">다운로드 페이지 열기</a>
                 </div>
             )}
-            {error && <div className="banner error">{error}</div>}
+            {error && <div className="banner error" role="alert">{error}</div>}
             {dirty && !["history", "logs", "devTest"].includes(tab) && (
                 <div className="banner unsaved">
                     저장하지 않은 변경 사항이 있습니다.
                     <button className="button primary small" onClick={save}>설정 저장</button>
                     <button className="button small" onClick={() => setDraft(state.settings)}>되돌리기</button>
                 </div>
-            )}
-            {state.running && dirty && (
-                <div className="banner info">감시 중에 갤러리를 추가하거나 켜고 끈 경우, 저장한 뒤 감시를 다시 시작해야 반영됩니다.</div>
             )}
 
             <main className="content">

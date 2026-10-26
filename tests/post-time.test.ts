@@ -1,9 +1,10 @@
 import {describe, expect, it} from "vitest";
 import {buildBatchMessage, buildUserMessage} from "../src/main/llm/decision";
-import {estimatePostedAt, formatKst, postedAtRange} from "../src/main/pipeline/post-time";
+import {formatKst, postedAtRange} from "../src/main/pipeline/post-time";
 
 /** 한국 시간 2026-10-25 hh:mm:ss */
 const kst = (hours: number, minutes = 0, seconds = 0, day = 25) => Date.UTC(2026, 9, day, hours - 9, minutes, seconds);
+const estimatePostedAt = (raw: (string | undefined)[], detectedAt: number) => postedAtRange(raw, detectedAt).latest;
 
 describe("글을 올린 시각 추정", () => {
     it("초까지 있는 날짜 시각은 그대로 쓴다", () => {

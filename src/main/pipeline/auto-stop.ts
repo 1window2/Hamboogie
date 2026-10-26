@@ -40,9 +40,3 @@ export class AutoStopTimer {
     }
 }
 
-/** 로그에 남길 시각입니다. 오늘이 아니면 "내일"을 붙입니다. */
-export function clockText(at: number, now: number): string {
-    const date = new Date(at);
-    const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-    return date.toDateString() === new Date(now).toDateString() ? time : `내일 ${time}`;
-}

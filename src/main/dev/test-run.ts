@@ -217,6 +217,20 @@ export function registerDevTestIpc(deps: Deps, handle: TrustedHandle): void {
         return {elapsedMs: Date.now() - startedAt, decisions};
     });
     handle("devApiCheck", () => apiCheck(deps));
+    // 컴퓨터가 `minutes`분 동안 잠들었다 깨어난 것처럼 엔진에 알립니다. offline이면 깨어난 뒤 네트워크가 없는 것으로 칩니다.
+    handle("devSimulateSleep", async (_event, minutes: number, offline: boolean) => {
+        const engine = deps.engine as unknown as {deps: {checkNetwork?: () => Promise<boolean>}};
+        const real = engine.deps.checkNetwork;
+        if (offline) engine.deps.checkNetwork = async () => false;
+        deps.engine.suspend(Date.now() - minutes * 60 * 1000);
+        const startedAt = Date.now();
+        try {
+            await deps.engine.resume();
+        } finally {
+            engine.deps.checkNetwork = real;
+        }
+        return {running: deps.engine.running, waitedSec: Math.round((Date.now() - startedAt) / 1000)};
+    });
     // 지정한 계정에 무료 디시콘 패키지를 추가합니다(기본 디시콘 테스트용). 가격(만두)이 0일 때만 추가하고, 아니면 가격만 알려 줍니다.
     handle("devAddFreeDccon", async (_event, loginId: string, packageIdx: number) => {
         const settings = deps.settings();

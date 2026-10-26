@@ -1,5 +1,6 @@
 import {AUTO_STOP_MAX_MINUTES} from "@shared/settings";
 import type {AutoStop} from "@shared/types";
+import {clockText} from "@shared/time";
 import {NumberInput} from "./NumberInput";
 
 interface Props {
@@ -44,14 +45,7 @@ export function AutoStopCard({autoStop, onChange, stopAt}: Props) {
                 </small>
             )}
             {autoStop.mode === "at" && <small className="muted">이 컴퓨터 시간 기준입니다. 이미 지난 시각이면 다음 날 그 시각에 멈춥니다.</small>}
-            {stopAt !== null && <small className="muted">지금 감시는 {stopAtText(stopAt)}에 멈춥니다.</small>}
+            {stopAt !== null && <small className="muted">지금 감시는 {clockText(stopAt)}에 멈춥니다.</small>}
         </section>
     );
-}
-
-/** 오늘이면 시각만, 아니면 "내일"을 붙여 씁니다. */
-export function stopAtText(stopAt: number): string {
-    const date = new Date(stopAt);
-    const time = date.toLocaleTimeString("ko-KR", {hour: "2-digit", minute: "2-digit", hour12: false});
-    return date.toDateString() === new Date().toDateString() ? time : `내일 ${time}`;
 }

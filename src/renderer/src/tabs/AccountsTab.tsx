@@ -120,7 +120,7 @@ function AccountCard({account, view, onChange, run, onRemove, saved}: {
                 </span>
                 {status.state === "otp_required" && (
                     <>
-                        <input className="otp-input" value={otp} inputMode="numeric" maxLength={6} placeholder="OTP 6자리" autoFocus
+                        <input className="otp-input" aria-label="OTP 6자리" value={otp} inputMode="numeric" maxLength={6} placeholder="OTP 6자리" autoFocus
                                onChange={(event) => setOtp(event.target.value.replace(/\D/g, ""))}
                                onKeyDown={(event) => isCommitEnter(event) && submitOtp()}/>
                         <button className="button primary small" disabled={!otpValid} onClick={submitOtp}>OTP 확인</button>

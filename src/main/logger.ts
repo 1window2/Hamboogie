@@ -10,6 +10,8 @@ const MAX_FILE_BYTES = 5 * 1024 * 1024;
 export class Logger {
     private readonly entries: LogEntry[] = [];
     private readonly listeners = new Set<(entry: LogEntry) => void>();
+    /** 파일 쓰기 순서입니다. 줄마다 따로 쓰면 거의 동시에 남긴 줄의 순서가 뒤바뀌므로, 앞 줄을 다 쓴 뒤에 씁니다. */
+    private writing: Promise<void> = Promise.resolve();
 
     constructor(private readonly filePath: string) {
         try {
@@ -25,7 +27,8 @@ export class Logger {
         if (this.entries.length > MAX_ENTRIES) this.entries.splice(0, this.entries.length - MAX_ENTRIES);
         for (const listener of this.listeners) listener(entry);
         const where = context.galleryId ? ` [${context.galleryId}${context.postNo ? `#${context.postNo}` : ""}]` : "";
-        void appendFile(this.filePath, `${new Date(entry.time).toISOString()} ${level.toUpperCase()}${where} ${message}\n`).catch(() => {});
+        const line = `${new Date(entry.time).toISOString()} ${level.toUpperCase()}${where} ${message}\n`;
+        this.writing = this.writing.then(() => appendFile(this.filePath, line)).catch(() => {});
     }
 
     info(message: string, context?: {galleryId?: string; postNo?: number}): void {
@@ -42,6 +45,11 @@ export class Logger {
 
     error(message: string, context?: {galleryId?: string; postNo?: number}): void {
         this.log("error", message, context);
+    }
+
+    /** 남긴 로그가 파일에 다 쓰일 때까지 기다립니다. */
+    flush(): Promise<void> {
+        return this.writing;
     }
 
     recent(): LogEntry[] {

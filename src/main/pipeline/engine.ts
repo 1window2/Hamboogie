@@ -11,9 +11,10 @@ import {LlmGate} from "../llm/gate";
 import type {LlmProvider, PostInput} from "../llm/providers";
 import type {LlmUsage} from "../llm/usage";
 import type {Logger} from "../logger";
-import {sendDiscordNotice} from "../notify/discord";
+import {sendDiscordNotice, type DiscordNotice} from "../notify/discord";
 import type {Ledger, SecretStore} from "../store";
-import {AutoStopTimer, clockText} from "./auto-stop";
+import {AutoStopTimer} from "./auto-stop";
+import {clockText, postUrl} from "@shared/time";
 import {findKeyword, matchesKeywords} from "./keyword-filter";
 import {postedAtRange} from "./post-time";
 import {eligible, END_MARGIN_MS, makePlan, type Plan} from "./planner";
@@ -28,6 +29,18 @@ const MAX_BATCH_POSTS = 40;
 const BODY_READ_GAP_MS = 500;
 /** 올라온 지 이보다 오래된 글에는 자동으로 줄 서지 않습니다. 오래 쉬었다가 다시 확인할 때 지난 나눔에 줄 서지 않기 위해서입니다. */
 const STALE_POST_MS = 60 * 60 * 1000;
+/** 판단 실패를 알릴 때 한 알림에 적는 글 수입니다. */
+const FAILED_ALERT_MAX_POSTS = 10;
+/** 같은 갤러리의 앞선 확인이 끝나지 않았을 때 다시 볼 때까지 기다리는 시간입니다. */
+const CHECK_BUSY_RETRY_MS = 2000;
+/** 깨어난 뒤 네트워크가 다시 붙기를 처음 기다리는 시간입니다. */
+const WAKE_SETTLE_MS = 10 * 1000;
+/** 깨어난 뒤 이 시간 안에 네트워크가 붙지 않으면 감시를 멈춥니다. */
+const WAKE_NETWORK_LIMIT_MS = 60 * 1000;
+/** 네트워크가 붙었는지 다시 확인하는 간격입니다. */
+const WAKE_NETWORK_RETRY_MS = 5 * 1000;
+/** 이보다 오래 잠들었으면 그사이 글은 버리고 기준 글을 새로 잡습니다. */
+const LONG_SLEEP_MS = 5 * 60 * 1000;
 /** 일시적인 오류로 자동 재로그인을 기다리는 동안 "로그인 필요"를 알리지 않고 기다리는 시간입니다. */
 const LOGIN_RECOVERY_QUIET_MS = 10 * 60 * 1000;
 /** 목록 확인이 연달아 실패할 때 다음 확인까지 기다리는 최대 시간입니다. */
@@ -102,6 +115,12 @@ export interface EngineDeps {
     recordJudgment?(record: JudgmentRecord): void;
     /** 테스트에서 시각을 바꿀 수 있게 합니다. */
     now?(): number;
+    /** 인터넷에 실제로 연결돼 있는지 확인합니다. 잠자기에서 깨어난 뒤 확인을 이어가도 되는지 볼 때 씁니다. */
+    checkNetwork?(): Promise<boolean>;
+    /** 컴퓨터 알림을 띄웁니다. 네트워크가 없어 Discord로 알릴 수 없을 때 씁니다. */
+    desktopNotice?(title: string, body: string): void;
+    /** 테스트에서 기다리는 시간을 줄일 수 있게 합니다. */
+    sleep?(ms: number): Promise<void>;
 }
 
 /** LLM에 보낸 내용과 판단 원문 기록입니다. */
@@ -148,11 +167,6 @@ interface Live {
     epoch: number;
 }
 
-function postUrl(galleryId: string, postNo: number): string {
-    return `https://m.dcinside.com/board/${galleryId}/${postNo}`;
-}
-
-
 /** 갤러리 감시, 글 분석, 줄 서기를 실행합니다. */
 export class Engine {
     private readonly watchers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -181,6 +195,11 @@ export class Engine {
     private readonly notLoggedInWarned = new Set<string>();
     /** 갤러리 설정 항목 id별로 목록 확인이 연달아 실패한 횟수입니다. 실패가 이어지면 다음 확인을 늦춥니다. */
     private readonly listFailures = new Map<string, number>();
+    /** 갤러리별 마지막 예약 순번입니다. 이 순번의 예약만 확인을 실행하고 다음 확인을 예약합니다. */
+    private readonly turns = new Map<string, number>();
+    private turnCounter = 0;
+    /** 지금 확인 중인 갤러리입니다. 같은 갤러리 확인이 겹치지 않게 합니다. */
+    private readonly checking = new Set<string>();
     /** app_id 거절로 확인을 쉰다고 이미 로그에 남겼는지입니다. */
     private appIdPauseLogged = false;
     /**
@@ -195,6 +214,14 @@ export class Engine {
     /** 설정한 시각에 감시를 멈추는 타이머입니다. */
     private readonly autoStop: AutoStopTimer;
     private readonly now: () => number;
+    /**
+     * 컴퓨터가 잠들어 있거나, 깨어나서 네트워크를 기다리는 중입니다. 이동안에는 확인을 멈추고 디시·LLM에 요청하지 않습니다.
+     * `since`는 잠든 시각, `awake`는 확인을 이어가도 될 때(또는 감시를 멈췄을 때) 풀리는 약속입니다.
+     */
+    /** 잠든 상태입니다. `wakes`는 깨어남·다시 잠듦마다 늘어나 이전의 기다림을 그만두게 하고, `resuming`은 지금 깨어나는 중인지입니다. */
+    private asleep: {since: number; awake: Promise<void>; release: () => void; wakes: number; resuming: boolean} | null = null;
+    /** 마지막으로 잠들었던 구간입니다. 그 구간에 걸친 LLM 판단이 실패하면 알리지 않습니다. */
+    private lastSleep: {from: number; to: number} | null = null;
 
     constructor(private readonly deps: EngineDeps) {
         this.llm = new LlmGate(deps, (message) => this.alert("LLM 요청 한도 소진", message));
@@ -249,6 +276,77 @@ export class Engine {
         this.refreshAutoStop(true);
     }
 
+    /** 컴퓨터가 잠들 때 부릅니다. 깨어날 때까지 확인을 멈춥니다(반쯤 깨어난 짧은 순간에도 요청하지 않습니다). */
+    suspend(at = this.now()): void {
+        if (!this.running) return;
+        // 깨어나 네트워크를 기다리는 중에 다시 잠들었으면, 기다리던 것을 그만두게 하고 처음 잠든 때부터 이어서 셉니다.
+        if (this.asleep) {
+            this.asleep.wakes++;
+            this.asleep.resuming = false;
+            return;
+        }
+        let release = () => {};
+        const awake = new Promise<void>((resolve) => (release = resolve));
+        this.asleep = {since: at, awake, release, wakes: 0, resuming: false};
+        this.deps.logger.info("컴퓨터가 잠들어 감시를 멈춥니다. 깨어나면 네트워크를 확인하고 이어갑니다.");
+    }
+
+    /**
+     * 컴퓨터가 깨어날 때 부릅니다. 10초 기다린 뒤 네트워크가 실제로 붙었는지 보고, 붙었으면 확인을 이어갑니다.
+     * 5분 넘게 잠들었으면 그사이 글은 버리고 기준 글을 새로 잡습니다. 1분이 지나도 네트워크가 없으면 감시를 멈추고 알립니다.
+     */
+    async resume(): Promise<void> {
+        const sleeping = this.asleep;
+        // 같은 깨어남에 대해 여러 번 불리면(깨어남, 화면 잠금 해제 등) 먼저 불린 것만 이어갑니다.
+        if (!sleeping || sleeping.resuming) return;
+        sleeping.resuming = true;
+        const wake = ++sleeping.wakes;
+        const wokeAt = this.now();
+        const slept = wokeAt - sleeping.since;
+        this.lastSleep = {from: sleeping.since, to: wokeAt};
+        const {logger} = this.deps;
+        const wait = this.deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+        logger.info(`컴퓨터가 깨어났습니다(${Math.round(slept / 60000)}분 잠듦). 네트워크가 붙기를 기다립니다.`);
+        await wait(WAKE_SETTLE_MS);
+        let online = false;
+        const current = () => this.asleep === sleeping && sleeping.wakes === wake;
+        while (current()) {
+            online = await (this.deps.checkNetwork?.() ?? Promise.resolve(true)).catch(() => false);
+            if (online || this.now() - wokeAt >= WAKE_NETWORK_LIMIT_MS) break;
+            await wait(WAKE_NETWORK_RETRY_MS);
+        }
+        // 기다리는 사이 사용자가 감시를 멈췄거나, 다시 잠들었거나, 다른 깨어남이 이어받았으면 할 일이 없습니다.
+        if (!current()) return;
+        if (!online) {
+            const message = "컴퓨터가 깨어난 뒤 1분이 지나도 인터넷에 연결되지 않아 감시를 멈췄습니다. 네트워크를 확인하고 감시를 다시 시작하세요.";
+            logger.warn(message);
+            this.deps.desktopNotice?.("Hamboogie 감시 중지", message);
+            this.stop();
+            this.deps.onStateChanged?.();
+            return;
+        }
+        if (slept > LONG_SLEEP_MS) {
+            // 잠든 사이 올라온 글은 버립니다. 다음 확인에서 지금의 최신 글을 기준으로 다시 잡습니다.
+            this.lastSeen.clear();
+            logger.info(`${Math.round(slept / 60000)}분 동안 잠들어 있었으므로 그사이 글은 건너뛰고 기준 글을 새로 잡습니다.`);
+        }
+        logger.info("네트워크가 연결되어 감시를 이어갑니다.");
+        this.asleep = null;
+        sleeping.release();
+        for (const configId of this.watchers.keys()) this.schedule(configId, this.runId, 0);
+    }
+
+    /** 이 시각이 5분 넘게 잠들어 있던 사이였는지입니다. */
+    private inLongSleep(at: number): boolean {
+        const sleep = this.lastSleep;
+        return sleep !== null && sleep.to - sleep.from > LONG_SLEEP_MS && at >= sleep.from && at <= sleep.to;
+    }
+
+    /** 이 시각에 시작한 일이 잠자기 구간에 걸쳐 있었는지입니다. */
+    private sleptSince(startedAt: number): boolean {
+        return this.asleep !== null || (this.lastSleep !== null && startedAt <= this.lastSleep.to);
+    }
+
     /** 자동으로 멈출 시각(ms)입니다. 감시 중이 아니거나 자동 중지가 꺼져 있으면 null입니다. */
     get autoStopAt(): number | null {
         return this.autoStop.at;
@@ -280,6 +378,10 @@ export class Engine {
     /** 감시를 멈추고 예약해 둔 줄 서기도 취소합니다. 분석 중이던 글에도 댓글을 달지 않습니다. */
     stop(): void {
         const wasRunning = this.watchers.size > 0;
+        // 잠자기에서 깨어나 네트워크를 기다리던 중이면 기다림을 끝냅니다.
+        const sleeping = this.asleep;
+        this.asleep = null;
+        sleeping?.release();
         this.haltWatchers(true);
         this.epoch++;
         for (const [timer, pending] of this.scheduled) {
@@ -288,9 +390,49 @@ export class Engine {
             this.record(pending.gallery, pending.post, "failure", "감시를 멈춰 예약된 줄 서기를 취소함", pending.test);
         }
         this.scheduled.clear();
+        this.listFailures.clear();
         this.startedAt = null;
         this.autoStop.clear();
         if (wasRunning) this.deps.logger.info("감시를 멈췄습니다.");
+    }
+
+    /**
+     * 갤러리 하나의 감시를 뺍니다(갤러리를 끄거나 지운 경우). 마지막 갤러리였으면 감시가 끝난 것이므로 자동 중지를 풀고
+     * 화면·트레이·잠자기 방지가 "멈춤"을 따르도록 알립니다.
+     */
+    private dropWatcher(configId: string): void {
+        const timer = this.watchers.get(configId);
+        if (timer) clearTimeout(timer);
+        this.watchers.delete(configId);
+        this.turns.delete(configId);
+        this.statuses.delete(configId);
+        if (this.watchers.size === 0) {
+            this.startedAt = null;
+            this.autoStop.clear();
+            this.deps.logger.info("감시하는 갤러리가 없어 감시를 멈췄습니다.");
+        }
+        this.deps.onStateChanged?.();
+    }
+
+    /**
+     * 감시 중에 저장한 갤러리 설정을 반영합니다. 새로 켜거나 추가한 갤러리는 바로 감시를 시작하고, 끄거나 지운 갤러리는 뺍니다.
+     * 이미 감시 중인 갤러리는 그대로 두어(기준 글, 예약된 줄 서기 유지) 다시 시작할 필요가 없습니다.
+     */
+    syncGalleries(): void {
+        if (!this.running) return;
+        const galleries = this.deps.settings().galleries;
+        for (const configId of [...this.watchers.keys()]) {
+            const gallery = galleries.find((item) => item.id === configId);
+            const problems = gallery?.enabled ? galleryProblems(gallery) : [];
+            if (problems.length > 0) this.deps.logger.warn(`감시를 멈춤: ${problems.join(" ")}`, {galleryId: gallery!.galleryId || "(이름 없음)"});
+            if (!gallery || !gallery.enabled || problems.length > 0) this.dropWatcher(configId);
+        }
+        for (const gallery of galleries) {
+            if (!gallery.enabled || this.watchers.has(gallery.id) || galleryProblems(gallery).length > 0) continue;
+            this.deps.logger.info("감시에 추가했습니다.", {galleryId: gallery.galleryId});
+            this.schedule(gallery.id, this.runId, 0);
+        }
+        this.deps.onStateChanged?.();
     }
 
     /** @param forget 기준 글까지 잊습니다. 사용자가 감시를 멈출 때만 씁니다. */
@@ -298,6 +440,7 @@ export class Engine {
         this.runId++;
         for (const timer of this.watchers.values()) clearTimeout(timer);
         this.watchers.clear();
+        this.turns.clear();
         this.statuses.clear();
         if (forget) this.lastSeen.clear();
     }
@@ -325,8 +468,16 @@ export class Engine {
         }
     }
 
+    /**
+     * 갤러리 확인을 예약합니다. 갤러리마다 예약은 하나뿐입니다. 앞선 예약을 지우고 새 순번을 매겨, 잠자기 전에 걸어 둔 타이머나
+     * 그때 진행 중이던 확인이 끝나며 다음 확인을 또 예약해 확인이 겹치는 일을 막습니다.
+     */
     private schedule(configId: string, runId: number, delayMs: number): void {
-        const timer = setTimeout(() => void this.tick(configId, runId), delayMs);
+        const previous = this.watchers.get(configId);
+        if (previous) clearTimeout(previous);
+        const turn = ++this.turnCounter;
+        this.turns.set(configId, turn);
+        const timer = setTimeout(() => void this.tick(configId, runId, turn), delayMs);
         this.watchers.set(configId, timer);
     }
 
@@ -334,20 +485,29 @@ export class Engine {
         return this.deps.settings().galleries.find((item) => item.id === configId);
     }
 
-    private async tick(configId: string, runId: number): Promise<void> {
+    /** @param turn 예약 순번입니다. 이 갤러리의 마지막 예약이 아니면(지워진 예약) 아무것도 하지 않습니다. */
+    private async tick(configId: string, runId: number, turn?: number): Promise<void> {
+        if (turn !== undefined && this.turns.get(configId) !== turn) return;
         const gallery = this.gallery(configId);
         if (!gallery || !gallery.enabled || runId !== this.runId) {
-            if (runId === this.runId) this.watchers.delete(configId);
+            if (runId === this.runId) this.dropWatcher(configId);
+            return;
+        }
+        // 잠들어 있거나 깨어나서 네트워크를 기다리는 중이면 확인하지 않습니다. 깨어나 네트워크가 붙으면 다시 예약합니다.
+        if (this.asleep) return;
+        // 이 갤러리의 앞선 확인이 아직 끝나지 않았으면(잠들기 전에 시작한 확인 등) 겹치지 않게 잠시 뒤에 다시 봅니다.
+        if (this.checking.has(configId)) {
+            this.schedule(configId, runId, CHECK_BUSY_RETRY_MS);
             return;
         }
         // 감시 중에 갤러리 ID를 바꿨는데 아직 확인하지 않았으면 그 갤러리 감시를 멈춥니다.
         const problems = galleryProblems(gallery);
         if (problems.length > 0) {
             this.deps.logger.warn(`감시를 멈춤: ${problems.join(" ")}`, {galleryId: gallery.galleryId || "(이름 없음)"});
-            this.watchers.delete(configId);
-            this.deps.onStateChanged?.();
+            this.dropWatcher(configId);
             return;
         }
+        this.checking.add(configId);
         let delayMs: number | null = null;
         try {
             if (await this.deps.accounts.maintain(this.deps.settings().accounts)) this.deps.onStateChanged?.();
@@ -384,8 +544,12 @@ export class Engine {
                 delayMs = await this.backOff(configId, gallery);
             }
         } finally {
-            // 설정이 바뀌었을 수 있으니 다음 간격은 최신 설정에서 읽습니다.
-            if (runId === this.runId) this.schedule(configId, runId, delayMs ?? (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
+            this.checking.delete(configId);
+            // 설정이 바뀌었을 수 있으니 다음 간격은 최신 설정에서 읽습니다. 그사이 새로 예약됐으면(깨어남 등) 그 예약을 따릅니다.
+            const latest = turn === undefined || this.turns.get(configId) === turn;
+            if (runId === this.runId && latest && !this.asleep) {
+                this.schedule(configId, runId, delayMs ?? (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
+            }
         }
     }
 
@@ -572,9 +736,9 @@ export class Engine {
 
     /** 이 계정이 로그인하는 중이거나, 일시적인 오류로 자동 재로그인을 기다린 지 얼마 안 됐는지입니다. */
     private recoveringLogin(accountId: string): boolean {
-        const status = this.deps.accounts.status?.(accountId);
-        if (status?.state === "logging_in") return true;
-        return status?.state === "error" && status.failingSince !== undefined && this.now() - status.failingSince < LOGIN_RECOVERY_QUIET_MS;
+        const status = this.deps.accounts.status(accountId);
+        if (status.state === "logging_in") return true;
+        return status.state === "error" && status.failingSince !== undefined && this.now() - status.failingSince < LOGIN_RECOVERY_QUIET_MS;
     }
 
     /** 로그인된 계정이 없어 감시를 쉰다고 한 번만 알립니다. */
@@ -603,9 +767,16 @@ export class Engine {
         const {logger} = this.deps;
         const context = {galleryId: gallery.galleryId};
         const failAll = async (group: Candidate[], reason: string) => {
-            // 키워드에 걸린 글만 알립니다. 모든 새 글을 알리면 알림이 넘칩니다.
-            for (const candidate of group) {
-                if (candidate.keyword) await this.dispatch(gallery, candidate.post, {kind: "notify", reason: `글 분석 실패: ${reason}`}, {live: {epoch}});
+            // 키워드에 걸린 글만 알립니다. 모든 새 글을 알리면 알림이 넘칩니다. 여러 글이면 알림 하나로 묶습니다.
+            if (epoch !== this.epoch) return;
+            const failed = group.filter((candidate) => candidate.keyword && this.deps.ledger.claim(gallery.galleryId, candidate.post.no));
+            for (const candidate of failed) logger.warn(`판단 불가, 알림 전송: 글 분석 실패: ${reason}`, {...context, postNo: candidate.post.no});
+            if (failed.length === 1) {
+                await this.notify(`판단이 필요한 글: ${failed[0]!.post.title}`, `글 분석 실패: ${reason}`, gallery.galleryId, failed[0]!.post.no);
+            } else if (failed.length > 1) {
+                const links = failed.slice(0, FAILED_ALERT_MAX_POSTS).map((candidate) => ({title: candidate.post.title || `#${candidate.post.no}`, url: postUrl(gallery.galleryId, candidate.post.no)}));
+                const more = failed.length > links.length ? `\n(아래 ${links.length}개 외 ${failed.length - links.length}개)` : "";
+                await this.alert(`판단이 필요한 글 ${failed.length}개 (${gallery.galleryId})`, `글 분석 실패: ${reason}${more}`, undefined, false, links);
             }
         };
         let provider: LlmProvider;
@@ -620,22 +791,44 @@ export class Engine {
             const group = candidates.slice(start, start + MAX_BATCH_POSTS);
             if (!this.llm.canUseToday()) {
                 logger.warn(`무료 등급 하루 LLM 요청 수를 다 써서 새 글 ${candidates.length - start}개는 판단하지 못했습니다.`, context);
+                await failAll(candidates.slice(start), "무료 등급 하루 LLM 요청 수를 다 씀");
                 return;
             }
-            const startedAt = Date.now();
+            let startedAt = this.now();
             let decisions: (Decision | null)[];
-            try {
+            const decide = async () => {
                 await this.llm.request(gallery.galleryId);
                 const posts = group.map(({post, title, body, postedAt}) => ({no: post.no, title, body, postedAt}));
-                decisions = group.length === 1 ? [await provider.decide(posts[0]!)] : await provider.decideMany(posts);
+                return group.length === 1 ? [await provider.decide(posts[0]!)] : await provider.decideMany(posts);
+            };
+            try {
+                decisions = await decide();
             } catch (error) {
-                logger.warn(`새 글 ${group.length}개를 판단하지 못했습니다: ${errorMessage(error)}`, context);
-                await failAll(group, errorMessage(error));
-                continue;
+                // 판단하는 사이 컴퓨터가 잠들었다 깨어나 실패한 것이면 알리지 않습니다. 짧게 잤으면 깨어나 네트워크가 붙은 뒤 한 번 더 판단하고,
+                // 오래 잤으면(기준 글을 새로 잡았으므로) 버립니다.
+                if (!this.sleptSince(startedAt)) {
+                    logger.warn(`새 글 ${group.length}개를 판단하지 못했습니다: ${errorMessage(error)}`, context);
+                    await failAll(group, errorMessage(error));
+                    continue;
+                }
+                await this.asleep?.awake;
+                const sleep = this.lastSleep;
+                if (epoch !== this.epoch || !sleep || sleep.to - sleep.from > LONG_SLEEP_MS) {
+                    logger.info(`판단하는 사이 컴퓨터가 잠들어 새 글 ${group.length}개는 건너뜁니다.`, context);
+                    continue;
+                }
+                try {
+                    startedAt = this.now();
+                    decisions = await decide();
+                } catch (retryError) {
+                    logger.warn(`잠자기에서 깨어난 뒤 다시 판단했지만 새 글 ${group.length}개를 판단하지 못했습니다: ${errorMessage(retryError)}`, context);
+                    await failAll(group, errorMessage(retryError));
+                    continue;
+                }
             }
             const found = group.filter((_, index) => decisions[index]?.is_giveaway).length;
             if (found > 0) this.recordJudgment(gallery, "batch", group, decisions);
-            logger.info(`새 글 ${group.length}개를 LLM 요청 한 번으로 판단: 나눔 ${found}개 (${((Date.now() - startedAt) / 1000).toFixed(1)}초)`, context);
+            logger.info(`새 글 ${group.length}개를 LLM 요청 한 번으로 판단: 나눔 ${found}개 (${((this.now() - startedAt) / 1000).toFixed(1)}초)`, context);
             for (const [index, candidate] of group.entries()) {
                 const decision = decisions[index] ?? null;
                 const postContext = {...context, postNo: candidate.post.no};
@@ -711,8 +904,10 @@ export class Engine {
     }
 
     private planFor(gallery: GalleryConfig, decision: Decision, candidate: {title: string; body: string; bodyRead?: boolean; detectedAt: number; postedAt?: number; postedSlackMs?: number}): Plan {
-        if (decision.is_giveaway && candidate.postedAt !== undefined && candidate.detectedAt - candidate.postedAt > STALE_POST_MS) {
-            return {kind: "skip", reason: `올라온 지 ${Math.round((candidate.detectedAt - candidate.postedAt) / 60000)}분 지난 글이라 자동으로 줄 서지 않음`};
+        // 감지한 때가 아니라 지금(판단이 끝난 때) 기준으로 봅니다. LLM 요청을 오래 기다린 글도 걸러집니다.
+        const age = candidate.postedAt === undefined ? 0 : this.now() - candidate.postedAt;
+        if (decision.is_giveaway && age > STALE_POST_MS) {
+            return {kind: "skip", reason: `올라온 지 ${Math.round(age / 60000)}분 지난 글이라 자동으로 줄 서지 않음`};
         }
         const settings = this.deps.settings();
         const accounts = this.deps.accounts.candidates(settings.accounts, gallery.accountIds);
@@ -866,6 +1061,10 @@ export class Engine {
             this.record(gallery, post, "failure", reason, test);
         };
 
+        // 예약해 둔 줄 서기가 잠든 사이 시각이 되었으면, 깨어나 네트워크가 붙은 뒤에 섭니다(감시를 멈췄으면 아래에서 취소됩니다).
+        // 5분 넘게 잠든 사이 시각이 지나 버렸으면 버립니다. 마감이 있으면 마감 전까지는 섭니다(마감은 아래에서 확인합니다).
+        if (live && this.asleep) await this.asleep.awake;
+        if (live && plan.deadline === undefined && this.inLongSleep(plan.notBefore)) return cancel("잠든 사이 줄 서기 시각이 지나 취소함");
         let attempts = plan.attempts;
         if (live) {
             const checked = this.revalidate(gallery, plan);
@@ -944,7 +1143,7 @@ export class Engine {
     }
 
     /** Discord로 알립니다. 글과 관련된 알림이면 글 링크를 붙입니다. */
-    async alert(title: string, description: string, post?: {galleryId: string; postNo: number}, success = false): Promise<void> {
+    async alert(title: string, description: string, post?: {galleryId: string; postNo: number}, success = false, links?: DiscordNotice["links"]): Promise<void> {
         const {logger} = this.deps;
         const webhookUrl = this.deps.settings().discordWebhookUrl;
         if (!webhookUrl) {
@@ -952,7 +1151,7 @@ export class Engine {
             return;
         }
         try {
-            await sendDiscordNotice(webhookUrl, {title, description, success, ...(post ? {url: postUrl(post.galleryId, post.postNo)} : {})});
+            await sendDiscordNotice(webhookUrl, {title, description, success, links, ...(post ? {url: postUrl(post.galleryId, post.postNo)} : {})});
         } catch (error) {
             logger.error(`Discord 알림 전송 실패: ${errorMessage(error)}`, post);
         }
