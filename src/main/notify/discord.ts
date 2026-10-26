@@ -1,3 +1,7 @@
+import {isDiscordWebhookUrl} from "@shared/text";
+
+export {isDiscordWebhookUrl};
+
 export interface DiscordNotice {
     title: string;
     description: string;
@@ -6,11 +10,6 @@ export interface DiscordNotice {
     success?: boolean;
 }
 
-const WEBHOOK_PATTERN = /^https:\/\/(?:ptb\.|canary\.)?(?:discord|discordapp)\.com\/api\/webhooks\//;
-
-export function isDiscordWebhookUrl(url: string): boolean {
-    return WEBHOOK_PATTERN.test(url);
-}
 
 /**
  * 글 제목이나 LLM 판단처럼 남이 쓴 내용이 링크나 서식으로 보이지 않게 마크다운 기호를 무력화합니다.

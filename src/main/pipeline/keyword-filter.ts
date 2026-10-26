@@ -1,5 +1,8 @@
+import {keywordKey} from "@shared/text";
+
+/** 글과 키워드를 같은 형태로 맞춥니다(자모 분리 한글·전각 문자 통일, 공백 제거, 소문자). */
 function compact(text: string): string {
-    return text.replace(/\s+/g, "").toLowerCase();
+    return keywordKey(text);
 }
 
 /** 글에 들어 있는 첫 번째 키워드를 돌려줍니다. 공백과 대소문자는 무시합니다. 없으면 null입니다. */

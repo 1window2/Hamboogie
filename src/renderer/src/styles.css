@@ -351,6 +351,8 @@ fieldset {
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    max-width: 100%;
+    overflow-wrap: anywhere;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 999px;

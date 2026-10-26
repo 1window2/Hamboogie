@@ -3,6 +3,7 @@ import {DEFAULT_MODELS, FREE_DAILY_LLM_REQUESTS, FREE_LLM_RPM, PROVIDER_LABELS, 
 import type {DraftSetter} from "../App";
 import {NumberInput} from "../components/NumberInput";
 import type {AppState, LlmProviderId, Settings} from "@shared/types";
+import {isDiscordWebhookUrl} from "@shared/text";
 
 interface Props {
     draft: Settings;
@@ -82,6 +83,9 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
                                onChange={(event) => setDraft({...draft, discordWebhookUrl: event.target.value})}/>
                         <button className="button small" onClick={() => setShowWebhook(!showWebhook)}>{showWebhook ? "가리기" : "보기"}</button>
                     </div>
+                    {draft.discordWebhookUrl.trim() && !isDiscordWebhookUrl(draft.discordWebhookUrl.trim()) && (
+                        <small className="error-text">Discord 웹훅 주소가 아닙니다. Discord 채널 설정 → 연동 → 웹후크에서 복사한 https://discord.com/api/webhooks/… 주소를 넣으세요.</small>
+                    )}
                 </label>
                 <div className="row">
                     <button className="button small" disabled={!webhookSaved || !draft.discordWebhookUrl}

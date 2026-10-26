@@ -1,5 +1,6 @@
-import {useState, type ReactNode} from "react";
-import {KEYWORD_MAX} from "@shared/settings";
+import {useRef, useState, type ReactNode} from "react";
+import {KEYWORD_MAX, normalizeKeywords} from "@shared/settings";
+import {keywordKey, splitKeywords} from "@shared/text";
 import {isCommitEnter} from "./keys";
 
 interface Props {
@@ -11,15 +12,30 @@ interface Props {
     notice?: ReactNode;
 }
 
-/** 키워드 칩 목록과 입력칸입니다. 쉼표나 줄바꿈으로 여러 개를 한 번에 넣을 수 있고 최대 30개까지입니다. */
+/**
+ * 키워드 칩 목록과 입력칸입니다. 쉼표나 줄바꿈으로 여러 개를 한 번에 넣을 수 있고 최대 30개까지입니다.
+ *
+ * 입력칸은 값을 화면 상태로 들고 있지 않고(uncontrolled) 입력칸 자체에 둡니다. 감시 중에는 상태가 자주 바뀌어 화면이 계속
+ * 다시 그려지는데, 값을 상태로 들고 있으면 한글을 조합하는 도중에 다시 그려질 때 입력칸 값이 조합 전 값으로 되돌려져
+ * 조합 중이던 글자가 사라집니다("싸단"을 치면 "싸ㄴ"만 남음). 입력칸 값을 건드리는 것은 추가 후 비울 때뿐입니다.
+ */
 export function KeywordEditor({label, keywords, onChange, placeholder, notice}: Props) {
-    const [input, setInput] = useState("");
+    const inputRef = useRef<HTMLInputElement>(null);
+    /** 입력칸에 아직 추가하지 않은 새 키워드가 있는지입니다. 공백·쉼표뿐이거나 이미 있는 키워드면 false입니다. */
+    const [pending, setPending] = useState(false);
     const full = keywords.length >= KEYWORD_MAX;
+    const existing = new Set(keywords.map(keywordKey));
+    const hasNew = (text: string) => splitKeywords(text).some((keyword) => !existing.has(keywordKey(keyword)));
 
     function add() {
-        const added = input.split(/[,\n]/).map((keyword) => keyword.trim()).filter(Boolean);
-        onChange([...new Set([...keywords, ...added])].slice(0, KEYWORD_MAX));
-        setInput("");
+        const element = inputRef.current;
+        if (!element) return;
+        const added = splitKeywords(element.value);
+        if (added.length === 0) return;
+        // 대소문자·공백·글자 형태만 다른 키워드는 이미 있는 것으로 봅니다.
+        onChange(normalizeKeywords([...keywords, ...added]));
+        element.value = "";
+        setPending(false);
     }
 
     return (
@@ -37,11 +53,12 @@ export function KeywordEditor({label, keywords, onChange, placeholder, notice}: 
                 </div>
             )}
             <div className="row">
-                <input aria-label={label} value={input} disabled={full} placeholder={full ? `최대 ${KEYWORD_MAX}개입니다` : placeholder}
-                       onChange={(event) => setInput(event.target.value)}
+                <input ref={inputRef} aria-label={label} defaultValue="" disabled={full} placeholder={full ? `최대 ${KEYWORD_MAX}개입니다` : placeholder}
+                       onInput={(event) => setPending(hasNew(event.currentTarget.value))}
                        onKeyDown={(event) => isCommitEnter(event) && add()}/>
-                <button className="button small" disabled={full || !input.trim()} onClick={add}>추가</button>
+                <button className="button small" disabled={full || !pending} onClick={add}>추가</button>
             </div>
+            {pending && <small className="muted">Enter나 "추가"를 눌러야 목록에 들어갑니다. 설정 저장만 누르면 입력칸의 글자는 저장되지 않습니다.</small>}
         </div>
     );
 }

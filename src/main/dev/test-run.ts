@@ -217,7 +217,7 @@ export function registerDevTestIpc(deps: Deps, handle: TrustedHandle): void {
         return {elapsedMs: Date.now() - startedAt, decisions};
     });
     handle("devApiCheck", () => apiCheck(deps));
-    // 테스트 계정에 무료 디시콘 패키지를 추가합니다. 가격(만두)이 0일 때만 추가하고, 아니면 가격만 알려 줍니다.
+    // 지정한 계정에 무료 디시콘 패키지를 추가합니다(기본 디시콘 테스트용). 가격(만두)이 0일 때만 추가하고, 아니면 가격만 알려 줍니다.
     handle("devAddFreeDccon", async (_event, loginId: string, packageIdx: number) => {
         const settings = deps.settings();
         const account = settings.accounts.find((item) => item.loginId === loginId);

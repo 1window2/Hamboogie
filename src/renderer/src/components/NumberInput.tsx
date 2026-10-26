@@ -1,5 +1,6 @@
 import {useEffect, useRef, useState} from "react";
 import {parseNonNegativeInt} from "./number-text";
+import {normalizeText} from "@shared/text";
 
 interface Props {
     value: number;
@@ -32,7 +33,10 @@ export function NumberInput({value, onChange, min, className}: Props) {
                    valueAtFocus.current = value;
                }}
                onChange={(event) => {
-                   const next = event.target.value.replace(/\D/g, "");
+                   // 전각 숫자(１０)는 일반 숫자로 바꾸고 공백은 지웁니다. 숫자가 아닌 글자가 섞이면("1.5", "-5", "10초") 받지 않습니다.
+                   // 숫자만 골라내면 "1.5"가 15처럼 엉뚱한 값이 되기 때문입니다.
+                   const next = normalizeText(event.target.value).replace(/\s+/g, "");
+                   if (!/^\d*$/.test(next)) return;
                    setText(next);
                    const parsed = commit(next);
                    if (parsed !== null) onChange(parsed);

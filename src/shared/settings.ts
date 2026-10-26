@@ -1,4 +1,5 @@
 import type {AccountConfig, AutoStop, DcconRef, GalleryConfig, LlmProviderId, Settings} from "./types";
+import {galleryIdFromInput, keywordKey, normalizeText} from "./text";
 
 export const INTERVAL_MIN_SEC = 10;
 export const INTERVAL_MAX_SEC = 60 * 60;
@@ -67,14 +68,18 @@ function clamp(value: number, min: number, max: number, fallback = min): number 
     return Math.min(max, Math.max(min, Math.round(value)));
 }
 
-/** 키워드를 다듬고 중복을 없앤 뒤 최대 개수로 자릅니다. */
+/**
+ * 키워드를 다듬고 중복을 없앤 뒤 최대 개수로 자릅니다. 글자 형태를 맞추고(자모 분리 한글, 전각 문자),
+ * 글과 맞춰 볼 때처럼 공백·대소문자만 다른 키워드("Pizza", "pizza", "피 자")는 처음 것만 남깁니다.
+ */
 export function normalizeKeywords(keywords: string[]): string[] {
     const seen = new Set<string>();
     const result: string[] = [];
     for (const raw of keywords) {
-        const keyword = raw.trim();
-        if (!keyword || seen.has(keyword)) continue;
-        seen.add(keyword);
+        const keyword = normalizeText(raw).trim();
+        const key = keywordKey(keyword);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
         result.push(keyword);
         if (result.length === KEYWORD_MAX) break;
     }
@@ -87,7 +92,7 @@ export function normalizeGallery(saved: GalleryConfig, accounts: AccountConfig[]
     const {screenUnmatched: _removed, ...gallery} = saved as GalleryConfig & {screenUnmatched?: boolean};
     return {
         ...gallery,
-        galleryId: gallery.galleryId.trim(),
+        galleryId: galleryIdFromInput(gallery.galleryId),
         intervalSec: clamp(gallery.intervalSec, INTERVAL_MIN_SEC, INTERVAL_MAX_SEC),
         delaySec: clamp(gallery.delaySec, 0, DELAY_MAX_SEC),
         category: gallery.category === "all" ? "all" : "food",
@@ -101,7 +106,6 @@ export function normalizeGallery(saved: GalleryConfig, accounts: AccountConfig[]
     };
 }
 
-/** 계정 ID는 앱이 만든 UUID입니다. 비밀 정보 키에 쓰이므로 다른 형식은 받지 않습니다. */
 /** 계정마다 정할 수 있는 기본 디시콘 수입니다. */
 export const DEFAULT_DCCONS_MAX = 20;
 
@@ -120,6 +124,7 @@ function normalizeDccons(dccons: DcconRef[] | undefined): DcconRef[] {
     }));
 }
 
+/** 계정 ID는 앱이 만든 UUID입니다. 비밀 정보 키에 쓰이므로 다른 형식은 받지 않습니다. */
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** 저장 전에 설정값을 허용 범위로 맞춥니다. */
@@ -195,10 +200,13 @@ export function nextAutoStopAt(autoStop: AutoStop, startedAt: number, now: numbe
     return at.getTime();
 }
 
+/** 디시 갤러리 ID 형식입니다(영문, 숫자, 밑줄). */
+export const GALLERY_ID_PATTERN = /^[A-Za-z0-9_$]+$/;
+
 /** 감시를 시작하기 전에 갤러리 설정의 문제를 찾습니다. */
 export function galleryProblems(gallery: GalleryConfig): string[] {
     const problems: string[] = [];
-    if (!/^[A-Za-z0-9_$]+$/.test(gallery.galleryId)) problems.push("갤러리 ID가 올바르지 않습니다.");
+    if (!GALLERY_ID_PATTERN.test(gallery.galleryId)) problems.push("갤러리 ID가 올바르지 않습니다.");
     else if (gallery.checkedId !== gallery.galleryId) problems.push("갤러리 탭에서 갤러리 ID를 확인해야 합니다.");
     if (gallery.accountIds.length === 0) problems.push("대기 계정을 하나 이상 지정해야 합니다.");
     return problems;

@@ -1,10 +1,11 @@
 import {useEffect, useState} from "react";
-import {BODY_READ_LIMIT_SAFE, estimatedWatchHours, FREE_DAILY_LLM_REQUESTS, INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
+import {BODY_READ_LIMIT_SAFE, estimatedWatchHours, GALLERY_ID_PATTERN, FREE_DAILY_LLM_REQUESTS, INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
 import type {AccountView, GalleryConfig, GalleryStatus, Settings} from "@shared/types";
 import type {DraftSetter} from "../App";
 import {NumberInput} from "../components/NumberInput";
 import {KeywordEditor} from "../components/KeywordEditor";
 import {AutoStopCard} from "../components/AutoStopCard";
+import {galleryIdFromInput} from "@shared/text";
 
 interface Props {
     draft: Settings;
@@ -72,10 +73,13 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
     const [checking, setChecking] = useState(false);
     const [checkError, setCheckError] = useState<string | null>(null);
     const checked = Boolean(gallery.galleryId) && gallery.checkedId === gallery.galleryId;
+    const validId = GALLERY_ID_PATTERN.test(gallery.galleryId.trim());
     useEffect(() => setCheckError(null), [gallery.galleryId]);
 
     async function check() {
         const id = gallery.galleryId.trim();
+        // 형식이 틀린 ID로는 디시에 요청하지 않습니다.
+        if (!GALLERY_ID_PATTERN.test(id)) return;
         setChecking(true);
         setCheckError(null);
         try {
@@ -113,9 +117,10 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
             <div className="card-head">
                 <label className="field inline">
                     <span>갤러리 ID</span>
-                    <input value={gallery.galleryId} placeholder="예: gf2" onChange={(event) => onChange({galleryId: event.target.value})}/>
+                    <input value={gallery.galleryId} placeholder="예: gf2 또는 갤러리 주소"
+                           onChange={(event) => onChange({galleryId: galleryIdFromInput(event.target.value)})}/>
                 </label>
-                <button className="button small" disabled={checking || !gallery.galleryId.trim() || checked} onClick={check}>
+                <button className="button small" disabled={checking || !validId || checked} onClick={check}>
                     {checking ? "확인 중…" : "확인"}
                 </button>
 
@@ -131,7 +136,8 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
             {checked
                 ? <small className="ok-text check-status">✓ {gallery.title}{gallery.isMinor ? " (마이너 갤러리)" : ""}</small>
                 : checkError ? <small className="error-text check-status">{checkError}</small>
-                    : gallery.galleryId.trim() && <small className="error-text check-status">갤러리 ID를 확인해야 감시할 수 있습니다.</small>}
+                    : !validId && gallery.galleryId.trim() ? <small className="error-text check-status">갤러리 ID는 영문, 숫자, 밑줄(_)만 쓸 수 있습니다. 갤러리 주소를 붙여넣어도 됩니다.</small>
+                        : gallery.galleryId.trim() && <small className="error-text check-status">갤러리 ID를 확인해야 감시할 수 있습니다.</small>}
             {status && (
                 <small className="muted check-status">
                     마지막 확인 {formatClock(status.lastCheckedAt)} · 새 글 {status.newPosts}개 · 나눔 판단 {status.matched}개
