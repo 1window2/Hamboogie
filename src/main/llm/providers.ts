@@ -13,6 +13,19 @@ import {
 } from "./decision";
 import {errorMessage} from "@shared/errors";
 
+/** LLM에 함께 보낼 사진입니다. `data`는 base64입니다. */
+export interface LlmImage {
+    mimeType: string;
+    data: string;
+}
+
+/** 요청 하나에 쓴 토큰 수입니다. `imageTokens`는 알려 주는 서비스(Gemini)만 채웁니다. */
+export interface TokenUsage {
+    inputTokens: number;
+    outputTokens: number;
+    imageTokens?: number;
+}
+
 export interface PostInput {
     title: string;
     body: string;
@@ -20,6 +33,8 @@ export interface PostInput {
     no?: number;
     /** 글을 올린 시각(ms)입니다. "30분까지"처럼 시가 빠진 시각을 실제 시각으로 바꾸는 기준입니다. */
     postedAt?: number;
+    /** 글에 올린 사진입니다. 글 하나를 판단할 때(`decide`)만 보냅니다. */
+    images?: LlmImage[];
 }
 
 export interface LlmProvider {
@@ -130,51 +145,66 @@ interface StructuredRequest<S extends z.ZodType> {
     name: string;
     system: string;
     user: string;
+    images?: LlmImage[];
 }
 
 /** 시스템 프롬프트와 사용자 메시지를 보내 스키마에 맞는 응답을 받습니다. */
 type Structured = <S extends z.ZodType>(request: StructuredRequest<S>) => Promise<z.infer<S>>;
 
-function claudeStructured(apiKey: string, model: string): Structured {
+type UsageReporter = ((usage: TokenUsage) => void) | undefined;
+
+function claudeStructured(apiKey: string, model: string, onUsage: UsageReporter): Structured {
     const sdk = lazy(async () => {
         const [{default: Anthropic}, {zodOutputFormat}] = await Promise.all([import("@anthropic-ai/sdk"), import("@anthropic-ai/sdk/helpers/zod")]);
         return {client: new Anthropic({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 1}), zodOutputFormat};
     });
-    return async ({schema, system, user}) => {
+    return async ({schema, system, user, images = []}) => {
         const {client, zodOutputFormat} = await sdk();
+        const content = [
+            {type: "text" as const, text: user},
+            ...images.map((image) => ({type: "image" as const, source: {type: "base64" as const, media_type: image.mimeType as "image/jpeg", data: image.data}}))
+        ];
         const response = await client.messages.parse({
             model,
             max_tokens: 8000,
             system,
-            messages: [{role: "user", content: user}],
+            messages: [{role: "user", content}],
             // 단순 분류라 깊게 생각할 필요가 없습니다.
             output_config: {effort: "low", format: zodOutputFormat(schema)}
         });
+        onUsage?.({inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens});
         if (response.stop_reason === "refusal") throw new LlmError("Claude가 이 글의 분석을 거절했습니다.");
         if (!response.parsed_output) throw new LlmError(`Claude 응답을 해석하지 못했습니다. (stop_reason: ${response.stop_reason})`);
         return response.parsed_output;
     };
 }
 
-function openaiStructured(apiKey: string, model: string): Structured {
+function openaiStructured(apiKey: string, model: string, onUsage: UsageReporter): Structured {
     const sdk = lazy(async () => {
         const [{default: OpenAI}, {zodTextFormat}] = await Promise.all([import("openai"), import("openai/helpers/zod")]);
         return {client: new OpenAI({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 1}), zodTextFormat};
     });
-    return async <S extends z.ZodType>({schema, name, system, user}: StructuredRequest<S>) => {
+    return async <S extends z.ZodType>({schema, name, system, user, images = []}: StructuredRequest<S>) => {
         const {client, zodTextFormat} = await sdk();
         const response = await client.responses.parse({
             model,
             instructions: system,
-            input: user,
+            input: images.length === 0 ? user : [{
+                role: "user",
+                content: [
+                    {type: "input_text", text: user},
+                    ...images.map((image) => ({type: "input_image" as const, image_url: `data:${image.mimeType};base64,${image.data}`, detail: "low" as const}))
+                ]
+            }],
             text: {format: zodTextFormat(schema, name)}
         });
+        if (response.usage) onUsage?.({inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens});
         if (!response.output_parsed) throw new LlmError("ChatGPT 응답을 해석하지 못했습니다.");
         return response.output_parsed as z.infer<S>;
     };
 }
 
-function geminiStructured(apiKey: string, model: string): Structured {
+function geminiStructured(apiKey: string, model: string, onUsage: UsageReporter): Structured {
     const sdk = lazy(async () => {
         const {GoogleGenAI, ThinkingLevel} = await import("@google/genai");
         return {client: new GoogleGenAI({apiKey, httpOptions: {timeout: LLM_TIMEOUT_MS}}), minimal: ThinkingLevel.MINIMAL};
@@ -183,12 +213,16 @@ function geminiStructured(apiKey: string, model: string): Structured {
     // 모델에 따라 MINIMAL을 지원하지 않으면 그 뒤로는 생각 설정 없이 보냅니다.
     let thinkingSupported = true;
 
-    return async ({schema, system, user}) => {
+    return async ({schema, system, user, images = []}) => {
         const {client, minimal} = await sdk();
         let thinkingConfig: {thinkingLevel: ThinkingLevel} | undefined = thinkingSupported ? {thinkingLevel: minimal} : undefined;
+        const contents = images.length === 0 ? user : [{
+            role: "user",
+            parts: [{text: user}, ...images.map((image) => ({inlineData: {mimeType: image.mimeType, data: image.data}}))]
+        }];
         const generate = () => client.models.generateContent({
             model,
-            contents: user,
+            contents,
             config: {
                 systemInstruction: system,
                 responseMimeType: "application/json",
@@ -213,6 +247,14 @@ function geminiStructured(apiKey: string, model: string): Structured {
                 throw error;
             }
         }
+        const usage = response.usageMetadata;
+        if (usage) {
+            onUsage?.({
+                inputTokens: usage.promptTokenCount ?? 0,
+                outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
+                imageTokens: usage.promptTokensDetails?.find((detail) => detail.modality === "IMAGE")?.tokenCount ?? 0
+            });
+        }
         const text = response.text;
         if (!text) throw new LlmError("Gemini 응답이 비어 있습니다.");
         const parsed = schema.safeParse(JSON.parse(text));
@@ -224,7 +266,10 @@ function geminiStructured(apiKey: string, model: string): Structured {
 /** 구조화 응답 하나로 판단과 묶음 판단을 만듭니다. */
 export function providerFrom(structured: Structured): LlmProvider {
     return {
-        decide: (post) => structured({schema: DecisionSchema, name: "decision", system: SYSTEM_PROMPT, user: buildUserMessage(post.title, post.body, post.postedAt)}),
+        decide: (post) => structured({
+            schema: DecisionSchema, name: "decision", system: SYSTEM_PROMPT,
+            user: buildUserMessage(post.title, post.body, post.postedAt, post.images?.length ?? 0), images: post.images
+        }),
         async decideMany(posts) {
             const result = await structured({schema: BatchDecisionSchema, name: "decisions", system: BATCH_SYSTEM_PROMPT, user: buildBatchMessage(posts)});
             const decisions: (Decision | null)[] = posts.map(() => null);
@@ -237,10 +282,11 @@ export function providerFrom(structured: Structured): LlmProvider {
     };
 }
 
-export function createProvider(provider: LlmProviderId, apiKey: string, model: string): LlmProvider {
-    const structured = provider === "claude" ? claudeStructured(apiKey, model)
-        : provider === "openai" ? openaiStructured(apiKey, model)
-            : geminiStructured(apiKey, model);
+/** @param onUsage 요청마다 쓴 토큰 수를 받습니다. */
+export function createProvider(provider: LlmProviderId, apiKey: string, model: string, onUsage?: (usage: TokenUsage) => void): LlmProvider {
+    const structured = provider === "claude" ? claudeStructured(apiKey, model, onUsage)
+        : provider === "openai" ? openaiStructured(apiKey, model, onUsage)
+            : geminiStructured(apiKey, model, onUsage);
     const label = PROVIDER_LABELS[provider];
     return providerFrom(async (request) => {
         try {

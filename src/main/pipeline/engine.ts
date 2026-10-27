@@ -6,9 +6,10 @@ import {isAppIdFailure, isCaptchaFailure, isDefiniteCommentFailure, isLoginExpir
 import type {AppIdBackoff} from "../dc/app-id-backoff";
 import {isOutdatedAppError, OUTDATED_APP_MESSAGE, OUTDATED_PAUSE_MS} from "../dc/app-version";
 import {htmlToText} from "../dc/text";
+import {postImageUrls} from "../dc/post-images";
 import {buildBatchMessage, buildUserMessage, type Decision} from "../llm/decision";
 import {LlmGate} from "../llm/gate";
-import type {LlmProvider, PostInput} from "../llm/providers";
+import type {LlmImage, LlmProvider, PostInput} from "../llm/providers";
 import type {LlmUsage} from "../llm/usage";
 import type {Logger} from "../logger";
 import {sendDiscordNotice, type DiscordNotice} from "../notify/discord";
@@ -81,6 +82,8 @@ interface Candidate {
     postedSlackMs: number;
     /** 본문에 나온 작성 시각 문자열입니다. */
     dateTime?: string;
+    /** 글에 올린 사진 주소입니다(앞에서부터 몇 장). 나눔으로 보인 글을 다시 판단할 때 사진까지 함께 봅니다. */
+    images: string[];
 }
 
 export interface EngineDeps {
@@ -113,6 +116,8 @@ export interface EngineDeps {
     usage?: LlmUsage;
     /** 나눔으로 판단된 글이 있는 묶음과 2차 확인에서 LLM에 보낸 내용과 판단 원문을 남깁니다(나중에 되짚기 위해). */
     recordJudgment?(record: JudgmentRecord): void;
+    /** 글에 올린 사진을 받아 LLM에 보낼 크기로 줄입니다. 없으면 사진 없이 판단합니다. */
+    postImages?(urls: string[]): Promise<LlmImage[]>;
     /** 테스트에서 시각을 바꿀 수 있게 합니다. */
     now?(): number;
     /** 인터넷에 실제로 연결돼 있는지 확인합니다. 잠자기에서 깨어난 뒤 확인을 이어가도 되는지 볼 때 씁니다. */
@@ -136,7 +141,7 @@ export interface JudgmentRecord {
     /** LLM에 보낸 사용자 메시지 원문입니다. */
     message: string;
     /** 글마다 감지한 시각, 추정한 작성 시각(ms), 디시가 준 작성 시각 문자열(없으면 null)도 함께 남깁니다. */
-    posts: {no: number; title: string; bodyRead: boolean; keyword: boolean; detectedAt: number; postedAt: number; dateTime: string | null}[];
+    posts: {no: number; title: string; bodyRead: boolean; keyword: boolean; detectedAt: number; postedAt: number; dateTime: string | null; images?: string[]}[];
     /** 글마다 LLM이 돌려준 판단입니다(posts와 같은 순서, 빠진 글은 null). */
     decisions: (Decision | null)[];
 }
@@ -681,7 +686,7 @@ export class Engine {
         }
         const detectedAt = Date.now();
         const listed = postedAtRange([post.dateTime], detectedAt);
-        const titleOnly: Candidate = {post, title: post.title, body: "", bodyRead: false, keyword: titleKeyword, detectedAt, postedAt: listed.latest, postedSlackMs: listed.latest - listed.earliest};
+        const titleOnly: Candidate = {post, title: post.title, body: "", bodyRead: false, keyword: titleKeyword, detectedAt, postedAt: listed.latest, postedSlackMs: listed.latest - listed.earliest, images: []};
         if (!read) return titleOnly;
         if (!this.deps.appId.canTry()) return "retry";
 
@@ -689,11 +694,13 @@ export class Engine {
         let title = post.title;
         let body: string;
         let dateTime: string | undefined;
+        let images: string[];
         try {
             const article = await this.read(gallery, (client) => client.articles.read(gallery.galleryId, post.no));
             title = article.view_info?.subject ?? post.title;
             dateTime = article.view_info?.date_time;
             body = htmlToText(article.view_main?.memo ?? "");
+            images = postImageUrls(article.view_main?.memo ?? "");
         } catch (error) {
             // 금방 지워진 글은 알릴 필요가 없습니다.
             if (/삭제했거나 존재하지 않는/.test(errorMessage(error))) return "done";
@@ -721,7 +728,7 @@ export class Engine {
         }
         const keyword = titleKeyword || (gallery.keywords.length > 0 && findKeyword(body, gallery.keywords) !== null);
         const posted = postedAtRange([dateTime, post.dateTime], detectedAt);
-        return {post, title, body, bodyRead: true, keyword, detectedAt, postedAt: posted.latest, postedSlackMs: posted.latest - posted.earliest, ...(dateTime ? {dateTime} : {})};
+        return {post, title, body, bodyRead: true, keyword, detectedAt, postedAt: posted.latest, postedSlackMs: posted.latest - posted.earliest, images, ...(dateTime ? {dateTime} : {})};
     }
 
     /** 무료 등급 하루 LLM 요청 수를 다 써서 감시를 쉰다고 한 번만 알립니다. */
@@ -844,7 +851,8 @@ export class Engine {
                 giveaways++;
                 logger.info(`나눔으로 판단: "${candidate.title}" (${describeDecision(decision)}) (근거: ${decision.reason})`, postContext);
                 let plan = this.planFor(gallery, decision, candidate);
-                if (plan.kind === "comment" && group.length > 1) plan = await this.confirm(gallery, provider, candidate);
+                // 묶어 판단했거나 사진이 있는 글은 그 글 하나로(사진까지 함께) 다시 판단합니다.
+                if (plan.kind === "comment" && (group.length > 1 || candidate.images.length > 0)) plan = await this.confirm(gallery, provider, candidate, group.length > 1 ? null : plan);
                 await this.dispatch(gallery, candidate.post, plan, {live: {epoch}});
             }
         }
@@ -856,28 +864,39 @@ export class Engine {
     }
 
     /**
-     * 묶음 판단에서 줄을 서라고 나온 글을 그 글 하나로 다시 물어 확인합니다. 지금 남은 요청 자리가 없으면
-     * 기다리지 않고(선착순을 놓치지 않게) 자동으로 서지 않고 알립니다.
+     * 줄을 서라고 나온 글을 그 글 하나로, 사진이 있으면 사진까지 함께 다시 물어 확인합니다(당첨자 안내 캡처 등은 사진을 봐야 압니다).
+     * 지금 남은 요청 자리가 없으면 기다리지 않고(선착순을 놓치지 않게), 묶음 판단 결과면 자동으로 서지 않고 알리며
+     * 글 하나로 판단한 결과(`fallback`)면 그대로 따릅니다. 사진을 받지 못하면 사진 없이 판단합니다.
      */
-    private async confirm(gallery: GalleryConfig, provider: LlmProvider, candidate: Candidate): Promise<Plan> {
+    private async confirm(gallery: GalleryConfig, provider: LlmProvider, candidate: Candidate, fallback: Plan | null): Promise<Plan> {
         if (!this.llm.hasSlotNow() || !this.llm.canUseToday()) {
-            return {kind: "notify", reason: "여러 글을 묶어 판단한 결과라 따로 확인해야 하는데 남은 LLM 요청이 없어 직접 확인이 필요함"};
+            return fallback ?? {kind: "notify", reason: "여러 글을 묶어 판단한 결과라 따로 확인해야 하는데 남은 LLM 요청이 없어 직접 확인이 필요함"};
         }
         try {
+            const images = candidate.images.length > 0 && this.deps.postImages ? await this.deps.postImages(candidate.images).catch(() => []) : [];
             await this.llm.request(gallery.galleryId);
-            const decision = await provider.decide({no: candidate.post.no, title: candidate.title, body: candidate.body, postedAt: candidate.postedAt});
-            this.recordJudgment(gallery, "confirm", [candidate], [decision]);
-            this.deps.logger.info(`2차 확인: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`,
+            const decision = await provider.decide({no: candidate.post.no, title: candidate.title, body: candidate.body, postedAt: candidate.postedAt, images});
+            this.recordJudgment(gallery, "confirm", [candidate], [decision], images.length);
+            const photos = images.length > 0 ? `, 사진 ${images.length}장` : "";
+            this.deps.logger.info(`2차 확인${photos}: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`,
                 {galleryId: gallery.galleryId, postNo: candidate.post.no});
             if (!decision.is_giveaway) return {kind: "skip", reason: "따로 다시 판단하니 나눔 글이 아님"};
             return this.planFor(gallery, decision, candidate);
         } catch (error) {
+            // 글 하나로 판단한 결과가 있으면(사진을 보려고 다시 물은 경우) 처음 판단대로 합니다.
+            if (fallback) {
+                this.deps.logger.warn(`사진까지 보고 다시 판단하지 못해 처음 판단대로 합니다: ${errorMessage(error)}`, {galleryId: gallery.galleryId, postNo: candidate.post.no});
+                return fallback;
+            }
             return {kind: "notify", reason: `묶음 판단 결과를 확인하지 못함: ${errorMessage(error)}`};
         }
     }
 
-    /** LLM에 보낸 내용(요청과 똑같이 만든 메시지)과 판단 원문을 남깁니다. */
-    private recordJudgment(gallery: GalleryConfig, kind: JudgmentRecord["kind"], group: Candidate[], decisions: (Decision | null)[]): void {
+    /**
+     * LLM에 보낸 내용(요청과 똑같이 만든 메시지)과 판단 원문을 남깁니다.
+     * @param imageCount 글 하나를 판단할 때 함께 보낸 사진 수입니다.
+     */
+    private recordJudgment(gallery: GalleryConfig, kind: JudgmentRecord["kind"], group: Candidate[], decisions: (Decision | null)[], imageCount = 0): void {
         if (!this.deps.recordJudgment) return;
         const {llm} = this.deps.settings();
         const posts = group.map(({post, title, body, postedAt}) => ({no: post.no, title, body, postedAt}));
@@ -888,11 +907,12 @@ export class Engine {
             kind,
             model: `${llm.provider}/${llm.models[llm.provider]}`,
             systemPrompt: single ? "SYSTEM_PROMPT" : "BATCH_SYSTEM_PROMPT",
-            message: single ? buildUserMessage(posts[0]!.title, posts[0]!.body, posts[0]!.postedAt) : buildBatchMessage(posts),
+            message: single ? buildUserMessage(posts[0]!.title, posts[0]!.body, posts[0]!.postedAt, imageCount) : buildBatchMessage(posts),
             // 디시가 준 작성 시각 문자열도 남겨 두어, 작성 시각을 제대로 읽었는지 나중에 확인할 수 있게 합니다.
             posts: group.map((candidate) => ({
                 no: candidate.post.no, title: candidate.title, bodyRead: candidate.bodyRead, keyword: candidate.keyword,
-                detectedAt: candidate.detectedAt, postedAt: candidate.postedAt, dateTime: candidate.dateTime ?? candidate.post.dateTime ?? null
+                detectedAt: candidate.detectedAt, postedAt: candidate.postedAt, dateTime: candidate.dateTime ?? candidate.post.dateTime ?? null,
+                ...(candidate.images.length > 0 ? {images: candidate.images} : {})
             })),
             decisions
         });

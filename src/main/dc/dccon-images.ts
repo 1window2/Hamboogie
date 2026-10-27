@@ -13,6 +13,7 @@ const MAX_BYTES = 2 * 1024 * 1024;
 /** 기억해 둘 이미지 수입니다. 넘으면 가장 먼저 받은 것부터 잊습니다. */
 const CACHE_MAX = 1000;
 
+/** 디시 이미지 서버의 https 주소인지입니다. 디시콘과 글에 올린 사진이 모두 여기 있습니다. */
 export function isDcconImageUrl(url: string): boolean {
     try {
         const parsed = new URL(url);
@@ -51,15 +52,35 @@ export class DcconImages {
     }
 
     private async fetchOne(url: string): Promise<string | null> {
-        try {
-            const response = await this.fetchImpl(url, {headers: {Referer: "https://gall.dcinside.com/"}, signal: AbortSignal.timeout(15000)});
-            const type = response.headers.get("content-type") ?? "";
-            if (!response.ok || !type.startsWith("image/")) return null;
-            const bytes = Buffer.from(await response.arrayBuffer());
-            if (bytes.length === 0 || bytes.length > MAX_BYTES) return null;
-            return `data:${type.split(";")[0]};base64,${bytes.toString("base64")}`;
-        } catch {
-            return null;
-        }
+        const image = await fetchDcImage(url, MAX_BYTES, this.fetchImpl);
+        return image && `data:${image.mimeType};base64,${image.bytes.toString("base64")}`;
     }
+}
+
+/**
+ * 디시 이미지 서버에서 이미지 하나를 받습니다. 디시 이미지 서버는 디시 페이지에서 온 요청만 이미지를 주므로 Referer를 붙입니다.
+ * 이미지가 아니거나, 비었거나, `maxBytes`보다 크거나, 받지 못하면 null입니다.
+ */
+export async function fetchDcImage(url: string, maxBytes: number, fetchImpl: typeof fetch = fetch, timeoutMs = 15_000): Promise<{mimeType: string; bytes: Buffer} | null> {
+    try {
+        const response = await fetchImpl(url, {headers: {Referer: "https://gall.dcinside.com/"}, signal: AbortSignal.timeout(timeoutMs)});
+        const type = (response.headers.get("content-type") ?? "").split(";")[0]!.trim();
+        // 글 사진은 형식 없이(application/octet-stream) 오기도 해서, 그때는 파일 앞부분으로 형식을 알아냅니다.
+        if (!response.ok || !(type.startsWith("image/") || type === "application/octet-stream")) return null;
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length === 0 || bytes.length > maxBytes) return null;
+        const mimeType = type.startsWith("image/") ? type : sniffImageType(bytes);
+        return mimeType ? {mimeType, bytes} : null;
+    } catch {
+        return null;
+    }
+}
+
+/** 파일 앞부분으로 이미지 형식을 알아냅니다. 이미지가 아니면 null입니다. */
+function sniffImageType(bytes: Buffer): string | null {
+    if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return "image/jpeg";
+    if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+    if (bytes.subarray(0, 4).toString("latin1") === "GIF8") return "image/gif";
+    if (bytes.subarray(0, 4).toString("latin1") === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+    return null;
 }

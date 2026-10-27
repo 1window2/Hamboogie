@@ -1,6 +1,6 @@
 import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
-import {app, BrowserWindow, dialog, ipcMain, net, Notification, powerMonitor, powerSaveBlocker, shell, type IpcMainInvokeEvent} from "electron";
+import {app, BrowserWindow, dialog, ipcMain, nativeImage, net, Notification, powerMonitor, powerSaveBlocker, shell, type IpcMainInvokeEvent} from "electron";
 import {PROVIDERS} from "@shared/settings";
 import type {AccountConfig, AppState, DcconPackage, SecretKey, Settings} from "@shared/types";
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
@@ -16,6 +16,7 @@ import {createTray} from "./tray";
 import {startUpdater, type Updater} from "./updater";
 import {errorMessage} from "@shared/errors";
 import {DcconImages} from "./dc/dccon-images";
+import {loadPostImages, type ShrinkImage} from "./dc/post-images";
 
 /** 앱 화면에서 온 IPC만 받는 등록 함수입니다. */
 export type TrustedHandle = (channel: string, listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown) => void;
@@ -40,6 +41,19 @@ function isAllowedExternalUrl(raw: string): boolean {
         return false;
     }
 }
+
+/** LLM에 보낼 사진의 긴 변(px)입니다. 캡처 속 글자는 읽히면서 토큰은 너무 많이 쓰지 않는 크기입니다. */
+const POST_IMAGE_EDGE = 1024;
+
+/** 사진을 긴 변 기준으로 줄여 JPEG로 바꿉니다. Electron이 읽지 못하는 형식(움직이는 GIF 등 일부)은 빠집니다. */
+const shrinkImage: ShrinkImage = (bytes) => {
+    const image = nativeImage.createFromBuffer(bytes);
+    if (image.isEmpty()) return null;
+    const {width, height} = image.getSize();
+    const scale = Math.min(1, POST_IMAGE_EDGE / Math.max(width, height));
+    const resized = scale < 1 ? image.resize({width: Math.round(width * scale), height: Math.round(height * scale), quality: "good"}) : image;
+    return {mimeType: "image/jpeg", data: resized.toJPEG(80).toString("base64")};
+};
 
 async function main(): Promise<void> {
     // 개발 모드 오프라인(npm run dev:offline): 디시 대신 가짜 클라이언트를 쓰고, 진짜 기록을 더럽히지 않도록
@@ -120,6 +134,7 @@ async function main(): Promise<void> {
             if (Notification.isSupported()) new Notification({title, body}).show();
         },
         recordJudgment: (record) => judgments.append(record),
+        postImages: (urls) => loadPostImages(urls, shrinkImage),
         usage: new LlmUsage(() => usageStore.load(), (record) => {
             usageStore.save(record);
             pushState();

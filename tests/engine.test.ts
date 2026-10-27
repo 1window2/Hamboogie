@@ -323,6 +323,8 @@ interface GalleryOptions {
 const READ_ERROR = "!오류";
 
 function withGallery(articles: Record<number, {title: string; body: string; date?: string}>, options: GalleryOptions = {}) {
+    /** 글 하나로 판단할 때 함께 받은 사진 수입니다(요청 순서대로). */
+    const imageCounts: number[] = [];
     const reads: number[] = [];
     /** LLM 요청입니다. 묶음은 ["묶음", 제목...], 글 하나는 ["단독", 제목]입니다. */
     const calls: string[][] = [];
@@ -348,8 +350,9 @@ function withGallery(articles: Record<number, {title: string; body: string; date
     });
     if (options.loggedIn) Object.assign(engine.deps.accounts, {candidates: () => [{id: "a", memberType: "gonick", dccons: []}]});
     engine.llm.provider = () => ({
-        decide: async (post: {title: string; body: string}) => {
+        decide: async (post: {title: string; body: string; images?: unknown[]}) => {
             calls.push(["단독", post.title]);
+            imageCounts.push(post.images?.length ?? 0);
             return confirm(post) ? GIVEAWAY : NOT_GIVEAWAY;
         },
         decideMany: async (posts: {title: string; body: string}[]) => {
@@ -374,7 +377,7 @@ function withGallery(articles: Record<number, {title: string; body: string; date
         await check(gallery, []);
         await check(gallery, Object.keys(articles).map(Number));
     };
-    return {...env, engine: env.engine, reads, calls, run, check, list};
+    return {...env, engine: env.engine, reads, calls, run, check, list, imageCounts};
 }
 
 const batches = (calls: string[][]) => calls.filter((call) => call[0] === "묶음").map((call) => call.slice(1));
@@ -414,6 +417,47 @@ describe("Engine 새 글 묶음 판단", () => {
         await run(gallery);
         expect(written).toEqual([]);
         expect(logged(logger, "묶어 판단한 결과라")).toBe(true);
+    });
+
+    it("사진이 있는 글은 새 글이 하나여도 사진까지 함께 다시 판단하고, 사진을 보고 나눔이 아니라면 줄을 서지 않는다", async () => {
+        const photo = `<img src="https://dcimg7.dcinside.co.kr/viewimage.php?id=a&no=1">`;
+        // 처음(글자만) 판단은 나눔, 사진까지 본 판단은 나눔 아님입니다.
+        let first = false;
+        const {engine, run, calls, imageCounts, written} = withGallery({2: {title: "23분까지 나눔", body: `축하합니다${photo}`}}, {loggedIn: true, confirm: () => (first = !first)});
+        const loaded: string[][] = [];
+        Object.assign((engine as unknown as {deps: EngineDeps}).deps, {postImages: async (urls: string[]) => (loaded.push(urls), [{mimeType: "image/jpeg", data: "eA=="}])});
+        await run(gallery);
+        expect(calls).toEqual([["단독", "23분까지 나눔"], ["단독", "23분까지 나눔"]]);
+        expect(imageCounts).toEqual([0, 1]);
+        expect(loaded).toEqual([["https://dcimg7.dcinside.co.kr/viewimage.php?id=a&no=1"]]);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(written).toEqual([]);
+    });
+
+    it("사진이 있는 글 하나를 다시 판단할 요청 자리가 없으면 처음 판단대로 줄을 선다", async () => {
+        const photo = `<img src="https://dcimg7.dcinside.co.kr/viewimage.php?id=a&no=1">`;
+        const {engine, run, calls, written} = withGallery({2: {title: "치킨 나눔", body: photo}}, {loggedIn: true, paidRpm: 1});
+        Object.assign((engine as unknown as {deps: EngineDeps}).deps, {postImages: async () => [{mimeType: "image/jpeg", data: "eA=="}]});
+        await run(gallery);
+        expect(calls).toEqual([["단독", "치킨 나눔"]]);
+        await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
+    });
+
+    it("사진까지 보고 다시 판단하는 요청이 실패하면 처음 판단대로 줄을 선다", async () => {
+        const photo = `<img src="https://dcimg7.dcinside.co.kr/viewimage.php?id=a&no=1">`;
+        const {engine, run, written} = withGallery({2: {title: "치킨 나눔", body: photo}}, {loggedIn: true});
+        const internals = engine as unknown as {deps: EngineDeps; llm: LlmGate};
+        Object.assign(internals.deps, {postImages: async () => [{mimeType: "image/jpeg", data: "eA=="}]});
+        const real = internals.llm.provider;
+        internals.llm.provider = () => {
+            const provider = real() as {decide: (post: {images?: unknown[]}) => Promise<unknown>; decideMany: unknown};
+            return {...provider, decide: async (post: {images?: unknown[]}) => {
+                if (post.images?.length) throw new Error("Gemini 응답 시간 초과 (30초)");
+                return provider.decide(post);
+            }} as never;
+        };
+        await run(gallery);
+        await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
     });
 
     it(`한 번에 ${40}개까지 묶고, 넘으면 나눠 보낸다`, async () => {
