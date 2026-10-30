@@ -19,6 +19,8 @@ describe("글 사진", () => {
     it("앱 API처럼 이스케이프된 본문에서도 꺼낸다", () => {
         expect(postImageUrls(`&lt;p&gt;&lt;img src=&quot;${PHOTO(1)}&quot;&gt;&lt;/p&gt;`)).toEqual([PHOTO(1)]);
         expect(postImageUrls("사진 없는 글")).toEqual([]);
+        // 다른 태그는 풀려 있고 사진 태그만 이스케이프된 본문도 사진 태그가 보일 때까지 풉니다.
+        expect(postImageUrls(`<p>&lt;img src=&quot;${PHOTO(1)}&quot;&gt;</p>`)).toEqual([PHOTO(1)]);
     });
 
     it("받은 사진을 줄여 돌려주고, 받지 못했거나 줄이지 못한 사진은 뺀다", async () => {

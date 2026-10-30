@@ -1,15 +1,10 @@
 import {useState} from "react";
-import type {AccountConfig, AccountStatus, AccountView, AppState, Settings} from "@shared/types";
-import type {DraftSetter} from "../App";
+import type {AccountConfig, AccountStatus, AccountView} from "@shared/types";
+import type {SettingsTabProps} from "../App";
 import {isCommitEnter} from "../components/keys";
 import {DefaultDccons} from "../components/DefaultDccons";
 
-interface Props {
-    draft: Settings;
-    setDraft: DraftSetter;
-    state: AppState;
-    run(action: () => Promise<AppState>, keepDraft?: boolean): Promise<void>;
-}
+type Props = SettingsTabProps;
 
 function statusText(status: AccountStatus): string {
     switch (status.state) {

@@ -13,6 +13,15 @@ import {errorMessage} from "@shared/errors";
 /** 설정 초안 갱신 함수입니다. 값이나, 이전 초안을 받아 새 초안을 돌려주는 함수를 받습니다. */
 export type DraftSetter = (next: Settings | ((prev: Settings) => Settings)) => void;
 
+/** 설정을 고치고 main에 요청을 보내는 탭(계정, LLM · 알림)이 받는 값입니다. */
+export interface SettingsTabProps {
+    draft: Settings;
+    setDraft: DraftSetter;
+    state: AppState;
+    /** main에 요청을 보내고 받은 상태로 화면을 바꿉니다. 실패하면 위쪽에 오류를 보여 줍니다. `keepDraft`면 고치던 초안을 그대로 둡니다. */
+    run(action: () => Promise<AppState>, keepDraft?: boolean): Promise<void>;
+}
+
 type TabId = "galleries" | "accounts" | "llm" | "history" | "logs" | "devTest";
 
 const TABS: {id: TabId; label: string}[] = [

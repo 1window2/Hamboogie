@@ -1,5 +1,6 @@
 import {describe, expect, it} from "vitest";
-import {isQuotaExhausted, nextPacificMidnight} from "../src/main/llm/providers";
+import {isQuotaExhausted} from "../src/main/llm/providers";
+import {nextPacificMidnight} from "../src/shared/time";
 
 function apiError(status: number, message: string) {
     return Object.assign(new Error(message), {status});

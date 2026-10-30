@@ -57,16 +57,36 @@ export class DcconImages {
     }
 }
 
+/** 이미지 주소가 다른 주소로 넘겨줄(리디렉션) 때 따라가는 최대 횟수입니다. */
+const MAX_REDIRECTS = 3;
+/** 리디렉션으로 넘겨받아도 따라가는 곳입니다. 디시의 https 주소뿐입니다. */
+const DC_HOST = /(^|\.)dcinside\.(com|co\.kr)$/i;
+
 /**
  * 디시 이미지 서버에서 이미지 하나를 받습니다. 디시 이미지 서버는 디시 페이지에서 온 요청만 이미지를 주므로 Referer를 붙입니다.
- * 이미지가 아니거나, 비었거나, `maxBytes`보다 크거나, 받지 못하면 null입니다.
+ * 디시 이미지 서버 주소가 아니거나, 이미지가 아니거나, 비었거나, `maxBytes`보다 크거나, 받지 못하면 null입니다.
+ * 다른 주소로 넘겨주면 디시 주소일 때만 따라갑니다. 글에 올린 사진 주소를 거쳐 이 컴퓨터의 내부 주소 같은 다른 곳에 요청하지 않게 합니다.
  */
 export async function fetchDcImage(url: string, maxBytes: number, fetchImpl: typeof fetch = fetch, timeoutMs = 15_000): Promise<{mimeType: string; bytes: Buffer} | null> {
+    if (!isDcconImageUrl(url)) return null;
     try {
-        const response = await fetchImpl(url, {headers: {Referer: "https://gall.dcinside.com/"}, signal: AbortSignal.timeout(timeoutMs)});
+        const signal = AbortSignal.timeout(timeoutMs);
+        const get = (target: string) => fetchImpl(target, {headers: {Referer: "https://gall.dcinside.com/"}, redirect: "manual", signal});
+        let target = url;
+        let response = await get(target);
+        for (let hops = 0; response.status >= 300 && response.status < 400; hops++) {
+            const location = response.headers.get("location");
+            if (!location || hops >= MAX_REDIRECTS) return null;
+            const next = new URL(location, target);
+            if (next.protocol !== "https:" || !DC_HOST.test(next.hostname)) return null;
+            target = next.href;
+            response = await get(target);
+        }
         const type = (response.headers.get("content-type") ?? "").split(";")[0]!.trim();
         // 글 사진은 형식 없이(application/octet-stream) 오기도 해서, 그때는 파일 앞부분으로 형식을 알아냅니다.
         if (!response.ok || !(type.startsWith("image/") || type === "application/octet-stream")) return null;
+        // 크기를 미리 알려 주면 받기 전에 거릅니다.
+        if (Number(response.headers.get("content-length") ?? 0) > maxBytes) return null;
         const bytes = Buffer.from(await response.arrayBuffer());
         if (bytes.length === 0 || bytes.length > maxBytes) return null;
         const mimeType = type.startsWith("image/") ? type : sniffImageType(bytes);

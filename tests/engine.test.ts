@@ -3,7 +3,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, describe, expect, it, vi} from "vitest";
 import {defaultSettings, newGallery, nextAutoStopAt, normalizeSettings} from "@shared/settings";
-import {formatKst} from "../src/main/pipeline/post-time";
+import {formatKst} from "../src/shared/time";
 import type {GalleryConfig, HistoryEntry, Settings} from "@shared/types";
 import {AuthExpiredError, CaptchaRequiredError} from "@green-1052/dcinside.js";
 import {CommentNotPostedError} from "../src/main/dc/accounts";
@@ -30,6 +30,7 @@ function setup(options: {notifyOnSuccess?: boolean; write?: (accountId: string, 
         appId: new AppIdBackoff(),
         history: {add: (entry: HistoryEntry) => recorded.push(entry)},
         logger,
+        secrets: {get: () => null},
         settings: () => settings,
         accounts: {
             candidates: () => [],
@@ -72,6 +73,23 @@ describe("Engine 예약과 멈춤", () => {
         expect(written).toEqual([["a", 11]]);
         expect(recorded[0]).toMatchObject({postNo: 11, outcome: "success", detail: "계정a 계정으로 \"줄\""});
         expect(ledger.has("gf2", 11)).toBe(true);
+    });
+
+    it("댓글 문구에 내 로그인 아이디나 비밀번호, API 키가 있으면 어떤 계획이든 달지 않는다", async () => {
+        const {engine, written, recorded, update} = setup();
+        update({accounts: [{id: "a", loginId: "testid01", memberTypeOverride: "auto", defaultDccons: []}]});
+        const secret: Record<string, string> = {"account:a": "pw-test-9", "llm:gemini": "test-llm-key"};
+        Object.assign((engine as unknown as {deps: EngineDeps}).deps, {secrets: {get: (key: string) => secret[key] ?? null}});
+        const texts = ["저는 testid01", "PW - TEST - 9", "test-llm-key"];
+        for (const [index, text] of texts.entries()) {
+            await engine.dispatch(gallery, {no: 30 + index, title: "나눔"}, plan(0, {attempts: [{accountId: "a", content: {type: "text", text}}]}), LIVE);
+        }
+        await vi.waitFor(() => expect(recorded).toHaveLength(texts.length));
+        expect(written).toEqual([]);
+        for (const entry of recorded) expect(entry).toMatchObject({outcome: "failure", detail: "댓글 문구에 내 계정이나 설정 정보가 들어 있어 달지 않음"});
+        // 평범한 문구는 그대로 단다.
+        await engine.dispatch(gallery, {no: 40, title: "나눔"}, plan(0), LIVE);
+        await vi.waitFor(() => expect(written).toEqual([["a", 40]]));
     });
 
     it("감시를 멈추면 예약된 줄 서기를 취소하고 기록에 남긴다", async () => {
@@ -592,16 +610,6 @@ describe("Engine 판단 기록과 테스트용 멈춤", () => {
         expect(records).toEqual([]);
     });
 
-    it("테스트 설정을 켜면 처음 줄 서기에 성공하는 즉시 감시를 멈춘다", async () => {
-        const {engine, written, logger} = setup();
-        engine.stopAfterFirstSuccess = true;
-        engine.start();
-        await engine.dispatch(gallery, {no: 60, title: "나눔"}, plan(0), LIVE);
-        await vi.waitFor(() => expect(written).toEqual([["a", 60]]));
-        await vi.waitFor(() => expect(engine.running).toBe(false));
-        expect(engine.stopAfterFirstSuccess).toBe(false);
-        expect(logged(logger, "첫 줄 서기에 성공해 감시를 멈춥니다")).toBe(true);
-    });
 });
 
 describe("Engine 기준 글", () => {

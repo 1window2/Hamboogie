@@ -7,6 +7,7 @@ import {KeywordEditor} from "../components/KeywordEditor";
 import {AutoStopCard} from "../components/AutoStopCard";
 import {galleryIdFromInput} from "@shared/text";
 import {errorMessage} from "@shared/errors";
+import {timeText} from "@shared/time";
 
 interface Props {
     draft: Settings;
@@ -58,10 +59,6 @@ function watchTimeText(hours: number): string {
     const whole = Math.floor(hours);
     const minutes = Math.round((hours - whole) * 60);
     return `하루 약 ${minutes === 0 ? `${whole}시간` : `${whole}시간 ${minutes}분`} 감시할 수 있습니다`;
-}
-
-function formatClock(time: number): string {
-    return new Date(time).toLocaleTimeString("ko-KR", {hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false});
 }
 
 function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
@@ -140,7 +137,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                         : gallery.galleryId.trim() && <small className="error-text check-status">갤러리 ID를 확인해야 감시할 수 있습니다.</small>}
             {status && (
                 <small className="muted check-status">
-                    마지막 확인 {formatClock(status.lastCheckedAt)} · 새 글 {status.newPosts}개 · 나눔 판단 {status.matched}개
+                    마지막 확인 {timeText(status.lastCheckedAt, true)} · 새 글 {status.newPosts}개 · 나눔 판단 {status.matched}개
                 </small>
             )}
 
@@ -252,7 +249,7 @@ function IntervalField({value, onChange}: {value: number; onChange(value: number
                     <option value="min">분</option>
                 </select>
             </div>
-            <small className={outOfRange ? "error-text" : "muted"}>최소 10초, 최대 1시간입니다. 범위를 벗어나면 저장할 때 맞춰집니다.</small>
+            <small className={outOfRange ? "error-text" : "muted"}>최소 {INTERVAL_MIN_SEC}초, 최대 {INTERVAL_MAX_SEC / 3600}시간입니다. 범위를 벗어나면 저장할 때 맞춰집니다.</small>
         </label>
     );
 }

@@ -1,9 +1,9 @@
 import {decodeHtml} from "@green-1052/dcinside.js";
+import {POST_IMAGES_MAX} from "@shared/settings";
 import type {LlmImage} from "../llm/providers";
 import {fetchDcImage, isDcconImageUrl} from "./dccon-images";
+import {decodeMemo} from "./text";
 
-/** 나눔으로 보인 글을 다시 판단할 때 함께 보낼 사진 수입니다. 당첨자 안내 캡처나 기프티콘 사진은 보통 앞쪽에 있습니다. */
-export const POST_IMAGES_MAX = 3;
 /** 줄이기 전 원본 사진의 최대 크기입니다. 더 큰 사진은 받지 않습니다. */
 const ORIGINAL_MAX_BYTES = 10 * 1024 * 1024;
 /** 사진을 모두 받는 데 쓸 최대 시간입니다. 이미지 서버가 느려도 줄 서기가 오래 밀리지 않게, 넘으면 받은 사진까지만 씁니다. */
@@ -17,11 +17,8 @@ export type ShrinkImage = (bytes: Buffer, mimeType: string) => LlmImage | null;
  * 그 주소를 씁니다. 디시 이미지 서버의 https 주소만 남깁니다.
  */
 export function postImageUrls(memo: string, max = POST_IMAGES_MAX): string[] {
-    let html = memo;
-    // 앱 API는 본문 HTML을 이스케이프해서 줍니다. 태그가 보일 때까지 최대 두 번 풉니다.
-    for (let i = 0; i < 2 && !/<img/i.test(html) && /&lt;/.test(html); i++) html = decodeHtml(html);
     const urls: string[] = [];
-    for (const [tag] of html.matchAll(/<img\b[^>]*>/gi)) {
+    for (const [tag] of decodeMemo(memo, /<img/i).matchAll(/<img\b[^>]*>/gi)) {
         // 따옴표 없이 쓴 속성(src=https://...)도 있습니다.
         const attribute = (name: string) => {
             const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(tag);

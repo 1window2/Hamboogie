@@ -1,5 +1,5 @@
 import {effectiveRpm, FREE_DAILY_LLM_REQUESTS, PROVIDER_LABELS} from "@shared/settings";
-import type {Settings} from "@shared/types";
+import type {LlmProviderId, LlmUsageView, Settings} from "@shared/types";
 import type {Logger} from "../logger";
 import {createProvider, LlmQuotaExhaustedError, type LlmProvider} from "./providers";
 import {RateLimiter} from "./rate-limit";
@@ -7,7 +7,7 @@ import {LlmUsage} from "./usage";
 
 export interface LlmGateDeps {
     settings(): Settings;
-    secrets: {get(key: `llm:${Settings["llm"]["provider"]}`): string | null | undefined};
+    secrets: {get(key: `llm:${LlmProviderId}`): string | null | undefined};
     logger: Logger;
     /** 오늘 보낸 LLM 요청 수입니다(무료 등급 하루 한도). 없으면 앱을 켜 둔 동안만 셉니다. */
     usage?: LlmUsage;
@@ -54,7 +54,7 @@ export class LlmGate {
     }
 
     /** 오늘 쓴 LLM 요청 수와 한도입니다. 화면에 보여줍니다. */
-    view(): {count: number; limit: number; resetAt: number} {
+    view(): LlmUsageView {
         return {count: this.usage.count, limit: this.dailyLimit(), resetAt: this.usage.resetAt};
     }
 

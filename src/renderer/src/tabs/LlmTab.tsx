@@ -1,17 +1,13 @@
 import {useState} from "react";
-import {DEFAULT_MODELS, FREE_DAILY_LLM_REQUESTS, FREE_LLM_RPM, PROVIDER_LABELS, PROVIDERS} from "@shared/settings";
-import type {DraftSetter} from "../App";
+import {DEFAULT_MODELS, FREE_DAILY_LLM_REQUESTS, FREE_LLM_RPM, POST_IMAGES_MAX, PROVIDER_LABELS, PROVIDERS} from "@shared/settings";
+import type {SettingsTabProps} from "../App";
 import {NumberInput} from "../components/NumberInput";
-import type {AppState, LlmProviderId, Settings} from "@shared/types";
+import type {LlmProviderId} from "@shared/types";
 import {isDiscordWebhookUrl} from "@shared/text";
 import {errorMessage} from "@shared/errors";
+import {kstClockText} from "@shared/time";
 
-interface Props {
-    draft: Settings;
-    setDraft: DraftSetter;
-    state: AppState;
-    run(action: () => Promise<AppState>, keepDraft?: boolean): Promise<void>;
-}
+type Props = SettingsTabProps;
 
 export function LlmTab({draft, setDraft, state, run}: Props) {
     const [webhookResult, setWebhookResult] = useState<{ok: boolean; message: string} | null>(null);
@@ -23,9 +19,9 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
         <div className="stack">
             <section className="card">
                 <h2>LLM</h2>
-                <p className="muted">글 제목과 본문 텍스트만 보냅니다. 사용할 서비스 하나를 고르고 API 키를 입력하세요.</p>
+                <p className="muted">글 제목과 본문 텍스트를 보내고, 나눔으로 보인 글은 글에 올린 사진(앞의 최대 {POST_IMAGES_MAX}장)도 함께 보냅니다. 사용할 서비스 하나를 고르고 API 키를 입력하세요.</p>
                 <p className="muted note">
-                    확인할 때마다 새 글을 글 번호, 제목, 본문과 함께 묶어 LLM 요청 한 번으로 판단하고, 줄을 서야 하는 글만 따로 한 번 더 확인합니다.
+                    확인할 때마다 새 글을 글 번호, 제목, 본문과 함께 묶어 LLM 요청 한 번으로 판단하고, 줄을 서야 하는 글만 따로(사진이 있으면 사진까지) 한 번 더 확인합니다.
                     무료 API 키는 요청 횟수 제한이 있습니다. 기본 모델(Gemini 3.5 Flash Lite)의 무료 등급은 분당 15회, 하루 500회이고, 앱은 여유를 두고 그보다 적게 보냅니다.
                 </p>
                 <div className="row">
@@ -62,7 +58,7 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
                     )}
                     <small className="muted">
                         오늘 쓴 LLM 요청: {state.llmUsage.count}회{state.llmUsage.limit > 0 ? ` / ${state.llmUsage.limit}회` : ""}
-                        {" "}(한국 시간 {new Date(state.llmUsage.resetAt).toLocaleTimeString("ko-KR", {hour: "numeric", minute: "2-digit", timeZone: "Asia/Seoul"})}에 초기화)
+                        {" "}(한국 시간 {kstClockText(state.llmUsage.resetAt)}에 초기화)
                     </small>
                 </div>
             </section>

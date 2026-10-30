@@ -2,8 +2,10 @@ import {app} from "electron";
 import type {UpdateState} from "@shared/types";
 import type {AppUpdater} from "electron-updater";
 
-const RELEASES_API = "https://api.github.com/repos/1window2/Hamboogie/releases/latest";
-const RELEASES_PAGE = "https://github.com/1window2/Hamboogie/releases/latest";
+/** 이 앱의 GitHub 저장소입니다. 릴리스를 확인하고, 기본 브라우저로 열어도 되는 주소를 가릴 때 씁니다. */
+export const REPO_PATH = "/1window2/Hamboogie";
+const RELEASES_API = `https://api.github.com/repos${REPO_PATH}/releases/latest`;
+const RELEASES_PAGE = `https://github.com${REPO_PATH}/releases/latest`;
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /** "1.10.0" > "1.9.2"처럼 버전을 숫자로 비교합니다. 앞의 v는 무시합니다. */
@@ -63,7 +65,7 @@ export function startUpdater(onChange: (state: UpdateState) => void, beforeInsta
             const release = await response.json() as {tag_name?: string; html_url?: string};
             if (release.tag_name && isNewerVersion(release.tag_name, app.getVersion())) {
                 // 응답에 담긴 주소는 이 저장소의 릴리스 페이지일 때만 씁니다.
-                const url = release.html_url?.startsWith("https://github.com/1window2/Hamboogie/releases/") ? release.html_url : RELEASES_PAGE;
+                const url = release.html_url?.startsWith(`https://github.com${REPO_PATH}/releases/`) ? release.html_url : RELEASES_PAGE;
                 set({state: "available", version: release.tag_name.replace(/^v/, ""), url});
             }
         } catch {

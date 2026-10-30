@@ -1,6 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {buildBatchMessage, buildUserMessage} from "../src/main/llm/decision";
-import {formatKst, postedAtRange} from "../src/main/pipeline/post-time";
+import {postedAtRange} from "../src/main/pipeline/post-time";
+import {formatKst} from "../src/shared/time";
 
 /** 한국 시간 2026-10-25 hh:mm:ss */
 const kst = (hours: number, minutes = 0, seconds = 0, day = 25) => Date.UTC(2026, 9, day, hours - 9, minutes, seconds);

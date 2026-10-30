@@ -9,9 +9,10 @@
     --ok: #237a3b;
     --error: #c42b1c;
     --danger-bg: #fde8e6;
-    --danger-border: #e0483b;
+    --warn: #b7791f;
     --warn-bg: #fff4d6;
     --info-bg: #e8f0fb;
+    --mono: ui-monospace, "D2Coding", Consolas, monospace;
     color-scheme: light;
 }
 
@@ -26,7 +27,6 @@
         --ok: #5cc27a;
         --error: #ff7b6e;
         --danger-bg: #3d1a17;
-        --danger-border: #ff5a4c;
         --warn-bg: #3a3014;
         --info-bg: #1b2a3d;
         color-scheme: dark;
@@ -91,7 +91,7 @@ h2 {
     margin: 0 0 4px;
 }
 
-input, select {
+input, select, textarea {
     font: inherit;
     color: inherit;
     background: var(--surface);
@@ -101,7 +101,7 @@ input, select {
     min-width: 0;
 }
 
-input:focus, select:focus {
+input:focus, select:focus, textarea:focus {
     outline: 2px solid var(--accent);
     outline-offset: -1px;
 }
@@ -334,13 +334,6 @@ fieldset {
     color: var(--error);
 }
 
-.banner.danger {
-    background: var(--danger-bg);
-    border: 2px solid var(--danger-border);
-    color: var(--error);
-    font-weight: 700;
-}
-
 .chips {
     display: flex;
     flex-wrap: wrap;
@@ -400,15 +393,18 @@ fieldset {
     color: var(--error);
 }
 
-.logs {
+.logs, .history {
     list-style: none;
     margin: 0;
     padding: 0;
-    font-family: ui-monospace, "D2Coding", Consolas, monospace;
-    font-size: 13px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
+}
+
+.logs {
+    font-family: var(--mono);
+    font-size: 13px;
 }
 
 .log {
@@ -438,7 +434,7 @@ fieldset {
 }
 
 .log.warn .level {
-    color: #b7791f;
+    color: var(--warn);
 }
 
 .log.error .level {
@@ -452,17 +448,11 @@ fieldset {
 }
 
 textarea {
-    font: inherit;
-    color: inherit;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 8px;
     resize: vertical;
 }
 
 .json {
-    font-family: ui-monospace, "D2Coding", Consolas, monospace;
+    font-family: var(--mono);
     font-size: 12px;
     background: var(--bg);
     border-radius: 6px;
@@ -477,15 +467,6 @@ textarea {
 .badge.failure {
     background: var(--danger-bg);
     color: var(--error);
-}
-
-.history {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
 }
 
 .history li {

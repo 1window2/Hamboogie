@@ -1,4 +1,4 @@
-import {nextPacificMidnight} from "./providers";
+import {nextPacificMidnight} from "@shared/time";
 
 export interface UsageRecord {
     /** 이 시각(ms)이 지나면 다시 0부터 셉니다. 무료 한도가 초기화되는 태평양 시간 자정입니다. */

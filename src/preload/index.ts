@@ -1,17 +1,20 @@
 import {contextBridge, ipcRenderer, type IpcRendererEvent} from "electron";
-import type {AppState, HamboogieApi, HistoryEntry, LogEntry} from "@shared/types";
+import type {HamboogieApi, InvokeChannel, PushEvents} from "@shared/types";
 
-function subscribe<T>(channel: string, listener: (value: T) => void): () => void {
-    const handler = (_event: IpcRendererEvent, value: T) => listener(value);
+function subscribe<K extends keyof PushEvents>(channel: K, listener: (value: PushEvents[K]) => void): () => void {
+    const handler = (_event: IpcRendererEvent, value: PushEvents[K]) => listener(value);
     ipcRenderer.on(channel, handler);
     return () => ipcRenderer.removeListener(channel, handler);
 }
 
-type Invokable = Exclude<keyof HamboogieApi, "onLog" | "onState" | "onHistory">;
-
 /** 인자를 빠짐없이 그대로 main으로 넘깁니다. 인자를 손으로 나열하다 하나를 빠뜨리는 실수를 막습니다. */
-function invoker<K extends Invokable>(channel: K): HamboogieApi[K] {
+function invoker<K extends InvokeChannel>(channel: K): HamboogieApi[K] {
     return ((...args: unknown[]) => ipcRenderer.invoke(channel, ...args)) as HamboogieApi[K];
+}
+
+/** 개발 모드 전용 호출입니다. 배포 빌드에는 main에 그 채널이 없으므로 보내지 않고 바로 실패합니다. */
+function devOnly<K extends InvokeChannel>(channel: K): HamboogieApi[K] {
+    return import.meta.env.DEV ? invoker(channel) : (() => Promise.reject(new Error("개발 모드 전용 기능입니다."))) as HamboogieApi[K];
 }
 
 const api: HamboogieApi = {
@@ -28,18 +31,11 @@ const api: HamboogieApi = {
     getLogs: invoker("getLogs"),
     getHistory: invoker("getHistory"),
     installUpdate: invoker("installUpdate"),
-    devTestRun: import.meta.env.DEV ? invoker("devTestRun") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
-    devProbe: import.meta.env.DEV ? invoker("devProbe") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
-    devSimulateSleep: import.meta.env.DEV ? invoker("devSimulateSleep") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
-    devAddFreeDccon: import.meta.env.DEV ? invoker("devAddFreeDccon") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
-    devOwnedDccons: import.meta.env.DEV ? invoker("devOwnedDccons") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
-    devBatchTest: import.meta.env.DEV ? invoker("devBatchTest") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
-    devDeleteMyComments: import.meta.env.DEV ? invoker("devDeleteMyComments") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
-    devWatchUntilFirstSuccess: import.meta.env.DEV ? invoker("devWatchUntilFirstSuccess") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
-    devApiCheck: import.meta.env.DEV ? invoker("devApiCheck") : () => Promise.reject(new Error("개발 모드 전용 기능입니다.")),
-    onLog: (listener) => subscribe<LogEntry>("log", listener),
-    onState: (listener) => subscribe<AppState>("state", listener),
-    onHistory: (listener) => subscribe<HistoryEntry>("history", listener)
+    devTestRun: devOnly("devTestRun"),
+    devApiCheck: devOnly("devApiCheck"),
+    onLog: (listener) => subscribe("log", listener),
+    onState: (listener) => subscribe("state", listener),
+    onHistory: (listener) => subscribe("history", listener)
 };
 
 contextBridge.exposeInMainWorld("hamboogie", api);

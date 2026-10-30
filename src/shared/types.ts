@@ -209,6 +209,16 @@ export interface DevTestResult {
         | {kind: "comment"; waitSec: number; attempts: {account: string; content: string}[]};
 }
 
+/** main → renderer로 보내는 알림 채널과 그 값입니다. */
+export interface PushEvents {
+    state: AppState;
+    log: LogEntry;
+    history: HistoryEntry;
+}
+
+/** renderer → main 요청 채널입니다. `HamboogieApi`에서 알림을 구독하는 함수(`on...`)를 뺀 것입니다. */
+export type InvokeChannel = {[K in keyof HamboogieApi]: K extends `on${string}` ? never : K}[keyof HamboogieApi];
+
 /** renderer → main 호출 목록입니다. */
 export interface HamboogieApi {
     getState(): Promise<AppState>;
@@ -220,8 +230,10 @@ export interface HamboogieApi {
     getDccons(accountId: string): Promise<DcconPackage[]>;
     /** 그 계정이 가진 디시콘의 이미지를 data: 주소로 받아 옵니다(디시 이미지 서버 요청). 받지 못한 것은 빠집니다. */
     getDcconImages(accountId: string, urls: string[]): Promise<Record<string, string>>;
-    /** 갤러리가 실제로 있는지 확인하고 이름과 마이너 여부를 돌려줍니다. 없으면 실패합니다. */
-    /** 갤러리가 실제로 있는지 확인합니다. 그 갤러리의 대기 계정(`accountIds`) 중 로그인된 계정으로만 요청합니다. */
+    /**
+     * 갤러리가 실제로 있는지 확인하고 이름과 마이너 여부를 돌려줍니다. 없으면 실패합니다.
+     * 그 갤러리의 대기 계정(`accountIds`) 중 로그인된 계정으로만 요청합니다.
+     */
     checkGallery(galleryId: string, accountIds: string[]): Promise<GalleryCheckResult>;
     start(): Promise<AppState>;
     stop(): Promise<AppState>;
@@ -235,26 +247,9 @@ export interface HamboogieApi {
     onState(listener: (state: AppState) => void): () => void;
     /** 개발 모드 전용입니다. 배포 빌드에서는 호출하면 실패합니다. */
     devTestRun(input: DevTestInput): Promise<DevTestResult>;
-    /** 개발 모드 전용입니다. 테스트 갤러리의 목록·검색 결과나 글 하나를 읽습니다. */
-    devProbe(probe: DevProbe): Promise<unknown>;
     /** 개발 모드 전용입니다. 테스트 갤러리 1번 글에서 실제 디시 API를 차례로 점검하고, 단 댓글은 지웁니다. */
     devApiCheck(): Promise<DevApiCheckStep[]>;
-    /** 개발 모드 전용입니다. 감시를 시작하고, 처음 줄 서기에 성공하면 바로 멈춥니다. */
-    devWatchUntilFirstSuccess(): Promise<{running: boolean}>;
-    /** 개발 모드 전용입니다. 이 글에 그 갤러리의 대기 계정이 단 댓글을 지웁니다. */
-    devDeleteMyComments(galleryId: string, postNo: number): Promise<{account: string; deleted: {no?: number; memo?: string}[]; left: number}>;
-    /** 개발 모드 전용입니다. 더미 글 여러 개를 LLM 요청 한 번으로 판단합니다. */
-    devOwnedDccons(recent?: boolean): Promise<unknown>;
-    devAddFreeDccon(loginId: string, packageIdx: number): Promise<unknown>;
-    devSimulateSleep(minutes: number, offline: boolean): Promise<{running: boolean; waitedSec: number}>;
-    devBatchTest(posts: {title: string; body: string; no?: number; postedAt?: number}[]): Promise<{elapsedMs: number; decisions: (Record<string, unknown> | null)[]}>;
 }
-
-/** 개발 모드에서 디시 응답을 직접 확인할 때 보내는 요청입니다. 테스트 갤러리에만 보냅니다. */
-export type DevProbe =
-    | {kind: "list"; search?: {keyword: string; type: "subject_m" | "subject" | "memo"}}
-    | {kind: "read"; no: number}
-    | {kind: "comments"; no: number};
 
 /** 실제 디시 API 점검의 한 단계 결과입니다. */
 export interface DevApiCheckStep {
