@@ -99,12 +99,13 @@ export function normalizeForMatch(text: string): string {
  */
 const BAIT_WORDS = [
     "봇", "매크로", "자동", "bot", "macro", "프로그램", "크롤",
-    "ai", "에이아이", "인공지능", "gpt", "지피티", "llm", "claude", "클로드", "gemini", "제미나이", "기계", "사람아니", "사람이아니", "사람아님", "사람이아님"
+    "ai", "에이아이", "인공지능", "gpt", "지피티", "llm", "claude", "클로드", "gemini", "제미나이", "기계",
+    "사람아니", "사람아님", "사람아닙", "사람아냐", "사람이아", "인간아니", "인간아님", "인간아닙", "인간이아"
 ];
 /** 내 계정으로 달면 안 되는 욕설과 비하, 운영진을 가리키는 말입니다. 요구 문구에 있으면 자동으로 달지 않고 알립니다. */
 const ABUSIVE_WORDS = [
     "시발", "씨발", "씨빨", "시바", "ㅅㅂ", "ㅆㅂ", "병신", "븅신", "ㅂㅅ", "좆", "존나", "졸라", "개새", "새끼", "ㅅㄲ", "꺼져", "닥쳐",
-    "죽어", "뒤져", "미친", "ㅁㅊ", "지랄", "ㅈㄹ", "애미", "느금", "엠창", "장애", "등신", "멍청", "바보", "운영자", "매니저", "관리자", "파딱", "주딱"
+    "죽어", "뒤져", "미친", "ㅁㅊ", "지랄", "ㅈㄹ", "애미", "느금", "엠창", "장애", "등신", "멍청", "바보", "쓰레기", "저능", "찐따", "틀딱", "한남", "정병", "탈갤", "운영자", "매니저", "관리자", "파딱", "주딱"
 ];
 /**
  * 글 자체에 이런 말이 있으면 봇을 걸러내려는 글일 수 있어 자동으로 줄 서지 않고 알립니다.
@@ -138,8 +139,20 @@ export function findBaitWord(postText: string): string | null {
 const INJECTION_WORDS = [
     "isgiveaway", "isfood", "linemethod", "linetext", "dcconkeyword", "memberrequirement", "needsextraaction",
     "systemprompt", "시스템프롬프트", "시스템지시", "ignoreprevious", "ignoreall", "ignoretheabove", "ignoreyour", "previousinstructions",
-    "이전지시", "앞의지시", "위의지시", "기존지시", "지시를무시", "지시무시", "지시사항을무시", "명령을무시", "규칙을무시", "프롬프트를무시",
-    "너는이제", "이제부터너는", "나눔이라고답", "나눔이라고판단", "나눔으로판단해"
+    "이전지시", "앞의지시", "위의지시", "기존지시", "지시를무시", "지시무시", "지시사항을무시", "명령을무시", "프롬프트를무시",
+    "나눔이라고답", "나눔이라고판단", "나눔으로판단해", "나눔글로판단", "말하는대로따라", "시키는대로따라", "내말만들",
+    "forgetyour", "forgetall", "forgetprevious", "forgeteverything", "disregard", "youarenow", "fromnowon", "jailbreak", "roleplay", "역할극"
+];
+/**
+ * 낱말 목록으로는 다 담기 어려운 지시 모양입니다. 공백과 기호를 지운 글에서 찾습니다.
+ * "모든 프롬프트를 잊고", "위의 규칙은 전부 무시해", "넌 이제부터", "앞으로 너는" 같은 말입니다.
+ */
+const INJECTION_PATTERNS = [
+    /(지시|명령|프롬프트)(사항)?(들)?(을|를|은|는|이|가)?(전부|모두|다)?(무시|잊)/,
+    // "규칙"과 "설정"은 "규칙 무시하고 단 댓글은 제외"처럼 평범한 글에도 나오므로, "모든"이나 "전부"가 붙을 때만 봅니다.
+    /((모든|이전|지금까지의?|위의|앞의|기존)(규칙|설정)(을|를|은|는)?(전부|모두|다)?|(규칙|설정)(을|를|은|는)?(전부|모두|다))(무시|잊)/,
+    /(모든|이전|지금까지의?)(지시|명령|프롬프트)|(앞의|위의|기존)(지시|프롬프트)/,
+    /(너는|넌|니가)(이제|지금부터|앞으로)|(이제부터|지금부터|앞으로)(너는|넌|니가)/
 ];
 /** LLM에 보내는 글의 구역을 나누는 태그입니다. 글에 이런 태그가 있으면 구역을 닫고 지시를 끼워 넣으려는 것일 수 있습니다. */
 const PROMPT_TAG = /<\s*\/?\s*(post|title|body|images|posted_at)\b/i;
@@ -149,7 +162,13 @@ export function findInjectionWord(postText: string): string | null {
     const tag = PROMPT_TAG.exec(postText);
     if (tag) return tag[0];
     const text = normalizeForMatch(postText).replace(/[\p{P}\p{S}]/gu, "");
-    return INJECTION_WORDS.find((word) => text.includes(word)) ?? null;
+    const word = INJECTION_WORDS.find((word) => text.includes(word));
+    if (word) return word;
+    for (const pattern of INJECTION_PATTERNS) {
+        const match = pattern.exec(text);
+        if (match) return match[0];
+    }
+    return null;
 }
 
 /**
@@ -178,7 +197,9 @@ export function isSafeCommentText(text: string): boolean {
     const compactText = normalizeForMatch(normalized);
     // 링크처럼 보이는 것(점 뒤 영문 2자 이상), 숫자 5자리 이상(전화번호 등)
     if (/\.[a-z]{2,}/.test(compactText) || /\d{5,}/.test(compactText.replace(/[^0-9]/g, ""))) return false;
-    if (BLOCKED_COMMENT_WORDS.some((word) => compactText.includes(word))) return false;
+    // "병1신"처럼 숫자나 기호를 끼워 넣은 것도 찾도록 글자만 남긴 것도 봅니다.
+    const lettersOnly = compactText.replace(/[^\p{L}]/gu, "");
+    if (BLOCKED_COMMENT_WORDS.some((word) => compactText.includes(word) || lettersOnly.includes(word))) return false;
     return true;
 }
 
