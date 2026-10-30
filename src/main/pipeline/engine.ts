@@ -1,7 +1,7 @@
 import type {DCInside, PostItem} from "@green-1052/dcinside.js";
 import {errorMessage} from "@shared/errors";
 import {FREE_DAILY_LLM_REQUESTS, galleryProblems, nextAutoStopAt} from "@shared/settings";
-import type {GalleryConfig, GalleryStatus, HistoryEntry, Settings} from "@shared/types";
+import type {GalleryConfig, GalleryStatus, HistoryEntry, LlmUsageView, Settings} from "@shared/types";
 import {isAppIdFailure, isCaptchaFailure, isDefiniteCommentFailure, isLoginExpired, type AccountManager} from "../dc/accounts";
 import type {AppIdBackoff} from "../dc/app-id-backoff";
 import {isOutdatedAppError, OUTDATED_APP_MESSAGE, OUTDATED_PAUSE_MS} from "../dc/app-version";
@@ -15,7 +15,7 @@ import type {Logger} from "../logger";
 import {sendDiscordNotice, type DiscordNotice} from "../notify/discord";
 import type {Ledger, SecretStore} from "../store";
 import {AutoStopTimer} from "./auto-stop";
-import {clockText, postUrl} from "@shared/time";
+import {clockText, kstClockText, postUrl} from "@shared/time";
 import {findKeyword, matchesKeywords} from "./keyword-filter";
 import {postedAtRange} from "./post-time";
 import {eligible, END_MARGIN_MS, makePlan, type Plan} from "./planner";
@@ -146,6 +146,21 @@ export interface JudgmentRecord {
     decisions: (Decision | null)[];
 }
 
+/** LLM에 보낼 글 내용입니다. */
+function toPostInput({post, title, body, postedAt}: Candidate): PostInput {
+    return {no: post.no, title, body, postedAt};
+}
+
+/** 글을 올린 시각 범위에서 판단 기준 시각(늦은 쪽)과, 그것이 실제보다 늦을 수 있는 최대 시간을 꺼냅니다. */
+function postedTimes(range: {earliest: number; latest: number}): Pick<Candidate, "postedAt" | "postedSlackMs"> {
+    return {postedAt: range.latest, postedSlackMs: range.latest - range.earliest};
+}
+
+/** 글이 하나면 그 글 하나로, 여러 개면 묶어서 LLM 요청 한 번으로 판단합니다. 응답에 빠진 글은 null입니다. */
+async function decideGroup(provider: LlmProvider, posts: PostInput[]): Promise<(Decision | null)[]> {
+    return posts.length === 1 ? [await provider.decide(posts[0]!)] : provider.decideMany(posts);
+}
+
 /** LLM 판단을 로그에 남길 짧은 문장으로 줄입니다. */
 function describeDecision(decision: Decision): string {
     const parts = [
@@ -221,9 +236,9 @@ export class Engine {
     private readonly now: () => number;
     /**
      * 컴퓨터가 잠들어 있거나, 깨어나서 네트워크를 기다리는 중입니다. 이동안에는 확인을 멈추고 디시·LLM에 요청하지 않습니다.
-     * `since`는 잠든 시각, `awake`는 확인을 이어가도 될 때(또는 감시를 멈췄을 때) 풀리는 약속입니다.
+     * `since`는 잠든 시각, `awake`는 확인을 이어가도 될 때(또는 감시를 멈췄을 때) 풀리는 약속입니다. `wakes`는 깨어남·다시 잠듦마다
+     * 늘어나 이전의 기다림을 그만두게 하고, `resuming`은 지금 깨어나는 중인지입니다.
      */
-    /** 잠든 상태입니다. `wakes`는 깨어남·다시 잠듦마다 늘어나 이전의 기다림을 그만두게 하고, `resuming`은 지금 깨어나는 중인지입니다. */
     private asleep: {since: number; awake: Promise<void>; release: () => void; wakes: number; resuming: boolean} | null = null;
     /** 마지막으로 잠들었던 구간입니다. 그 구간에 걸친 LLM 판단이 실패하면 알리지 않습니다. */
     private lastSleep: {from: number; to: number} | null = null;
@@ -263,7 +278,7 @@ export class Engine {
             if (!gallery.enabled) continue;
             const problems = galleryProblems(gallery);
             if (problems.length > 0) {
-                logger.warn(`감시하지 않음: ${problems.join(" ")}`, {galleryId: gallery.galleryId || "(이름 없음)"});
+                this.warnProblems("감시하지 않음", gallery, problems);
                 continue;
             }
             this.schedule(gallery.id, runId, 0);
@@ -326,8 +341,7 @@ export class Engine {
             const message = "컴퓨터가 깨어난 뒤 1분이 지나도 인터넷에 연결되지 않아 감시를 멈췄습니다. 네트워크를 확인하고 감시를 다시 시작하세요.";
             logger.warn(message);
             this.deps.desktopNotice?.("Hamboogie 감시 중지", message);
-            this.stop();
-            this.deps.onStateChanged?.();
+            this.stopAndNotify();
             return;
         }
         if (slept > LONG_SLEEP_MS) {
@@ -375,9 +389,19 @@ export class Engine {
     private async stopAutomatically(): Promise<void> {
         if (!this.running) return;
         this.deps.logger.info("설정한 시각이 되어 감시를 자동으로 멈춥니다.");
+        this.stopAndNotify();
+        if (this.deps.settings().discordWebhookUrl) await this.alert("감시 자동 중지", "설정한 시각이 되어 감시를 멈췄습니다.");
+    }
+
+    /** 감시를 멈추고 화면·트레이·잠자기 방지가 "멈춤"을 따르도록 알립니다(사용자가 아니라 앱이 스스로 멈출 때). */
+    private stopAndNotify(): void {
         this.stop();
         this.deps.onStateChanged?.();
-        if (this.deps.settings().discordWebhookUrl) await this.alert("감시 자동 중지", "설정한 시각이 되어 감시를 멈췄습니다.");
+    }
+
+    /** 감시하지 않는 이유(갤러리 설정 문제)를 로그에 남깁니다. */
+    private warnProblems(prefix: string, gallery: GalleryConfig, problems: string[]): void {
+        this.deps.logger.warn(`${prefix}: ${problems.join(" ")}`, {galleryId: gallery.galleryId || "(이름 없음)"});
     }
 
     /** 감시를 멈추고 예약해 둔 줄 서기도 취소합니다. 분석 중이던 글에도 댓글을 달지 않습니다. */
@@ -429,7 +453,7 @@ export class Engine {
         for (const configId of [...this.watchers.keys()]) {
             const gallery = galleries.find((item) => item.id === configId);
             const problems = gallery?.enabled ? galleryProblems(gallery) : [];
-            if (problems.length > 0) this.deps.logger.warn(`감시를 멈춤: ${problems.join(" ")}`, {galleryId: gallery!.galleryId || "(이름 없음)"});
+            if (problems.length > 0) this.warnProblems("감시를 멈춤", gallery!, problems);
             if (!gallery || !gallery.enabled || problems.length > 0) this.dropWatcher(configId);
         }
         for (const gallery of galleries) {
@@ -460,7 +484,6 @@ export class Engine {
         this.inflight.add(tracked);
     }
 
-    /** 글을 읽을 클라이언트입니다. 로그인이 풀렸을 때 어느 계정인지 알 수 있게 마지막으로 쓴 것을 기억합니다. */
     /** 그 갤러리의 대기 계정으로 읽기 요청을 보냅니다. 실패하면 어느 클라이언트의 요청이었는지 기억해 둡니다. */
     private async read<T>(gallery: GalleryConfig, request: (client: DCInside) => Promise<T>): Promise<T> {
         const client = this.deps.reader(gallery);
@@ -508,7 +531,7 @@ export class Engine {
         // 감시 중에 갤러리 ID를 바꿨는데 아직 확인하지 않았으면 그 갤러리 감시를 멈춥니다.
         const problems = galleryProblems(gallery);
         if (problems.length > 0) {
-            this.deps.logger.warn(`감시를 멈춤: ${problems.join(" ")}`, {galleryId: gallery.galleryId || "(이름 없음)"});
+            this.warnProblems("감시를 멈춤", gallery, problems);
             this.dropWatcher(configId);
             return;
         }
@@ -553,7 +576,7 @@ export class Engine {
             // 설정이 바뀌었을 수 있으니 다음 간격은 최신 설정에서 읽습니다. 그사이 새로 예약됐으면(깨어남 등) 그 예약을 따릅니다.
             const latest = turn === undefined || this.turns.get(configId) === turn;
             if (runId === this.runId && latest && !this.asleep) {
-                this.schedule(configId, runId, delayMs ?? (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000);
+                this.schedule(configId, runId, delayMs ?? this.intervalMs(configId, gallery));
             }
         }
     }
@@ -565,13 +588,18 @@ export class Engine {
     private async backOff(configId: string, gallery: GalleryConfig): Promise<number> {
         const failures = (this.listFailures.get(configId) ?? 0) + 1;
         this.listFailures.set(configId, failures);
-        const intervalMs = (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000;
+        const intervalMs = this.intervalMs(configId, gallery);
         const delayMs = Math.min(intervalMs * 2 ** failures, Math.max(intervalMs, FAILURE_BACKOFF_MAX_MS));
         this.deps.logger.warn(`목록 확인이 ${failures}번 연달아 실패해 ${Math.round(delayMs / 1000)}초 뒤 다시 확인합니다.`, {galleryId: gallery.galleryId});
         if (failures === FAILURE_ALERT_AFTER) {
             await this.alert("디시 목록 확인이 계속 실패합니다", `${gallery.galleryId} 갤러리 목록 확인이 ${failures}번 연달아 실패했습니다. 디시 접속이 막혔을 수 있습니다. 감시 간격을 늘려 다시 시도합니다.`);
         }
         return delayMs;
+    }
+
+    /** 감시 간격(ms)입니다. 설정이 바뀌었을 수 있으니 최신 설정에서 읽습니다. */
+    private intervalMs(configId: string, gallery: GalleryConfig): number {
+        return (this.gallery(configId)?.intervalSec ?? gallery.intervalSec) * 1000;
     }
 
     private seenKey(gallery: GalleryConfig): string {
@@ -686,7 +714,7 @@ export class Engine {
         }
         const detectedAt = Date.now();
         const listed = postedAtRange([post.dateTime], detectedAt);
-        const titleOnly: Candidate = {post, title: post.title, body: "", bodyRead: false, keyword: titleKeyword, detectedAt, postedAt: listed.latest, postedSlackMs: listed.latest - listed.earliest, images: []};
+        const titleOnly: Candidate = {post, title: post.title, body: "", bodyRead: false, keyword: titleKeyword, detectedAt, ...postedTimes(listed), images: []};
         if (!read) return titleOnly;
         if (!this.deps.appId.canTry()) return "retry";
 
@@ -728,15 +756,14 @@ export class Engine {
         }
         const keyword = titleKeyword || (gallery.keywords.length > 0 && findKeyword(body, gallery.keywords) !== null);
         const posted = postedAtRange([dateTime, post.dateTime], detectedAt);
-        return {post, title, body, bodyRead: true, keyword, detectedAt, postedAt: posted.latest, postedSlackMs: posted.latest - posted.earliest, images, ...(dateTime ? {dateTime} : {})};
+        return {post, title, body, bodyRead: true, keyword, detectedAt, ...postedTimes(posted), images, ...(dateTime ? {dateTime} : {})};
     }
 
     /** 무료 등급 하루 LLM 요청 수를 다 써서 감시를 쉰다고 한 번만 알립니다. */
     private async warnDailyLimit(): Promise<void> {
         if (this.dailyLimitWarned) return;
         this.dailyLimitWarned = true;
-        const reset = new Date(this.llm.usage.resetAt).toLocaleTimeString("ko-KR", {hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Seoul"});
-        const message = `무료 등급 하루 LLM 요청 수(${FREE_DAILY_LLM_REQUESTS}회)를 다 써서 한국 시간 ${reset}까지 감시를 쉽니다. 감시 간격을 늘리면 하루에 더 오래 감시할 수 있고, 유료 요금제를 쓰면 이 제한이 없습니다.`;
+        const message = `무료 등급 하루 LLM 요청 수(${FREE_DAILY_LLM_REQUESTS}회)를 다 써서 한국 시간 ${kstClockText(this.llm.usage.resetAt)}까지 감시를 쉽니다. 감시 간격을 늘리면 하루에 더 오래 감시할 수 있고, 유료 요금제를 쓰면 이 제한이 없습니다.`;
         this.deps.logger.warn(message);
         await this.alert("감시 일시 중지: 하루 LLM 요청 수 소진", message);
     }
@@ -805,8 +832,7 @@ export class Engine {
             let decisions: (Decision | null)[];
             const decide = async () => {
                 await this.llm.request(gallery.galleryId);
-                const posts = group.map(({post, title, body, postedAt}) => ({no: post.no, title, body, postedAt}));
-                return group.length === 1 ? [await provider.decide(posts[0]!)] : await provider.decideMany(posts);
+                return decideGroup(provider, group.map(toPostInput));
             };
             try {
                 decisions = await decide();
@@ -875,7 +901,7 @@ export class Engine {
         try {
             const images = candidate.images.length > 0 && this.deps.postImages ? await this.deps.postImages(candidate.images).catch(() => []) : [];
             await this.llm.request(gallery.galleryId);
-            const decision = await provider.decide({no: candidate.post.no, title: candidate.title, body: candidate.body, postedAt: candidate.postedAt, images});
+            const decision = await provider.decide({...toPostInput(candidate), images});
             this.recordJudgment(gallery, "confirm", [candidate], [decision], images.length);
             const photos = images.length > 0 ? `, 사진 ${images.length}장` : "";
             this.deps.logger.info(`2차 확인${photos}: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`,
@@ -899,7 +925,7 @@ export class Engine {
     private recordJudgment(gallery: GalleryConfig, kind: JudgmentRecord["kind"], group: Candidate[], decisions: (Decision | null)[], imageCount = 0): void {
         if (!this.deps.recordJudgment) return;
         const {llm} = this.deps.settings();
-        const posts = group.map(({post, title, body, postedAt}) => ({no: post.no, title, body, postedAt}));
+        const posts = group.map(toPostInput);
         const single = group.length === 1;
         this.deps.recordJudgment({
             time: Date.now(),
@@ -919,7 +945,7 @@ export class Engine {
     }
 
     /** 오늘 쓴 LLM 요청 수와 한도입니다. 화면에 보여줍니다. */
-    llmUsage(): {count: number; limit: number; resetAt: number} {
+    llmUsage(): LlmUsageView {
         return this.llm.view();
     }
 
@@ -991,7 +1017,7 @@ export class Engine {
     async decideBatch(posts: PostInput[]): Promise<(Decision | null)[]> {
         const provider = this.llm.provider();
         await this.llm.request();
-        return posts.length === 1 ? [await provider.decide(posts[0]!)] : provider.decideMany(posts);
+        return decideGroup(provider, posts);
     }
 
     /** 글 내용을 LLM으로 판단하고 행동 계획을 세웁니다. LLM 호출이 실패하면 알림 계획을 돌려줍니다. */
@@ -1117,8 +1143,7 @@ export class Engine {
                 if (live && this.stopAfterFirstSuccess) {
                     this.stopAfterFirstSuccess = false;
                     logger.info("테스트 설정에 따라 첫 줄 서기에 성공해 감시를 멈춥니다.", context);
-                    this.stop();
-                    this.deps.onStateChanged?.();
+                    this.stopAndNotify();
                 }
                 return;
             }

@@ -1,6 +1,6 @@
 import type {GalleryConfig, MemberType} from "@shared/types";
 import {DEFAULT_COMMENT_TEXT} from "@shared/settings";
-import {DAY_MS, KST_OFFSET_MS} from "@shared/time";
+import {DAY_MS, kstDayStart} from "@shared/time";
 import type {Decision} from "../llm/decision";
 
 export interface OwnedDccon {
@@ -61,9 +61,7 @@ export function resolveClock(clock: string, reference: number): number | null {
     const minutes = Number(match[2]);
     const seconds = Number(match[3] ?? 0);
     if (hours > 24 || minutes > 59 || seconds > 59 || (hours === 24 && (minutes > 0 || seconds > 0))) return null;
-    const kst = new Date(reference + KST_OFFSET_MS);
-    const dayStartKst = Date.UTC(kst.getUTCFullYear(), kst.getUTCMonth(), kst.getUTCDate());
-    const sameDay = dayStartKst + ((hours * 60 + minutes) * 60 + seconds) * 1000 - KST_OFFSET_MS;
+    const sameDay = kstDayStart(reference) + ((hours * 60 + minutes) * 60 + seconds) * 1000;
     return reference - sameDay > PAST_WINDOW_MS ? sameDay + DAY_MS : sameDay;
 }
 
@@ -86,8 +84,14 @@ export function normalizeForMatch(text: string): string {
     return text.normalize("NFKC").replace(/[\p{Cf}\s]/gu, "").toLowerCase();
 }
 
-/** 봇 색출용 낚시 문구에 자주 쓰이는 단어입니다. 이런 문구를 요구하면 자동으로 달지 않고 알립니다. */
-const BAIT_WORDS = ["봇", "매크로", "자동", "bot", "macro", "프로그램", "크롤"];
+/**
+ * 봇 색출용 낚시 문구에 자주 쓰이는 단어입니다. 이런 문구를 요구하면 자동으로 달지 않고 알립니다.
+ * "저는 AI입니다", "사람 아님"처럼 내 계정이 사람이 아니라고 자백하게 만드는 말도 막습니다.
+ */
+const BAIT_WORDS = [
+    "봇", "매크로", "자동", "bot", "macro", "프로그램", "크롤",
+    "ai", "에이아이", "인공지능", "gpt", "지피티", "llm", "claude", "클로드", "gemini", "제미나이", "기계", "사람아니", "사람이아니", "사람아님", "사람이아님"
+];
 /**
  * 글 자체에 이런 말이 있으면 봇을 걸러내려는 글일 수 있어 자동으로 줄 서지 않고 알립니다.
  * ("댓글 단 매크로 차단" 같은 글). "로봇"처럼 흔한 낱말 안에 들어 있는 것은 세지 않습니다.

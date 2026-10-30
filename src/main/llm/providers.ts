@@ -12,6 +12,7 @@ import {
     type Decision
 } from "./decision";
 import {errorMessage} from "@shared/errors";
+import {kstClockText, nextPacificMidnight} from "@shared/time";
 
 /** LLM에 함께 보낼 사진입니다. `data`는 base64입니다. */
 export interface LlmImage {
@@ -55,14 +56,15 @@ export class LlmQuotaExhaustedError extends LlmError {
     }
 }
 
-/** 다음 태평양 시간 자정(ms)입니다. Gemini 무료 등급의 하루 한도가 이때 초기화됩니다. */
-export function nextPacificMidnight(now = Date.now()): number {
-    const parts = new Intl.DateTimeFormat("en-US", {timeZone: "America/Los_Angeles", hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit"})
-        .formatToParts(new Date(now));
-    const get = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? 0);
-    // 자정을 "24시"로 주는 환경이 있어 시만 24로 나눈 나머지를 씁니다.
-    const elapsed = ((get("hour") % 24) * 3600 + get("minute") * 60 + get("second")) * 1000 + now % 1000;
-    return now - elapsed + 24 * 60 * 60 * 1000;
+/** SDK 오류에 담긴 HTTP 상태 코드입니다. 없으면 null입니다. */
+function httpStatus(error: unknown): number | null {
+    const status = (error as {status?: unknown} | null)?.status;
+    return typeof status === "number" ? status : null;
+}
+
+/** 응답을 기다리다 시간이 다 돼 끊긴 오류인지입니다. */
+function isTimeout(error: unknown): boolean {
+    return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 }
 
 /**
@@ -70,7 +72,7 @@ export function nextPacificMidnight(now = Date.now()): number {
  * Gemini가 알려 주는 한도 이름(quotaId)에 PerDay가 있거나, 기다릴 시간 없이 "exceeded your current quota"(OpenAI는 insufficient_quota)인 경우입니다.
  */
 export function isQuotaExhausted(error: unknown): boolean {
-    if ((error as {status?: unknown} | null)?.status !== 429) return false;
+    if (httpStatus(error) !== 429) return false;
     const text = errorMessage(error);
     if (/PerDay/i.test(text)) return true;
     return /insufficient_quota|exceeded your current quota/i.test(text) && !/retry in|retryDelay/i.test(text);
@@ -96,7 +98,7 @@ const STATUS_MESSAGES: Record<number, string> = {
 /** SDK 오류를 로그와 알림에 쓸 짧은 한국어 메시지로 바꿉니다. */
 export function describeLlmError(provider: string, error: unknown): string {
     if (error instanceof LlmError) return error.message;
-    const status = typeof (error as {status?: unknown})?.status === "number" ? (error as {status: number}).status : null;
+    const status = httpStatus(error);
     let detail = errorMessage(error);
     // Gemini는 오류 응답 JSON 전체를 메시지에 담아 보냅니다. 그 안의 message만 꺼냅니다.
     try {
@@ -106,7 +108,7 @@ export function describeLlmError(provider: string, error: unknown): string {
         // JSON이 아니면 그대로 씁니다.
     }
     detail = detail.split("\n")[0]!.slice(0, 160);
-    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return `${provider} 응답 시간 초과 (${LLM_TIMEOUT_MS / 1000}초)`;
+    if (isTimeout(error)) return `${provider} 응답 시간 초과 (${LLM_TIMEOUT_MS / 1000}초)`;
     if (status === null) return `${provider} 오류: ${detail}`;
     return `${provider} ${STATUS_MESSAGES[status] ?? "오류"} (${status}): ${detail}`;
 }
@@ -117,9 +119,8 @@ export function describeLlmError(provider: string, error: unknown): string {
  * 판단에 실패한 글은 키워드가 있어야만 알림으로 넘어가므로, 그사이 올라온 나눔을 놓치지 않기 위해서입니다.
  */
 function retryDelayMs(error: unknown): number | null {
-    const status = (error as {status?: unknown} | null)?.status;
-    if (status === 500 || status === 502 || status === 503 || status === 504) return 2000;
-    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return 2000;
+    const status = httpStatus(error);
+    if (status === 500 || status === 502 || status === 503 || status === 504 || isTimeout(error)) return 2000;
     if (status !== 429 || !(error instanceof Error)) return null;
     const match = /retry in ([\d.]+)s/i.exec(error.message);
     return match ? Math.ceil(Number(match[1]) * 1000) : null;
@@ -294,8 +295,7 @@ export function createProvider(provider: LlmProviderId, apiKey: string, model: s
         } catch (error) {
             if (isQuotaExhausted(error)) {
                 const until = nextPacificMidnight();
-                const reset = new Date(until).toLocaleTimeString("ko-KR", {hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Seoul"});
-                throw new LlmQuotaExhaustedError(`${label} 요청 한도를 다 썼습니다(무료 등급이면 하루 한도). 한국 시간 ${reset}에 초기화됩니다.`, until);
+                throw new LlmQuotaExhaustedError(`${label} 요청 한도를 다 썼습니다(무료 등급이면 하루 한도). 한국 시간 ${kstClockText(until)}에 초기화됩니다.`, until);
             }
             throw new LlmError(describeLlmError(label, error));
         }

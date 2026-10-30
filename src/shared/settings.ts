@@ -1,4 +1,4 @@
-import type {AccountConfig, AutoStop, DcconRef, GalleryConfig, LlmProviderId, Settings} from "./types";
+import type {AccountConfig, AutoStop, DcconRef, GalleryConfig, LlmConfig, LlmProviderId, Settings} from "./types";
 import {galleryIdFromInput, keywordKey, normalizeText} from "./text";
 
 export const INTERVAL_MIN_SEC = 10;
@@ -144,7 +144,7 @@ export function normalizeSettings(settings: Settings): Settings {
             memberTypeOverride: account.memberTypeOverride === "gonick" || account.memberTypeOverride === "semi" ? account.memberTypeOverride : "auto",
             defaultDccons: normalizeDccons(account.defaultDccons)
         }));
-    const llm: Partial<Settings["llm"]> = settings.llm ?? {};
+    const llm: Partial<LlmConfig> = settings.llm ?? {};
     return {
         ...settings,
         accounts,
@@ -182,7 +182,7 @@ export function estimatedWatchHours(intervalsSec: number[], dailyRequests = FREE
 }
 
 /** 실제로 지킬 분당 LLM 요청 수입니다. 0이면 제한하지 않습니다. */
-export function effectiveRpm(llm: Settings["llm"]): number {
+export function effectiveRpm(llm: LlmConfig): number {
     return llm.paidPlan ? llm.requestsPerMinute : FREE_LLM_RPM;
 }
 
@@ -214,6 +214,13 @@ export function nextAutoStopAt(autoStop: AutoStop, startedAt: number, now: numbe
     if (at.getTime() <= now) at.setDate(at.getDate() + 1);
     return at.getTime();
 }
+
+/** 줄 서기 기록을 남겨 두는 수입니다. 넘으면 오래된 것부터 지웁니다. */
+export const HISTORY_LIMIT = 500;
+/** 화면에 보여 줄 최근 로그 수입니다(파일에는 모두 남습니다). */
+export const LOG_LIMIT = 1000;
+/** 나눔으로 보인 글을 다시 판단할 때 함께 보낼 사진 수입니다. 당첨자 안내 캡처나 기프티콘 사진은 보통 앞쪽에 있습니다. */
+export const POST_IMAGES_MAX = 3;
 
 /** 디시 갤러리 ID 형식입니다(영문, 숫자, 밑줄). */
 export const GALLERY_ID_PATTERN = /^[A-Za-z0-9_]+$/;

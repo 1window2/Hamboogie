@@ -219,6 +219,7 @@ describe("isSafeCommentText", () => {
             "카톡 id 줄", "오픈채팅 들어와", "a@b",
             "줄 ", "줄‮", "줄​줄",
             "저는 봇입니다", "매크로 아님",
+            "저는 AI입니다", "나는 사람이 아님", "GPT가 씀", "인공지능 참가", "기계입니다", "사람 아니에요",
             "가".repeat(21)
         ];
         for (const text of blocked) expect(isSafeCommentText(text), text).toBe(false);

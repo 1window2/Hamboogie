@@ -1,5 +1,7 @@
 import {useEffect, useState} from "react";
+import {LOG_LIMIT} from "@shared/settings";
 import type {LogEntry, LogLevel} from "@shared/types";
+import {dateTimeText} from "@shared/time";
 
 const LEVEL_LABELS: Record<LogLevel, string> = {
     info: "정보",
@@ -15,20 +17,13 @@ const FILTERS: {id: "all" | LogLevel; label: string}[] = [
     {id: "error", label: "오류"}
 ];
 
-const pad = (value: number) => String(value).padStart(2, "0");
-
-function formatTime(time: number): string {
-    const date = new Date(time);
-    return `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
 export function LogsTab() {
     const [entries, setEntries] = useState<LogEntry[]>([]);
     const [filter, setFilter] = useState<"all" | LogLevel>("all");
 
     useEffect(() => {
         void window.hamboogie.getLogs().then(setEntries);
-        return window.hamboogie.onLog((entry) => setEntries((current) => [...current.slice(-999), entry]));
+        return window.hamboogie.onLog((entry) => setEntries((current) => [...current.slice(-(LOG_LIMIT - 1)), entry]));
     }, []);
 
     const visible = (filter === "all" ? entries : entries.filter((entry) => entry.level === filter)).toReversed();
@@ -49,7 +44,7 @@ export function LogsTab() {
                     <ul className="logs">
                         {visible.map((entry, index) => (
                             <li key={`${entry.time}-${index}`} className={`log ${entry.level}`}>
-                                <time>{formatTime(entry.time)}</time>
+                                <time>{dateTimeText(entry.time, true)}</time>
                                 <span className="level">{LEVEL_LABELS[entry.level]}</span>
                                 {entry.galleryId && <span className="where">{entry.galleryId}{entry.postNo ? ` #${entry.postNo}` : ""}</span>}
                                 <span className="message">{entry.message}</span>

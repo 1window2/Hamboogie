@@ -1,8 +1,8 @@
-import {mkdtempSync, readFileSync, writeFileSync} from "node:fs";
+import {existsSync, mkdtempSync, readFileSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {describe, expect, it} from "vitest";
-import {Ledger, SettingsStore} from "../src/main/store";
+import {HistoryStore, Ledger, SettingsStore} from "../src/main/store";
 
 describe("Ledger", () => {
     it("빠르게 연달아 기록해도 파일이 깨지지 않고, 다시 열면 모두 남아 있다", async () => {
@@ -18,11 +18,23 @@ describe("Ledger", () => {
         expect(reopened.has("gf2", 300)).toBe(true);
         expect(reopened.claim("gf2", 150)).toBe(false);
     });
+
+    it("목록이 아니거나 깨진 파일은 남겨 두고 빈 목록으로 시작한다", () => {
+        for (const content of ["{}", "null", "[\"gf2:1\""]) {
+            const dir = mkdtempSync(join(tmpdir(), "hamboogie-ledger-"));
+            writeFileSync(join(dir, "ledger.json"), content);
+            const ledger = new Ledger(dir);
+            expect(ledger.claim("gf2", 1), content).toBe(true);
+            expect(existsSync(join(dir, "ledger.json.broken")), content).toBe(true);
+        }
+        const dir = mkdtempSync(join(tmpdir(), "hamboogie-history-"));
+        writeFileSync(join(dir, "history.json"), JSON.stringify([null, 5, {time: 1, galleryId: "gf2", postNo: 5, title: "", outcome: "success", detail: ""}]));
+        expect(new HistoryStore(dir).all().map((entry) => entry.postNo)).toEqual([5]);
+    });
 });
 
 describe("HistoryStore", () => {
     it("기록을 파일에 남기고 다시 열면 그대로 읽으며, 새 기록을 구독자에게 알린다", async () => {
-        const {HistoryStore} = await import("../src/main/store");
         const dir = mkdtempSync(join(tmpdir(), "hamboogie-history-"));
         const store = new HistoryStore(dir);
         const seen: number[] = [];

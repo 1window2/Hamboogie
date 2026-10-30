@@ -2,8 +2,10 @@ import {existsSync, readFileSync, renameSync, statSync} from "node:fs";
 import {appendFile, rename, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import {safeStorage} from "electron";
-import {defaultSettings, normalizeSettings} from "@shared/settings";
+import {defaultSettings, HISTORY_LIMIT, normalizeSettings} from "@shared/settings";
 import type {HistoryEntry, SecretKey, Settings} from "@shared/types";
+import type {UsageRecord} from "./llm/usage";
+import type {JudgmentRecord} from "./pipeline/engine";
 
 function readJson<T>(path: string, fallback: T): T {
     if (!existsSync(path)) return fallback;
@@ -12,6 +14,26 @@ function readJson<T>(path: string, fallback: T): T {
     } catch {
         return fallback;
     }
+}
+
+/**
+ * 목록 파일(처리한 글, 줄 서기 기록)을 읽습니다. 깨졌거나 목록이 아니면 남겨 두고(`.broken`) 빈 목록으로 시작합니다.
+ * 형태가 다른 파일 때문에 앱이 켜지지 않거나, 다음 저장 때 남은 내용까지 덮어쓰지 않게 하기 위해서입니다.
+ */
+function readList<T>(path: string, valid: (item: unknown) => item is T): T[] {
+    if (!existsSync(path)) return [];
+    try {
+        const loaded: unknown = JSON.parse(readFileSync(path, "utf8"));
+        if (Array.isArray(loaded)) return loaded.filter(valid);
+    } catch {
+        // 아래에서 남겨 둡니다.
+    }
+    try {
+        renameSync(path, `${path}.broken`);
+    } catch {
+        // 남기지 못해도 빈 목록으로 시작합니다.
+    }
+    return [];
 }
 
 interface FileWriter {
@@ -163,7 +185,7 @@ export class Ledger {
 
     constructor(dir: string) {
         this.path = join(dir, "ledger.json");
-        this.keys = readJson<string[]>(this.path, []);
+        this.keys = readList(this.path, (key): key is string => typeof key === "string");
         this.set = new Set(this.keys);
     }
 
@@ -207,7 +229,7 @@ export class JudgmentLog {
         this.path = join(dir, "judgments.jsonl");
     }
 
-    append(record: unknown): void {
+    append(record: JudgmentRecord): void {
         try {
             if (existsSync(this.path) && statSync(this.path).size > JUDGMENT_LOG_BYTES) renameSync(this.path, `${this.path}.old`);
         } catch {
@@ -225,20 +247,18 @@ export class UsageStore {
         this.path = join(dir, "llm-usage.json");
     }
 
-    load(): {resetAt: number; count: number} | null {
+    load(): UsageRecord | null {
         const saved = readJson<{resetAt?: unknown; count?: unknown} | null>(this.path, null);
         if (!saved || typeof saved.resetAt !== "number" || typeof saved.count !== "number") return null;
         return {resetAt: saved.resetAt, count: saved.count};
     }
 
-    save(record: {resetAt: number; count: number}): void {
+    save(record: UsageRecord): void {
         void writeJson(this.path, record).catch(() => {});
     }
 }
 
-const HISTORY_LIMIT = 500;
-
-/** 줄 서기 기록입니다. 최근 500건만 남깁니다. */
+/** 줄 서기 기록입니다. 최근 `HISTORY_LIMIT`건만 남깁니다. */
 export class HistoryStore {
     private readonly path: string;
     private readonly entries: HistoryEntry[];
@@ -246,7 +266,7 @@ export class HistoryStore {
 
     constructor(dir: string) {
         this.path = join(dir, "history.json");
-        this.entries = readJson<HistoryEntry[]>(this.path, []);
+        this.entries = readList(this.path, (entry): entry is HistoryEntry => typeof entry === "object" && entry !== null);
     }
 
     add(entry: HistoryEntry): void {

@@ -209,6 +209,16 @@ export interface DevTestResult {
         | {kind: "comment"; waitSec: number; attempts: {account: string; content: string}[]};
 }
 
+/** main → renderer로 보내는 알림 채널과 그 값입니다. */
+export interface PushEvents {
+    state: AppState;
+    log: LogEntry;
+    history: HistoryEntry;
+}
+
+/** renderer → main 요청 채널입니다. `HamboogieApi`에서 알림을 구독하는 함수(`on...`)를 뺀 것입니다. */
+export type InvokeChannel = {[K in keyof HamboogieApi]: K extends `on${string}` ? never : K}[keyof HamboogieApi];
+
 /** renderer → main 호출 목록입니다. */
 export interface HamboogieApi {
     getState(): Promise<AppState>;
@@ -220,8 +230,10 @@ export interface HamboogieApi {
     getDccons(accountId: string): Promise<DcconPackage[]>;
     /** 그 계정이 가진 디시콘의 이미지를 data: 주소로 받아 옵니다(디시 이미지 서버 요청). 받지 못한 것은 빠집니다. */
     getDcconImages(accountId: string, urls: string[]): Promise<Record<string, string>>;
-    /** 갤러리가 실제로 있는지 확인하고 이름과 마이너 여부를 돌려줍니다. 없으면 실패합니다. */
-    /** 갤러리가 실제로 있는지 확인합니다. 그 갤러리의 대기 계정(`accountIds`) 중 로그인된 계정으로만 요청합니다. */
+    /**
+     * 갤러리가 실제로 있는지 확인하고 이름과 마이너 여부를 돌려줍니다. 없으면 실패합니다.
+     * 그 갤러리의 대기 계정(`accountIds`) 중 로그인된 계정으로만 요청합니다.
+     */
     checkGallery(galleryId: string, accountIds: string[]): Promise<GalleryCheckResult>;
     start(): Promise<AppState>;
     stop(): Promise<AppState>;
@@ -243,10 +255,13 @@ export interface HamboogieApi {
     devWatchUntilFirstSuccess(): Promise<{running: boolean}>;
     /** 개발 모드 전용입니다. 이 글에 그 갤러리의 대기 계정이 단 댓글을 지웁니다. */
     devDeleteMyComments(galleryId: string, postNo: number): Promise<{account: string; deleted: {no?: number; memo?: string}[]; left: number}>;
-    /** 개발 모드 전용입니다. 더미 글 여러 개를 LLM 요청 한 번으로 판단합니다. */
+    /** 개발 모드 전용입니다. 테스트 갤러리 대기 계정이 가진 디시콘을 봅니다(`recent`면 최근 쓴 디시콘도). */
     devOwnedDccons(recent?: boolean): Promise<unknown>;
+    /** 개발 모드 전용입니다. 그 계정에 무료(가격 0) 디시콘 패키지를 추가합니다. */
     devAddFreeDccon(loginId: string, packageIdx: number): Promise<unknown>;
+    /** 개발 모드 전용입니다. `minutes`분 잠들었다 깨어난 것처럼 엔진에 알립니다. */
     devSimulateSleep(minutes: number, offline: boolean): Promise<{running: boolean; waitedSec: number}>;
+    /** 개발 모드 전용입니다. 더미 글 여러 개를 LLM 요청 한 번으로 판단합니다. */
     devBatchTest(posts: {title: string; body: string; no?: number; postedAt?: number}[]): Promise<{elapsedMs: number; decisions: (Record<string, unknown> | null)[]}>;
 }
 

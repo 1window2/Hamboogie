@@ -1,10 +1,16 @@
 import {existsSync, renameSync, statSync} from "node:fs";
 import {appendFile} from "node:fs/promises";
+import {LOG_LIMIT} from "@shared/settings";
 import type {LogEntry, LogLevel} from "@shared/types";
 
-const MAX_ENTRIES = 1000;
 /** 로그 파일이 이보다 크면 앱을 켤 때 `.old`로 넘기고 새로 시작합니다. */
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
+
+/** 로그가 어느 갤러리, 어느 글에 대한 것인지입니다. */
+export interface LogContext {
+    galleryId?: string;
+    postNo?: number;
+}
 
 /** 프로그램 내부 로그입니다. 메모리에 최근 기록을 두고 파일에도 덧붙입니다. */
 export class Logger {
@@ -21,29 +27,30 @@ export class Logger {
         }
     }
 
-    log(level: LogLevel, message: string, context: {galleryId?: string; postNo?: number} = {}): void {
+    log(level: LogLevel, message: string, context: LogContext = {}): void {
         const entry: LogEntry = {time: Date.now(), level, message, ...context};
         this.entries.push(entry);
-        if (this.entries.length > MAX_ENTRIES) this.entries.splice(0, this.entries.length - MAX_ENTRIES);
+        if (this.entries.length > LOG_LIMIT) this.entries.splice(0, this.entries.length - LOG_LIMIT);
         for (const listener of this.listeners) listener(entry);
         const where = context.galleryId ? ` [${context.galleryId}${context.postNo ? `#${context.postNo}` : ""}]` : "";
         const line = `${new Date(entry.time).toISOString()} ${level.toUpperCase()}${where} ${message}\n`;
-        this.writing = this.writing.then(() => appendFile(this.filePath, line)).catch(() => {});
+        // 로그인 아이디와 글 내용이 들어 있어 다른 데이터 파일처럼 이 사용자만 읽을 수 있게 만듭니다.
+        this.writing = this.writing.then(() => appendFile(this.filePath, line, {mode: 0o600})).catch(() => {});
     }
 
-    info(message: string, context?: {galleryId?: string; postNo?: number}): void {
+    info(message: string, context?: LogContext): void {
         this.log("info", message, context);
     }
 
-    success(message: string, context?: {galleryId?: string; postNo?: number}): void {
+    success(message: string, context?: LogContext): void {
         this.log("success", message, context);
     }
 
-    warn(message: string, context?: {galleryId?: string; postNo?: number}): void {
+    warn(message: string, context?: LogContext): void {
         this.log("warn", message, context);
     }
 
-    error(message: string, context?: {galleryId?: string; postNo?: number}): void {
+    error(message: string, context?: LogContext): void {
         this.log("error", message, context);
     }
 

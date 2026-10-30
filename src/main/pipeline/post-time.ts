@@ -1,4 +1,4 @@
-import {DAY_MS, KST_OFFSET_MS} from "@shared/time";
+import {DAY_MS, KST_OFFSET_MS, kstDayStart} from "@shared/time";
 
 /**
  * 디시가 준 작성 시각 문자열(한국 시간)을 읽습니다. 실제로 확인한 형식(2026-10-25)은 글 읽기가 "2025.04.23 13:41"(초 없음),
@@ -15,14 +15,8 @@ function latestPossible(raw: string, detectedAt: number): number | null {
     const m = Number(minutes);
     const s = seconds === undefined ? 59 : Number(seconds);
     if (h > 23 || m > 59 || s > 59) return null;
-    let dayStart: number;
-    if (full) {
-        dayStart = Date.UTC(Number(full[1]), Number(full[2]) - 1, Number(full[3]));
-    } else {
-        const kst = new Date(detectedAt + KST_OFFSET_MS);
-        dayStart = Date.UTC(kst.getUTCFullYear(), kst.getUTCMonth(), kst.getUTCDate());
-    }
-    let at = dayStart + ((h * 60 + m) * 60 + s) * 1000 - KST_OFFSET_MS;
+    const dayStart = full ? Date.UTC(Number(full[1]), Number(full[2]) - 1, Number(full[3])) - KST_OFFSET_MS : kstDayStart(detectedAt);
+    let at = dayStart + ((h * 60 + m) * 60 + s) * 1000;
     // 날짜 없이 시각만 있는데 감지한 시각보다 1분 넘게 늦으면 어제 글입니다.
     if (!full && at > detectedAt + 60 * 1000) at -= DAY_MS;
     return at;
@@ -50,9 +44,4 @@ export function postedAtRange(raw: (string | undefined)[], detectedAt: number): 
         return {latest, earliest: Math.min(latest, precise ? at : at - 59 * 1000)};
     }
     return {latest: detectedAt, earliest: detectedAt - UNKNOWN_SLACK_MS};
-}
-
-/** LLM에 넘길 한국 시간 "YYYY-MM-DD HH:MM:SS"입니다. */
-export function formatKst(time: number): string {
-    return new Date(time + KST_OFFSET_MS).toISOString().slice(0, 19).replace("T", " ");
 }

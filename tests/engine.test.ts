@@ -3,7 +3,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, describe, expect, it, vi} from "vitest";
 import {defaultSettings, newGallery, nextAutoStopAt, normalizeSettings} from "@shared/settings";
-import {formatKst} from "../src/main/pipeline/post-time";
+import {formatKst} from "../src/shared/time";
 import type {GalleryConfig, HistoryEntry, Settings} from "@shared/types";
 import {AuthExpiredError, CaptchaRequiredError} from "@green-1052/dcinside.js";
 import {CommentNotPostedError} from "../src/main/dc/accounts";

@@ -12,7 +12,7 @@ import {htmlToText} from "../dc/text";
 import type {Logger} from "../logger";
 import type {Engine} from "../pipeline/engine";
 import type {Plan} from "../pipeline/planner";
-import type {TrustedHandle} from "../index";
+import type {TrustedHandle} from "../ipc";
 
 /** 사람이 없는 테스트용 갤러리와 글입니다. 다른 갤러리에는 테스트 댓글을 달지 않습니다. */
 export const TEST_GALLERY_ID = "asgeir";

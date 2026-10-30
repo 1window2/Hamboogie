@@ -1,5 +1,5 @@
 import {z} from "zod";
-import {formatKst} from "../pipeline/post-time";
+import {formatKst} from "@shared/time";
 
 /**
  * LLM이 돌려줄 수 있는 판단입니다. LLM은 이 스키마 밖의 행동을 할 수 없고,

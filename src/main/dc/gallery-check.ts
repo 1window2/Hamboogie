@@ -4,6 +4,7 @@ import {isAppIdFailure, isLoginExpired} from "./accounts";
 import type {AppIdBackoff} from "./app-id-backoff";
 import {isOutdatedAppError, OUTDATED_APP_MESSAGE} from "./app-version";
 import {errorMessage} from "@shared/errors";
+import {GALLERY_ID_PATTERN} from "@shared/settings";
 
 /**
  * 갤러리 목록을 한 번 불러와 실제로 있는 갤러리인지 확인하고, 이름과 마이너 여부를 돌려줍니다.
@@ -11,7 +12,7 @@ import {errorMessage} from "@shared/errors";
  */
 export async function checkGallery(reader: DCInside, galleryId: string, appId?: AppIdBackoff): Promise<GalleryCheckResult> {
     const id = galleryId.trim();
-    if (!/^[A-Za-z0-9_]+$/.test(id)) throw new Error("갤러리 ID는 영문, 숫자, _만 쓸 수 있습니다.");
+    if (!GALLERY_ID_PATTERN.test(id)) throw new Error("갤러리 ID는 영문, 숫자, _만 쓸 수 있습니다.");
     let response;
     try {
         response = await reader.articles.list({gallery: id});

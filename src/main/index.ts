@@ -1,6 +1,6 @@
 import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
-import {app, BrowserWindow, dialog, ipcMain, nativeImage, net, Notification, powerMonitor, powerSaveBlocker, shell, type IpcMainInvokeEvent} from "electron";
+import {app, BrowserWindow, dialog, nativeImage, net, Notification, powerMonitor, powerSaveBlocker, session, shell, type IpcMainInvokeEvent} from "electron";
 import {PROVIDERS} from "@shared/settings";
 import type {AccountConfig, AppState, DcconPackage, SecretKey, Settings} from "@shared/types";
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
@@ -13,13 +13,11 @@ import {Engine} from "./pipeline/engine";
 import {LlmUsage} from "./llm/usage";
 import {flushAllJson, HistoryStore, JudgmentLog, Ledger, SecretStore, SettingsStore, UsageStore} from "./store";
 import {createTray} from "./tray";
-import {startUpdater, type Updater} from "./updater";
+import {REPO_PATH, startUpdater, type Updater} from "./updater";
+import {push, trustedHandle} from "./ipc";
 import {errorMessage} from "@shared/errors";
 import {DcconImages} from "./dc/dccon-images";
 import {loadPostImages, type ShrinkImage} from "./dc/post-images";
-
-/** 앱 화면에서 온 IPC만 받는 등록 함수입니다. */
-export type TrustedHandle = (channel: string, listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown) => void;
 
 /** 두 주소의 출처(프로토콜, 호스트, 포트)가 같은지 봅니다. 앞부분만 비교하면 `localhost:51730`이 `localhost:5173`을 통과합니다. */
 function sameOrigin(a: string, b: string): boolean {
@@ -36,7 +34,7 @@ function isAllowedExternalUrl(raw: string): boolean {
         const url = new URL(raw);
         if (url.protocol !== "https:") return false;
         if (/(^|\.)dcinside\.com$/.test(url.hostname)) return true;
-        return url.hostname === "github.com" && url.pathname.startsWith("/1window2/Hamboogie/");
+        return url.hostname === "github.com" && url.pathname.startsWith(`${REPO_PATH}/`);
     } catch {
         return false;
     }
@@ -77,6 +75,8 @@ async function main(): Promise<void> {
     // Windows는 앱 식별자를 정해야 알림(트레이 안내 등)이 제대로 뜹니다. electron-builder의 appId와 같게 둡니다.
     if (process.platform === "win32") app.setAppUserModelId("io.github.1window2.hamboogie");
     await app.whenReady();
+    // 앱 화면은 카메라, 마이크, 위치 같은 브라우저 권한을 쓰지 않으므로 요청이 오면 모두 거절합니다.
+    session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     // 개발 모드에서는 Dock에 Electron 기본 아이콘 대신 앱 아이콘을 보여줍니다. 배포 빌드는 설치 파일의 아이콘을 씁니다.
     if (import.meta.env.DEV && process.platform === "darwin") app.dock?.setIcon(join(app.getAppPath(), "build/icon.png"));
     const dataDir = app.getPath("userData");
@@ -193,12 +193,12 @@ async function main(): Promise<void> {
 
     function pushState(): void {
         syncSleepBlocker();
-        window?.webContents.send("state", state());
+        push(window?.webContents, "state", state());
         tray?.update();
     }
 
-    logger.subscribe((entry) => window?.webContents.send("log", entry));
-    history.subscribe((entry) => window?.webContents.send("history", entry));
+    logger.subscribe((entry) => push(window?.webContents, "log", entry));
+    history.subscribe((entry) => push(window?.webContents, "history", entry));
 
     // 앱 화면(개발 서버 또는 앱에 들어 있는 index.html)에서 온 요청만 받습니다.
     // 창이 다른 페이지로 넘어가는 것은 아래에서 막지만, 혹시 다른 페이지가 preload API를 쓰려 해도 거절합니다.
@@ -208,12 +208,7 @@ async function main(): Promise<void> {
         const url = event.senderFrame?.url ?? "";
         return rendererUrl ? sameOrigin(url, rendererUrl) : url.startsWith("file://") && url.includes("/renderer/index.html");
     };
-    const handle: TrustedHandle = (channel, listener) => {
-        ipcMain.handle(channel, (event, ...args) => {
-            if (!fromApp(event)) throw new Error("허용되지 않은 화면에서 온 요청입니다.");
-            return listener(event, ...args);
-        });
-    };
+    const handle = trustedHandle(fromApp);
 
     // 개발 모드 전용 테스트 실행입니다. 배포 빌드에서는 이 분기와 모듈이 통째로 빠집니다.
     if (import.meta.env.DEV) {
@@ -291,14 +286,20 @@ async function main(): Promise<void> {
         if (!appId.canTry()) throw new Error("디시 앱 인증 대기 중이라 지금은 확인할 수 없습니다. 잠시 후 다시 시도하세요.");
         return checkGallery(account.client, galleryId, appId);
     });
-    handle("start", () => {
+    function startWatching(): void {
         engine.start();
         pushState();
+    }
+    function stopWatching(): void {
+        engine.stop();
+        pushState();
+    }
+    handle("start", () => {
+        startWatching();
         return state();
     });
     handle("stop", () => {
-        engine.stop();
-        pushState();
+        stopWatching();
         return state();
     });
     handle("testWebhook", async () => {
@@ -391,14 +392,8 @@ async function main(): Promise<void> {
         showWindow,
         running: () => engine.running,
         watching: () => engine.watching,
-        start: () => {
-            engine.start();
-            pushState();
-        },
-        stop: () => {
-            engine.stop();
-            pushState();
-        },
+        start: startWatching,
+        stop: stopWatching,
         quit: () => app.quit()
     });
 

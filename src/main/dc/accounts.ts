@@ -254,13 +254,18 @@ export class AccountManager {
         });
     }
 
-    /** 로그인 세션을 버립니다(설정에서 아이디를 바꾼 경우). 다시 로그인해야 그 아이디로 쓰입니다. */
-    logout(accountId: string): void {
+    /** 이 계정의 로그인 세션과 자동 재로그인 예정을 버립니다. 그 전에 시작한 로그인의 결과도 버려집니다. */
+    private forget(accountId: string): void {
         this.generations.set(accountId, (this.generations.get(accountId) ?? 0) + 1);
         this.pendingLogins.delete(accountId);
         this.sessions.delete(accountId);
         this.awaitingOtp.delete(accountId);
         this.retries.delete(accountId);
+    }
+
+    /** 로그인 세션을 버립니다(설정에서 아이디를 바꾼 경우). 다시 로그인해야 그 아이디로 쓰입니다. */
+    logout(accountId: string): void {
+        this.forget(accountId);
         this.setStatus(accountId, {state: "logged_out"});
     }
 
@@ -504,9 +509,7 @@ export class AccountManager {
 
     async remove(accountId: string): Promise<void> {
         this.removed.add(accountId);
-        this.sessions.delete(accountId);
-        this.retries.delete(accountId);
-        this.awaitingOtp.delete(accountId);
+        this.forget(accountId);
         this.statuses.delete(accountId);
         // 앞부분이 같은 다른 키까지 지우지 않도록 정확한 키만 지웁니다.
         await this.secrets.set(`account:${accountId}`, "");
