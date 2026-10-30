@@ -18,7 +18,7 @@ import {AutoStopTimer} from "./auto-stop";
 import {clockText, kstClockText, postUrl} from "@shared/time";
 import {findKeyword, matchesKeywords} from "./keyword-filter";
 import {postedAtRange} from "./post-time";
-import {eligible, END_MARGIN_MS, makePlan, type Plan} from "./planner";
+import {brief, eligible, END_MARGIN_MS, makePlan, type Plan} from "./planner";
 
 /** 한 번 확인할 때 최대로 넘겨볼 목록 페이지 수입니다. */
 const MAX_PAGES_PER_TICK = 3;
@@ -202,8 +202,6 @@ export class Engine {
     private readonly statuses = new Map<string, GalleryStatus>();
     /** LLM 요청 창구입니다(클라이언트, 분당·하루 한도, 한도 소진 시 쉬기). */
     private readonly llm: LlmGate;
-    /** 개발 모드 테스트용입니다. 켜 두면 감시로 찾은 글에 처음 줄을 서는 데 성공하는 즉시 감시를 멈춥니다. */
-    stopAfterFirstSuccess = false;
     /** 무료 등급 하루 LLM 요청 수를 다 써서 감시를 쉰다고 이미 알렸는지입니다. */
     private dailyLimitWarned = false;
     /** 다음 본문을 읽어도 되는 시각입니다. 갤러리 여러 개가 함께 읽어도 간격을 지킵니다. */
@@ -962,7 +960,7 @@ export class Engine {
         if (plan.kind === "comment" && candidate.bodyRead === false) {
             return {kind: "notify", reason: "본문 요청 상한을 넘어 본문을 확인하지 못했습니다. 글을 직접 확인하세요."};
         }
-        return plan.kind === "comment" ? {...plan, basis: decision.reason} : plan;
+        return plan.kind === "comment" ? {...plan, basis: brief(decision.reason)} : plan;
     }
 
     /**
@@ -1011,13 +1009,6 @@ export class Engine {
     /** 제외 키워드가 들어 있으면 그 키워드를 돌려줍니다. */
     excludedBy(gallery: GalleryConfig, text: string): string | null {
         return findKeyword(text, gallery.excludeKeywords ?? []);
-    }
-
-    /** 여러 글을 감시할 때와 같은 방식(글이 하나면 하나만 판단)으로 LLM 요청 한 번에 판단합니다. 응답에 빠진 글은 null입니다. */
-    async decideBatch(posts: PostInput[]): Promise<(Decision | null)[]> {
-        const provider = this.llm.provider();
-        await this.llm.request();
-        return decideGroup(provider, posts);
     }
 
     /** 글 내용을 LLM으로 판단하고 행동 계획을 세웁니다. LLM 호출이 실패하면 알림 계획을 돌려줍니다. */
@@ -1139,11 +1130,6 @@ export class Engine {
                 this.record(gallery, post, "success", summary, test);
                 if (this.deps.settings().notifyOnSuccess) {
                     await this.alert(`${prefix}줄 서기 성공: ${post.title}`, plan.basis ? `${summary}\n판단 근거: ${plan.basis}` : summary, context, true);
-                }
-                if (live && this.stopAfterFirstSuccess) {
-                    this.stopAfterFirstSuccess = false;
-                    logger.info("테스트 설정에 따라 첫 줄 서기에 성공해 감시를 멈춥니다.", context);
-                    this.stopAndNotify();
                 }
                 return;
             }

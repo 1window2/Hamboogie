@@ -247,29 +247,9 @@ export interface HamboogieApi {
     onState(listener: (state: AppState) => void): () => void;
     /** 개발 모드 전용입니다. 배포 빌드에서는 호출하면 실패합니다. */
     devTestRun(input: DevTestInput): Promise<DevTestResult>;
-    /** 개발 모드 전용입니다. 테스트 갤러리의 목록·검색 결과나 글 하나를 읽습니다. */
-    devProbe(probe: DevProbe): Promise<unknown>;
     /** 개발 모드 전용입니다. 테스트 갤러리 1번 글에서 실제 디시 API를 차례로 점검하고, 단 댓글은 지웁니다. */
     devApiCheck(): Promise<DevApiCheckStep[]>;
-    /** 개발 모드 전용입니다. 감시를 시작하고, 처음 줄 서기에 성공하면 바로 멈춥니다. */
-    devWatchUntilFirstSuccess(): Promise<{running: boolean}>;
-    /** 개발 모드 전용입니다. 이 글에 그 갤러리의 대기 계정이 단 댓글을 지웁니다. */
-    devDeleteMyComments(galleryId: string, postNo: number): Promise<{account: string; deleted: {no?: number; memo?: string}[]; left: number}>;
-    /** 개발 모드 전용입니다. 테스트 갤러리 대기 계정이 가진 디시콘을 봅니다(`recent`면 최근 쓴 디시콘도). */
-    devOwnedDccons(recent?: boolean): Promise<unknown>;
-    /** 개발 모드 전용입니다. 그 계정에 무료(가격 0) 디시콘 패키지를 추가합니다. */
-    devAddFreeDccon(loginId: string, packageIdx: number): Promise<unknown>;
-    /** 개발 모드 전용입니다. `minutes`분 잠들었다 깨어난 것처럼 엔진에 알립니다. */
-    devSimulateSleep(minutes: number, offline: boolean): Promise<{running: boolean; waitedSec: number}>;
-    /** 개발 모드 전용입니다. 더미 글 여러 개를 LLM 요청 한 번으로 판단합니다. */
-    devBatchTest(posts: {title: string; body: string; no?: number; postedAt?: number}[]): Promise<{elapsedMs: number; decisions: (Record<string, unknown> | null)[]}>;
 }
-
-/** 개발 모드에서 디시 응답을 직접 확인할 때 보내는 요청입니다. 테스트 갤러리에만 보냅니다. */
-export type DevProbe =
-    | {kind: "list"; search?: {keyword: string; type: "subject_m" | "subject" | "memo"}}
-    | {kind: "read"; no: number}
-    | {kind: "comments"; no: number};
 
 /** 실제 디시 API 점검의 한 단계 결과입니다. */
 export interface DevApiCheckStep {

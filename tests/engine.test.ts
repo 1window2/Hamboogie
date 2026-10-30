@@ -592,16 +592,6 @@ describe("Engine 판단 기록과 테스트용 멈춤", () => {
         expect(records).toEqual([]);
     });
 
-    it("테스트 설정을 켜면 처음 줄 서기에 성공하는 즉시 감시를 멈춘다", async () => {
-        const {engine, written, logger} = setup();
-        engine.stopAfterFirstSuccess = true;
-        engine.start();
-        await engine.dispatch(gallery, {no: 60, title: "나눔"}, plan(0), LIVE);
-        await vi.waitFor(() => expect(written).toEqual([["a", 60]]));
-        await vi.waitFor(() => expect(engine.running).toBe(false));
-        expect(engine.stopAfterFirstSuccess).toBe(false);
-        expect(logged(logger, "첫 줄 서기에 성공해 감시를 멈춥니다")).toBe(true);
-    });
 });
 
 describe("Engine 기준 글", () => {

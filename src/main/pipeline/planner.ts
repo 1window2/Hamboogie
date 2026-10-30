@@ -65,6 +65,15 @@ export function resolveClock(clock: string, reference: number): number | null {
     return reference - sameDay > PAST_WINDOW_MS ? sameDay + DAY_MS : sameDay;
 }
 
+/** LLM 판단 근거의 최대 길이입니다. 근거는 로그와 알림에만 쓰지만, 글의 지시로 긴 글을 쏟아내도 알림이 넘치지 않게 자릅니다. */
+const REASON_MAX = 200;
+
+/** LLM이 쓴 글(판단 근거, 시각)을 알림에 넣을 수 있게 자릅니다. */
+export function brief(text: string, max = REASON_MAX): string {
+    const chars = Array.from(text);
+    return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : text;
+}
+
 export function eligible(account: {memberType: MemberType | null}, requirement: Decision["member_requirement"]): boolean {
     switch (requirement) {
         case "any":
@@ -92,6 +101,11 @@ const BAIT_WORDS = [
     "봇", "매크로", "자동", "bot", "macro", "프로그램", "크롤",
     "ai", "에이아이", "인공지능", "gpt", "지피티", "llm", "claude", "클로드", "gemini", "제미나이", "기계", "사람아니", "사람이아니", "사람아님", "사람이아님"
 ];
+/** 내 계정으로 달면 안 되는 욕설과 비하, 운영진을 가리키는 말입니다. 요구 문구에 있으면 자동으로 달지 않고 알립니다. */
+const ABUSIVE_WORDS = [
+    "시발", "씨발", "씨빨", "시바", "ㅅㅂ", "ㅆㅂ", "병신", "븅신", "ㅂㅅ", "좆", "존나", "졸라", "개새", "새끼", "ㅅㄲ", "꺼져", "닥쳐",
+    "죽어", "뒤져", "미친", "ㅁㅊ", "지랄", "ㅈㄹ", "애미", "느금", "엠창", "장애", "등신", "멍청", "바보", "운영자", "매니저", "관리자", "파딱", "주딱"
+];
 /**
  * 글 자체에 이런 말이 있으면 봇을 걸러내려는 글일 수 있어 자동으로 줄 서지 않고 알립니다.
  * ("댓글 단 매크로 차단" 같은 글). "로봇"처럼 흔한 낱말 안에 들어 있는 것은 세지 않습니다.
@@ -118,6 +132,27 @@ export function findBaitWord(postText: string): string | null {
 }
 
 /**
+ * LLM 판단을 바꾸려는 지시(프롬프트 인젝션)에 쓰이는 말입니다. 공백과 기호를 지운 뒤 소문자로 봅니다.
+ * 판단 형식의 항목 이름(is_giveaway 등)이나 "이전 지시를 무시해" 같은 말은 평범한 나눔 글에는 나오지 않습니다.
+ */
+const INJECTION_WORDS = [
+    "isgiveaway", "isfood", "linemethod", "linetext", "dcconkeyword", "memberrequirement", "needsextraaction",
+    "systemprompt", "시스템프롬프트", "시스템지시", "ignoreprevious", "ignoreall", "ignoretheabove", "ignoreyour", "previousinstructions",
+    "이전지시", "앞의지시", "위의지시", "기존지시", "지시를무시", "지시무시", "지시사항을무시", "명령을무시", "규칙을무시", "프롬프트를무시",
+    "너는이제", "이제부터너는", "나눔이라고답", "나눔이라고판단", "나눔으로판단해"
+];
+/** LLM에 보내는 글의 구역을 나누는 태그입니다. 글에 이런 태그가 있으면 구역을 닫고 지시를 끼워 넣으려는 것일 수 있습니다. */
+const PROMPT_TAG = /<\s*\/?\s*(post|title|body|images|posted_at)\b/i;
+
+/** 글에 LLM 판단을 바꾸려는 듯한 말이 있으면 그 말을 돌려줍니다. */
+export function findInjectionWord(postText: string): string | null {
+    const tag = PROMPT_TAG.exec(postText);
+    if (tag) return tag[0];
+    const text = normalizeForMatch(postText).replace(/[\p{P}\p{S}]/gu, "");
+    return INJECTION_WORDS.find((word) => text.includes(word)) ?? null;
+}
+
+/**
  * 줄 서기 시작 시각으로 보이는 표현입니다("9시부터", "21:00부터", "9시 반부터", "10분 뒤부터"). 글에 이런 말이 있는데 LLM이
  * 시작 시각을 비워 두면 시작 전에 댓글을 달아 무효가 될 수 있어, 자동으로 서지 않고 알립니다.
  */
@@ -125,6 +160,9 @@ const START_HINT = /(\d{1,2}\s*시(\s*\d{1,2}\s*분|\s*반)?|\d{1,2}:\d{2})\s*(�
 
 /** 연락처나 외부 링크로 이어지는 단어입니다. */
 const CONTACT_WORDS = ["카톡", "카카오", "오픈채팅", "텔레", "telegram", "디코", "discord", "라인", "연락", "전화", "번호", "계좌", "주소", "링크"];
+
+/** 요구 문구에 있으면 자동으로 달지 않는 말입니다. "ㅅㅂ" 같은 자음은 정리하면 다른 글자가 되므로 문구와 같은 방식으로 정리해 둡니다. */
+const BLOCKED_COMMENT_WORDS = [...BAIT_WORDS, ...CONTACT_WORDS, ...ABUSIVE_WORDS].map(normalizeForMatch);
 
 /**
  * 텍스트 댓글로 자동으로 달아도 되는 문구인지 확인합니다. 글 내용은 누구나 쓸 수 있으므로,
@@ -140,7 +178,7 @@ export function isSafeCommentText(text: string): boolean {
     const compactText = normalizeForMatch(normalized);
     // 링크처럼 보이는 것(점 뒤 영문 2자 이상), 숫자 5자리 이상(전화번호 등)
     if (/\.[a-z]{2,}/.test(compactText) || /\d{5,}/.test(compactText.replace(/[^0-9]/g, ""))) return false;
-    if ([...BAIT_WORDS, ...CONTACT_WORDS].some((word) => compactText.includes(word))) return false;
+    if (BLOCKED_COMMENT_WORDS.some((word) => compactText.includes(word))) return false;
     return true;
 }
 
@@ -171,7 +209,7 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     let endsAt: number | null = null;
     if (decision.ends_at) {
         endsAt = resolveClock(decision.ends_at, detectedAt);
-        if (endsAt === null) return {kind: "notify", reason: `마감 시각을 해석할 수 없음: ${decision.ends_at}`};
+        if (endsAt === null) return {kind: "notify", reason: `마감 시각을 해석할 수 없음: ${brief(decision.ends_at, 20)}`};
         // 작성 시각을 초까지 모르면 "5분 후 마감" 같은 상대 마감이 실제보다 늦게 계산될 수 있어 그만큼 앞당겨 봅니다.
         endsAt -= deadlineSlackMs;
         if (endsAt - END_MARGIN_MS <= detectedAt) return {kind: "skip", reason: `마감 시각(${decision.ends_at})이 지남`};
@@ -181,16 +219,19 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     const qualified = accounts.filter((account) => eligible(account, decision.member_requirement));
     if (qualified.length === 0) return {kind: "skip", reason: "참여 자격에 맞는 대기 계정이 없음"};
 
-    if (decision.needs_extra_action) return {kind: "notify", reason: `댓글 외의 행동이 필요함: ${decision.reason}`};
+    if (decision.needs_extra_action) return {kind: "notify", reason: `댓글 외의 행동이 필요함: ${brief(decision.reason)}`};
     const bait = findBaitWord(postText);
     if (bait) return {kind: "notify", reason: `글에 봇을 걸러내려는 듯한 말("${bait}")이 있어 직접 확인이 필요함`};
-    if (decision.line_method === "unclear") return {kind: "notify", reason: `줄 서는 방법을 판단할 수 없음: ${decision.reason}`};
+    // LLM이 지시에 넘어가 나눔이 아닌 글을 나눔으로 판단했을 수 있으므로 자동으로 서지 않습니다.
+    const injection = findInjectionWord(postText);
+    if (injection) return {kind: "notify", reason: `글에 LLM 판단을 바꾸려는 듯한 말("${injection}")이 있어 직접 확인이 필요함`};
+    if (decision.line_method === "unclear") return {kind: "notify", reason: `줄 서는 방법을 판단할 수 없음: ${brief(decision.reason)}`};
     if (!decision.starts_at && START_HINT.test(postText)) return {kind: "notify", reason: "글에 줄 서기 시작 시각이 있는 것 같은데 판단에서 빠져 직접 확인이 필요함"};
 
     let notBefore = detectedAt;
     if (decision.starts_at) {
         const startsAt = resolveClock(decision.starts_at, detectedAt);
-        if (startsAt === null) return {kind: "notify", reason: `시작 시각을 해석할 수 없음: ${decision.starts_at}`};
+        if (startsAt === null) return {kind: "notify", reason: `시작 시각을 해석할 수 없음: ${brief(decision.starts_at, 20)}`};
         // 이미 시작했어도 정각 직후라면 여유 시간까지는 기다립니다.
         notBefore = Math.max(detectedAt, startsAt + START_MARGIN_MS);
     }
@@ -212,10 +253,10 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
         if (!required) {
             return {kind: "comment", attempts: qualified.map((account) => ({accountId: account.id, content: pickDefault(account) ?? {type: "text", text: DEFAULT_COMMENT_TEXT}})), ...common};
         }
-        if (!isSafeCommentText(required)) return {kind: "notify", reason: `요구 문구를 자동으로 달기 어려움: "${required}"`};
+        if (!isSafeCommentText(required)) return {kind: "notify", reason: `요구 문구를 자동으로 달기 어려움: "${brief(required, 40)}"`};
         // LLM이 지어낸 문구를 달지 않도록, 요구 문구는 글에 실제로 있어야 합니다.
         if (!normalizeForMatch(postText).includes(normalizeForMatch(required))) {
-            return {kind: "notify", reason: `요구 문구가 글에 없음: "${required}"`};
+            return {kind: "notify", reason: `요구 문구가 글에 없음: "${brief(required, 40)}"`};
         }
         return {kind: "comment", attempts: qualified.map((account) => ({accountId: account.id, content: {type: "text", text: required}})), ...common};
     }
@@ -234,6 +275,6 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
         const dccon = findDccon(account.dccons, keyword);
         return dccon ? [{accountId: account.id, content: {type: "dccon" as const, dccon}}] : [];
     });
-    if (attempts.length === 0) return {kind: "notify", reason: `요구 디시콘("${keyword}")을 가진 대기 계정이 없음`};
+    if (attempts.length === 0) return {kind: "notify", reason: `요구 디시콘("${brief(keyword, 40)}")을 가진 대기 계정이 없음`};
     return {kind: "comment", attempts, ...common};
 }

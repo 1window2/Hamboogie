@@ -4,7 +4,7 @@
 // 디시에는 글을 쓰지 않으며, 댓글은 아래에 고정한 테스트 갤러리의 1번 글에만 답니다.
 import type {DCInside} from "@green-1052/dcinside.js";
 import {errorMessage} from "@shared/errors";
-import type {DevApiCheckStep, DevProbe, DevTestInput, DevTestResult, Settings} from "@shared/types";
+import type {DevApiCheckStep, DevTestInput, DevTestResult, Settings} from "@shared/types";
 import type {AccountManager} from "../dc/accounts";
 import {checkGallery} from "../dc/gallery-check";
 import type {CommentContent} from "../pipeline/planner";
@@ -181,106 +181,7 @@ async function apiCheck(deps: Deps): Promise<DevApiCheckStep[]> {
 }
 
 export function registerDevTestIpc(deps: Deps, handle: TrustedHandle): void {
-    // 감시를 시작하되, 처음 줄 서기에 성공하는 즉시 멈추게 합니다(실제 갤러리 테스트용).
-    handle("devWatchUntilFirstSuccess", () => {
-        deps.engine.stopAfterFirstSuccess = true;
-        deps.engine.start();
-        deps.logger.info(`${LABEL} 첫 줄 서기 성공 시 감시를 멈추도록 하고 감시를 시작합니다.`);
-        return {running: deps.engine.running};
-    });
-    // 테스트로 단 댓글을 지웁니다. 그 갤러리의 대기 계정(로그인된 첫 계정)이 단 댓글만 지우고, 다른 사람 댓글은 건드리지 않습니다.
-    handle("devDeleteMyComments", async (_event, galleryId: string, postNo: number) => {
-        const settings = deps.settings();
-        const gallery = settings.galleries.find((item) => item.galleryId === galleryId);
-        if (!gallery || !Number.isInteger(postNo)) throw new Error("갤러리 탭에 있는 갤러리와 글 번호만 쓸 수 있습니다.");
-        const reading = deps.accounts.readingClient(settings.accounts, gallery.accountIds);
-        if (!reading) throw new Error(`${galleryId} 갤러리의 대기 계정 중 로그인된 계정이 없습니다.`);
-        const loginId = settings.accounts.find((account) => account.id === reading.accountId)!.loginId;
-        // 댓글이 많으면 여러 페이지로 나뉘어 오므로 모든 페이지에서 찾습니다.
-        const myComments = async () => {
-            const found = [];
-            for await (const page of reading.client.comments.pages(galleryId, postNo)) {
-                found.push(...(page.comment_list ?? []).filter((comment) => comment.comment_no !== undefined && comment.user_id === loginId));
-            }
-            return found;
-        };
-        const mine = await myComments();
-        for (const comment of mine) await reading.client.comments.delete(galleryId, postNo, comment.comment_no!);
-        const left = mine.length > 0 ? await myComments() : [];
-        deps.logger.info(`${LABEL} ${galleryId} #${postNo}에서 ${loginId} 계정 댓글 ${mine.length}개 지움${left.length ? ` (남은 댓글 ${left.length}개)` : ""}`);
-        return {account: loginId, deleted: mine.map((comment) => ({no: comment.comment_no, memo: comment.comment_memo})), left: left.length};
-    });
-    // 여러 더미 글을 LLM 요청 한 번으로 판단해 봅니다. 디시에는 요청하지 않습니다.
-    handle("devBatchTest", async (_event, posts: {title: string; body: string; no?: number; postedAt?: number}[]) => {
-        const startedAt = Date.now();
-        const decisions = await deps.engine.decideBatch(posts);
-        return {elapsedMs: Date.now() - startedAt, decisions};
-    });
     handle("devApiCheck", () => apiCheck(deps));
-    // 컴퓨터가 `minutes`분 동안 잠들었다 깨어난 것처럼 엔진에 알립니다. offline이면 깨어난 뒤 네트워크가 없는 것으로 칩니다.
-    handle("devSimulateSleep", async (_event, minutes: number, offline: boolean) => {
-        const engine = deps.engine as unknown as {deps: {checkNetwork?: () => Promise<boolean>}};
-        const real = engine.deps.checkNetwork;
-        if (offline) engine.deps.checkNetwork = async () => false;
-        deps.engine.suspend(Date.now() - minutes * 60 * 1000);
-        const startedAt = Date.now();
-        try {
-            await deps.engine.resume();
-        } finally {
-            engine.deps.checkNetwork = real;
-        }
-        return {running: deps.engine.running, waitedSec: Math.round((Date.now() - startedAt) / 1000)};
-    });
-    // 지정한 계정에 무료 디시콘 패키지를 추가합니다(기본 디시콘 테스트용). 가격(만두)이 0일 때만 추가하고, 아니면 가격만 알려 줍니다.
-    handle("devAddFreeDccon", async (_event, loginId: string, packageIdx: number) => {
-        const settings = deps.settings();
-        const account = settings.accounts.find((item) => item.loginId === loginId);
-        if (!account) throw new Error("계정 탭에 있는 계정만 쓸 수 있습니다.");
-        const reading = deps.accounts.readingClient(settings.accounts, [account.id]);
-        if (!reading) throw new Error(`${loginId} 계정이 로그인되어 있지 않습니다.`);
-        const detail = await reading.client.dccons.detail(packageIdx);
-        const info = detail.info?.[0];
-        const price = Number(info?.mandu ?? NaN);
-        if (!(price === 0)) return {added: false, title: info?.title, price: info?.mandu, state: info?.get_state};
-        const result = await reading.client.dccons.buy(packageIdx);
-        deps.logger.info(`${LABEL} ${loginId} 계정에 무료 디시콘 "${info?.title}" 추가: ${JSON.stringify(result)}`);
-        return {added: true, title: info?.title, price: info?.mandu, state: info?.get_state, result};
-    });
-    // 테스트 갤러리 대기 계정이 가진 디시콘입니다. 로그인할 때 불러 둔 목록이라 디시에 요청하지 않습니다.
-    // recent가 true면 최근 쓴 디시콘도 함께 봅니다(디시 요청 1번).
-    handle("devOwnedDccons", async (_event, recent?: boolean) => {
-        const settings = deps.settings();
-        const gallery = settings.galleries.find((item) => item.galleryId === TEST_GALLERY_ID);
-        const account = gallery ? deps.accounts.candidates(settings.accounts, gallery.accountIds)[0] : undefined;
-        if (!account) throw new Error(`${TEST_GALLERY_ID} 갤러리의 대기 계정 중 로그인된 계정이 없습니다.`);
-        const packages = new Map<string, {packageIdx: number; items: string[]}>();
-        for (const dccon of account.dccons) {
-            const entry = packages.get(dccon.packageTitle) ?? {packageIdx: dccon.packageIdx, items: []};
-            entry.items.push(`${dccon.detailIdx}:${dccon.title}`);
-            packages.set(dccon.packageTitle, entry);
-        }
-        const recentList = recent ? (await testReading(deps).client.dccons.recent()).map((item) => ({packageIdx: item.package_idx, detailIdx: item.detail_idx, title: item.title})) : undefined;
-        return {
-            memberType: account.memberType, total: account.dccons.length, packageCount: packages.size,
-            packages: [...packages].slice(0, 25).map(([title, {packageIdx, items}]) => ({title, packageIdx, count: items.length, items: items.slice(0, 6)})),
-            recent: recentList
-        };
-    });
     handle("devTestRun", (_event, input: DevTestInput) => run(deps, input));
-    // 디시 응답을 직접 확인하는 용도입니다. 테스트 갤러리(asgeir)에만 요청하며, 부를 때마다 요청 한 번입니다.
-    handle("devProbe", async (_event, probe: DevProbe) => {
-        const articles = testReading(deps).client.articles;
-        if (probe.kind === "comments") {
-            const comments = await testReading(deps).client.comments.list(TEST_GALLERY_ID, probe.no);
-            return (comments.comment_list ?? []).map(({comment_no, user_id, name, comment_memo, dccon, dccon_detail_idx, dccon_type}) =>
-                ({comment_no, user_id, name, comment_memo: comment_memo?.slice(0, 80), dccon: dccon?.slice(0, 80), dccon_detail_idx, dccon_type}));
-        }
-        if (probe.kind === "read") {
-            const article = await articles.read(TEST_GALLERY_ID, probe.no);
-            return {title: article.view_info?.subject ?? "", body: htmlToText(article.view_main?.memo ?? ""), date: article.view_info?.date_time};
-        }
-        const response = await articles.list({gallery: TEST_GALLERY_ID, ...(probe.search ? {search: probe.search} : {})});
-        return (response.gall_list ?? []).map((item) => ({no: item.no, subject: item.subject, date: item.date_time}));
-    });
 }
 
