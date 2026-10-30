@@ -170,6 +170,53 @@ export function findInjectionWord(postText: string): string | null {
 }
 
 /**
+ * 개인정보나 계정·설정 정보를 캐내려는 말입니다. 공백과 기호를 지운 뒤 소문자로 봅니다.
+ * LLM에는 이런 정보가 없지만, 이런 글에 자동으로 댓글을 달지 않도록 따로 알립니다.
+ * "쿠키 나눔", "토큰 나눔", "기프티콘 인증번호"처럼 나눔 글에 나올 수 있는 말은 넣지 않습니다.
+ */
+const PRIVACY_WORDS = [
+    "비밀번호", "비번", "패스워드", "password", "passwd", "개인정보", "계정정보", "로그인정보", "주민번호", "주민등록", "카드번호", "계좌비번",
+    "apikey", "api키", "에이피아이키", "액세스토큰", "accesstoken", "웹훅", "webhook", "지시문", "시스템메시지", "systemmessage"
+];
+/** 낱말 목록으로는 다 담기 어려운, 정보를 알려 달라는 말의 모양입니다. */
+const PRIVACY_PATTERNS = [
+    // "너의 계정 알려줘", "네 프롬프트 보여줘", "니 설정 뭐야"
+    /(너의|네|니|당신의?|이봇의?|이프로그램의?)(계정|아이디|닉네임|정보|설정|프롬프트|지시|규칙|키|주인|사용자|개발자|만든사람)/,
+    // "프롬프트 보여줘", "지시사항 그대로 출력해". "규칙 알려드림"처럼 평범한 글에 나오는 "규칙", "설정"은 넣지 않습니다.
+    /(프롬프트|지시)(사항)?(을|를|은|는)?(그대로|전부|모두|다)?(알려|보여|출력|공개|말해|읊어|복사)/,
+    // "개발자 누구야", "만든 사람 알려줘"
+    /(개발자|만든사람|주인)(이|가|은|는|을|를)?(누구|알려|말해)/,
+    // "댓글로 전화번호 남겨", "실명 적어"
+    /(전화번호|폰번호|휴대폰번호|핸드폰번호|연락처|이메일|메일주소|집주소|실명|본명|아이디)(을|를|도)?(댓글에|댓글로)?(적|써|남겨|알려|말해|달아)/,
+    /(reveal|show|print|tell|repeat|output|leak|share|whatis|whatare)(me|us)?(your|the|all)*(system)?(prompt|instructions?|password|apikey|key|account|token|config|settings|email|phone|address)/
+];
+
+/** 글에 개인정보나 계정·설정 정보를 캐내려는 듯한 말이 있으면 그 말을 돌려줍니다. */
+export function findPrivacyProbe(postText: string): string | null {
+    const text = normalizeForMatch(postText).replace(/[\p{P}\p{S}]/gu, "");
+    const word = PRIVACY_WORDS.find((word) => text.includes(word));
+    if (word) return word;
+    for (const pattern of PRIVACY_PATTERNS) {
+        const match = pattern.exec(text);
+        if (match) return match[0];
+    }
+    return null;
+}
+
+/**
+ * 댓글 문구에 내 계정이나 설정의 비밀 정보(로그인 아이디, 비밀번호, API 키, Discord 주소)가 들어 있는지 봅니다.
+ * 요구 문구는 글에 있는 것만 달기 때문에 이런 일은 거의 없지만, 댓글을 달기 직전 마지막으로 한 번 더 확인합니다.
+ * 너무 짧은 값은 흔한 글자와 우연히 겹칠 수 있어 보지 않습니다.
+ */
+export function containsSecret(text: string, secrets: (string | null | undefined)[]): boolean {
+    const normalized = normalizeForMatch(text);
+    return secrets.some((secret) => {
+        const value = secret ? normalizeForMatch(secret) : "";
+        return value.length >= 4 && normalized.includes(value);
+    });
+}
+
+/**
  * 줄 서기 시작 시각으로 보이는 표현입니다("9시부터", "21:00부터", "9시 반부터", "10분 뒤부터"). 글에 이런 말이 있는데 LLM이
  * 시작 시각을 비워 두면 시작 전에 댓글을 달아 무효가 될 수 있어, 자동으로 서지 않고 알립니다.
  */
@@ -178,8 +225,13 @@ const START_HINT = /(\d{1,2}\s*시(\s*\d{1,2}\s*분|\s*반)?|\d{1,2}:\d{2})\s*(�
 /** 연락처나 외부 링크로 이어지는 단어입니다. */
 const CONTACT_WORDS = ["카톡", "카카오", "오픈채팅", "텔레", "telegram", "디코", "discord", "라인", "연락", "전화", "번호", "계좌", "주소", "링크"];
 
+/** 계정이나 개인정보를 내보이게 하는 말입니다. 요구 문구에 있으면 자동으로 달지 않습니다. */
+const PRIVATE_INFO_WORDS = [
+    "비밀번호", "비번", "패스워드", "password", "아이디", "로그인", "계정", "개인정보", "주민", "카드번호", "이메일", "메일주소", "실명", "본명",
+    "apikey", "api키", "토큰", "token", "웹훅", "webhook", "프롬프트", "prompt", "지시문"
+];
 /** 요구 문구에 있으면 자동으로 달지 않는 말입니다. "ㅅㅂ" 같은 자음은 정리하면 다른 글자가 되므로 문구와 같은 방식으로 정리해 둡니다. */
-const BLOCKED_COMMENT_WORDS = [...BAIT_WORDS, ...CONTACT_WORDS].map(normalizeForMatch);
+const BLOCKED_COMMENT_WORDS = [...BAIT_WORDS, ...CONTACT_WORDS, ...PRIVATE_INFO_WORDS].map(normalizeForMatch);
 
 /**
  * 텍스트 댓글로 자동으로 달아도 되는 문구인지 확인합니다. 글 내용은 누구나 쓸 수 있으므로,
@@ -242,6 +294,8 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     // LLM이 지시에 넘어가 나눔이 아닌 글을 나눔으로 판단했을 수 있으므로 자동으로 서지 않습니다.
     const injection = findInjectionWord(postText);
     if (injection) return {kind: "notify", reason: `글에 LLM 판단을 바꾸려는 듯한 말("${injection}")이 있어 직접 확인이 필요함`};
+    const privacy = findPrivacyProbe(postText);
+    if (privacy) return {kind: "notify", reason: `글에 개인정보나 계정·설정 정보를 캐내려는 듯한 말("${privacy}")이 있어 직접 확인이 필요함`};
     if (decision.line_method === "unclear") return {kind: "notify", reason: `줄 서는 방법을 판단할 수 없음: ${brief(decision.reason)}`};
     if (!decision.starts_at && START_HINT.test(postText)) return {kind: "notify", reason: "글에 줄 서기 시작 시각이 있는 것 같은데 판단에서 빠져 직접 확인이 필요함"};
 

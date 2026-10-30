@@ -1,6 +1,6 @@
 import type {DCInside, PostItem} from "@green-1052/dcinside.js";
 import {errorMessage} from "@shared/errors";
-import {FREE_DAILY_LLM_REQUESTS, galleryProblems, nextAutoStopAt} from "@shared/settings";
+import {FREE_DAILY_LLM_REQUESTS, galleryProblems, nextAutoStopAt, PROVIDERS} from "@shared/settings";
 import type {GalleryConfig, GalleryStatus, HistoryEntry, LlmUsageView, Settings} from "@shared/types";
 import {isAppIdFailure, isCaptchaFailure, isDefiniteCommentFailure, isLoginExpired, type AccountManager} from "../dc/accounts";
 import type {AppIdBackoff} from "../dc/app-id-backoff";
@@ -18,7 +18,7 @@ import {AutoStopTimer} from "./auto-stop";
 import {clockText, kstClockText, postUrl} from "@shared/time";
 import {findKeyword, matchesKeywords} from "./keyword-filter";
 import {postedAtRange} from "./post-time";
-import {brief, eligible, END_MARGIN_MS, makePlan, type Plan} from "./planner";
+import {brief, containsSecret, eligible, END_MARGIN_MS, makePlan, type Plan} from "./planner";
 
 /** 한 번 확인할 때 최대로 넘겨볼 목록 페이지 수입니다. */
 const MAX_PAGES_PER_TICK = 3;
@@ -1108,6 +1108,14 @@ export class Engine {
             if ("reason" in checked) return cancel(checked.reason);
             attempts = checked.attempts;
         }
+        // 마지막 관문: 댓글 문구에 내 계정이나 설정의 비밀 정보가 들어 있으면 어떤 경로로 만들어진 계획이든 달지 않습니다.
+        // 알림에는 문구를 넣지 않습니다(그 정보가 Discord로 나가지 않게).
+        if (attempts.some((attempt) => attempt.content.type === "text" && containsSecret(attempt.content.text, this.secretValues()))) {
+            const reason = "댓글 문구에 내 계정이나 설정 정보가 들어 있어 달지 않음";
+            cancel(reason);
+            await this.notify(`${prefix}줄 서기 취소: ${post.title}`, `${reason}. 글을 직접 확인하세요.`, gallery.galleryId, post.no);
+            return;
+        }
 
         const failures: string[] = [];
         for (const attempt of attempts) {
@@ -1167,6 +1175,17 @@ export class Engine {
             detail,
             ...(test ? {test} : {})
         });
+    }
+
+    /** 댓글에 들어가면 안 되는 값입니다: 계정 로그인 아이디와 비밀번호, LLM API 키, Discord 주소. */
+    private secretValues(): (string | null)[] {
+        const {secrets} = this.deps;
+        const settings = this.deps.settings();
+        return [
+            ...settings.accounts.flatMap((account) => [account.loginId, secrets.get(`account:${account.id}`)]),
+            ...PROVIDERS.map((provider) => secrets.get(`llm:${provider}`)),
+            settings.discordWebhookUrl
+        ];
     }
 
     private notify(title: string, description: string, galleryId: string, postNo: number): Promise<void> {

@@ -30,6 +30,7 @@ function setup(options: {notifyOnSuccess?: boolean; write?: (accountId: string, 
         appId: new AppIdBackoff(),
         history: {add: (entry: HistoryEntry) => recorded.push(entry)},
         logger,
+        secrets: {get: () => null},
         settings: () => settings,
         accounts: {
             candidates: () => [],
@@ -72,6 +73,23 @@ describe("Engine 예약과 멈춤", () => {
         expect(written).toEqual([["a", 11]]);
         expect(recorded[0]).toMatchObject({postNo: 11, outcome: "success", detail: "계정a 계정으로 \"줄\""});
         expect(ledger.has("gf2", 11)).toBe(true);
+    });
+
+    it("댓글 문구에 내 로그인 아이디나 비밀번호, API 키가 있으면 어떤 계획이든 달지 않는다", async () => {
+        const {engine, written, recorded, update} = setup();
+        update({accounts: [{id: "a", loginId: "testid01", memberTypeOverride: "auto", defaultDccons: []}]});
+        const secret: Record<string, string> = {"account:a": "pw-test-9", "llm:gemini": "test-llm-key"};
+        Object.assign((engine as unknown as {deps: EngineDeps}).deps, {secrets: {get: (key: string) => secret[key] ?? null}});
+        const texts = ["저는 testid01", "PW - TEST - 9", "test-llm-key"];
+        for (const [index, text] of texts.entries()) {
+            await engine.dispatch(gallery, {no: 30 + index, title: "나눔"}, plan(0, {attempts: [{accountId: "a", content: {type: "text", text}}]}), LIVE);
+        }
+        await vi.waitFor(() => expect(recorded).toHaveLength(texts.length));
+        expect(written).toEqual([]);
+        for (const entry of recorded) expect(entry).toMatchObject({outcome: "failure", detail: "댓글 문구에 내 계정이나 설정 정보가 들어 있어 달지 않음"});
+        // 평범한 문구는 그대로 단다.
+        await engine.dispatch(gallery, {no: 40, title: "나눔"}, plan(0), LIVE);
+        await vi.waitFor(() => expect(written).toEqual([["a", 40]]));
     });
 
     it("감시를 멈추면 예약된 줄 서기를 취소하고 기록에 남긴다", async () => {
