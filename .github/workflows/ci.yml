@@ -38,6 +38,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # 릴리스 워크플로처럼 Windows에서도 테스트를 돌려, 태그를 올리기 전에 Windows에서만 깨지는 테스트를 찾습니다.
+      - run: npm test
       - run: npm run dist:win -- --publish never
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
