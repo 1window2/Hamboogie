@@ -1,7 +1,7 @@
 import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
 import {pathToFileURL} from "node:url";
-import {app, BrowserWindow, dialog, nativeImage, net, Notification, powerMonitor, powerSaveBlocker, session, shell, type IpcMainInvokeEvent} from "electron";
+import {app, BrowserWindow, dialog, nativeImage, net, Notification, powerMonitor, powerSaveBlocker, session, shell, utilityProcess, type IpcMainInvokeEvent} from "electron";
 import {PROVIDERS} from "@shared/settings";
 import type {AccountConfig, AppState, DcconPackage, SecretKey, Settings} from "@shared/types";
 import type {DCInside, DeviceCredentials} from "@green-1052/dcinside.js";
@@ -20,7 +20,7 @@ import {errorMessage} from "@shared/errors";
 import {DcconImages} from "./dc/dccon-images";
 import {loadPostImages, type ShrinkImage} from "./dc/post-images";
 import {isDecodableSize} from "./dc/image-size";
-import {handleQuitSignals, QUIT_DEADLINE_MS, quitDeadline, startWatchdog, watchCpu} from "./safety";
+import {handleQuitSignals, HEARTBEAT_MS, QUIT_DEADLINE_MS, quitDeadline, startWatchdog, watchCpu} from "./safety";
 
 /** 두 주소의 출처(프로토콜, 호스트, 포트)가 같은지 봅니다. 앞부분만 비교하면 `localhost:51730`이 `localhost:5173`을 통과합니다. */
 function sameOrigin(a: string, b: string): boolean {
@@ -54,12 +54,30 @@ function quitForSafety(): void {
 }
 
 /**
- * macOS에서 dmg 안의 앱을 바로 실행했으면 Applications 폴더로 옮길지 묻습니다. dmg를 꺼내면 실행 중인 앱의 파일이
- * 사라져 앱이 고장 나기 때문입니다. 옮기면 Applications의 앱으로 다시 켜집니다.
+ * Windows에서 메인 프로세스가 멈췄는지 지켜보는 별도 프로세스를 띄우고, 정해진 간격마다 생존 신호를 보냅니다.
+ * macOS·Linux는 앱 밖 감시 프로세스(셸)가 같은 일을 하므로 띄우지 않습니다.
  */
-async function offerMoveToApplications(): Promise<void> {
-    if (process.platform !== "darwin" || !app.isPackaged || app.isInApplicationsFolder()) return;
-    if (!process.execPath.startsWith("/Volumes/")) return;
+function startHeartbeatWatchdog(): void {
+    if (process.platform !== "win32") return;
+    try {
+        const watchdog = utilityProcess.fork(join(import.meta.dirname, "heartbeat-watchdog.js"), [], {serviceName: "Hamboogie Watchdog"});
+        // 감시 프로세스에 문제가 생겨도 앱은 그대로 돕니다(앱 안의 확인은 계속됩니다).
+        watchdog.on("error", () => {});
+        watchdog.postMessage({pid: process.pid});
+        setInterval(() => watchdog.postMessage({}), HEARTBEAT_MS).unref();
+    } catch {
+        // 띄우지 못해도 앱 안의 확인은 그대로 돕니다.
+    }
+}
+
+/**
+ * macOS에서 dmg 안의 앱을 바로 실행했으면 Applications 폴더로 옮길지 묻습니다. dmg를 꺼내면 실행 중인 앱의 파일이
+ * 사라져 앱이 고장 나기 때문입니다. 옮기면 Applications의 앱으로 다시 켜지므로 true를 돌려줍니다(그러면 이 앱은 시작을 멈춥니다).
+ * 내려받은 dmg는 macOS가 앱을 임시 위치(AppTranslocation)로 옮겨 실행하므로 그 경우도 봅니다.
+ */
+async function offerMoveToApplications(): Promise<boolean> {
+    if (process.platform !== "darwin" || !app.isPackaged || app.isInApplicationsFolder()) return false;
+    if (!process.execPath.startsWith("/Volumes/") && !process.execPath.includes("/AppTranslocation/")) return false;
     const {response} = await dialog.showMessageBox({
         type: "warning",
         message: "디스크 이미지(dmg)에서 바로 실행 중입니다",
@@ -68,11 +86,12 @@ async function offerMoveToApplications(): Promise<void> {
         defaultId: 0,
         cancelId: 1
     });
-    if (response !== 0) return;
+    if (response !== 0) return false;
     try {
-        app.moveToApplicationsFolder({conflictHandler: (type) => type === "exists"});
+        return app.moveToApplicationsFolder({conflictHandler: (type) => type === "exists"});
     } catch (error) {
         dialog.showErrorBox("Applications 폴더로 옮기지 못했습니다", `${errorMessage(error)}\ndmg 창에서 Hamboogie를 Applications 폴더로 직접 끌어다 놓으세요.`);
+        return false;
     }
 }
 
@@ -132,10 +151,12 @@ async function main(): Promise<void> {
     });
     // 앱이 고장 나 CPU를 붙잡거나 실행 파일이 사라지면(실행 중인 dmg를 꺼냄 등) 스스로 끝냅니다.
     startWatchdog();
+    startHeartbeatWatchdog();
     watchCpu({
-        cpuPercent: () => app.getAppMetrics().reduce((sum, metric) => sum + metric.cpu.percentCPUUsage, 0),
-        onRunaway: (percent) => {
-            const message = `앱이 CPU를 오래 많이 써서(약 ${Math.round(percent)}%) 다른 작업을 막지 않도록 앱을 끕니다. 다시 켜 주세요.`;
+        sample: () => app.getAppMetrics().map((metric) => ({pid: metric.pid, seconds: metric.cpu.cumulativeCPUUsage ?? 0})),
+        onRunaway: (percent, scope) => {
+            const what = scope === "app" ? "앱이" : "앱의 프로세스 하나가";
+            const message = `${what} CPU를 오래 많이 써서(코어 하나 기준 약 ${Math.round(percent)}%) 다른 작업을 막지 않도록 앱을 끕니다. 다시 켜 주세요.`;
             logger.warn(message);
             if (Notification.isSupported()) new Notification({title: "Hamboogie를 껐습니다", body: message}).show();
             quitForSafety();
@@ -145,7 +166,8 @@ async function main(): Promise<void> {
             quitForSafety();
         }
     });
-    await offerMoveToApplications();
+    // Applications로 옮겼으면 옮긴 앱이 다시 켜지므로, 이 앱은 시작을 멈추고 끝납니다.
+    if (await offerMoveToApplications()) return;
     const settingsStore = new SettingsStore(dataDir);
     for (const note of settingsStore.loadNotes) logger.warn(note);
     const secrets = new SecretStore(dataDir);
