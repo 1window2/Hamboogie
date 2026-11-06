@@ -104,7 +104,8 @@ export interface CpuWatchOptions {
 
 /** 앱 안에서 CPU 사용률과 실행 파일을 주기적으로 확인합니다. 멈추는 함수를 돌려줍니다. */
 export function watchCpu(options: CpuWatchOptions): () => void {
-    const {sample, onRunaway, onExecutableGone, executable = process.execPath, exists = existsSync, now = Date.now, intervalMs = CPU_CHECK_MS} = options;
+    // 시계를 거꾸로 맞춰도 사용률이 튀지 않게, 단조 증가하는 시간으로 잽니다.
+    const {sample, onRunaway, onExecutableGone, executable = process.execPath, exists = existsSync, now = () => performance.now(), intervalMs = CPU_CHECK_MS} = options;
     const appGuard = options.appGuard ?? new CpuGuard();
     const processGuard = options.processGuard ?? new CpuGuard(PROCESS_LIMIT_PERCENT, PROCESS_OVER_CHECKS);
     const meter = new CpuMeter();
@@ -138,16 +139,24 @@ export function watchCpu(options: CpuWatchOptions): () => void {
 export class HeartbeatMonitor {
     private beaten = true;
     private missed = 0;
+    private paused = false;
 
     constructor(private readonly limit: number) {}
 
+    /** 생존 신호입니다. 쉬던 중이었으면 다시 셉니다. */
     beat(): void {
         this.beaten = true;
+        this.paused = false;
+    }
+
+    /** 컴퓨터가 잠들 때 부릅니다. 다음 생존 신호까지 세지 않습니다(잠든 동안 메인 프로세스만 멈춰 있어도 끄지 않게). */
+    pause(): void {
+        this.paused = true;
     }
 
     /** 간격 하나가 지났습니다. 멈춘 것으로 볼 때가 되면 true입니다. */
     tick(): boolean {
-        this.missed = this.beaten ? 0 : this.missed + 1;
+        this.missed = this.beaten || this.paused ? 0 : this.missed + 1;
         this.beaten = false;
         return this.missed >= this.limit;
     }
@@ -180,8 +189,14 @@ children() { ps -A -o pid= -o ppid= | awk -v p="$pid" -v me="$$" '$1 != me && $2
 # 명령줄이 앱 폴더 경로로 시작하는 프로세스만 고릅니다(이 감시 프로세스, 그 경로를 인자로 받은 다른 프로그램은 빠집니다).
 from_root() { ps -A -o pid= -o command= | awk -v r="$root/" '{ p = $1; sub(/^ *[0-9]+ +/, ""); if (index($0, r) == 1) print p }'; }
 orphans() { ps -A -o pid= -o ppid= -o command= | awk -v r="$root/" '$2 == 1 { p = $1; sub(/^ *[0-9]+ +[0-9]+ +/, ""); if (index($0, r) == 1 && index($0, "--type=")) print p }'; }
-# 앱이 살아 있는지입니다. 끝났지만 부모가 거두지 않은 프로세스(zombie)는 끝난 것으로 봅니다.
-alive() { st=$(ps -o stat= -p "$pid" 2>/dev/null); case "$st" in ""|*Z*) return 1 ;; esac; return 0; }
+# 앱이 살아 있는지입니다. 끝났지만 부모가 거두지 않은 프로세스(zombie)는 끝난 것으로 보고, 시작 시각이 처음과 다르면
+# 앱이 끝난 뒤 다른 프로그램이 같은 pid를 받은 것이므로 역시 끝난 것으로 봅니다(그 프로그램을 건드리지 않게).
+started=$(ps -o lstart= -p "$pid" 2>/dev/null)
+alive() {
+  st=$(ps -o stat= -p "$pid" 2>/dev/null)
+  case "$st" in ""|*Z*) return 1 ;; esac
+  [ "$(ps -o lstart= -p "$pid" 2>/dev/null)" = "$started" ]
+}
 cleanup() {
   [ -e "$exe" ] || kill -KILL $(from_root) 2>/dev/null
   sleep 2

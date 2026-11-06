@@ -1,5 +1,5 @@
-import {copyFileSync, existsSync, mkdirSync} from "node:fs";
-import {join} from "node:path";
+import {accessSync, constants, copyFileSync, existsSync, mkdirSync} from "node:fs";
+import {dirname, join} from "node:path";
 import {pathToFileURL} from "node:url";
 import {app, BrowserWindow, dialog, nativeImage, net, Notification, powerMonitor, powerSaveBlocker, session, shell, utilityProcess, type IpcMainInvokeEvent} from "electron";
 import {PROVIDERS} from "@shared/settings";
@@ -20,7 +20,7 @@ import {errorMessage} from "@shared/errors";
 import {DcconImages} from "./dc/dccon-images";
 import {loadPostImages, type ShrinkImage} from "./dc/post-images";
 import {isDecodableSize} from "./dc/image-size";
-import {handleQuitSignals, HEARTBEAT_MS, QUIT_DEADLINE_MS, quitDeadline, startWatchdog, watchCpu} from "./safety";
+import {appRoot, handleQuitSignals, HEARTBEAT_MS, QUIT_DEADLINE_MS, quitDeadline, startWatchdog, watchCpu} from "./safety";
 
 /** 두 주소의 출처(프로토콜, 호스트, 포트)가 같은지 봅니다. 앞부분만 비교하면 `localhost:51730`이 `localhost:5173`을 통과합니다. */
 function sameOrigin(a: string, b: string): boolean {
@@ -53,20 +53,39 @@ function quitForSafety(): void {
     app.quit();
 }
 
+/** 이 폴더에 쓸 수 있는지입니다. */
+function isWritable(dir: string): boolean {
+    try {
+        accessSync(dir, constants.W_OK);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 /**
  * Windows에서 메인 프로세스가 멈췄는지 지켜보는 별도 프로세스를 띄우고, 정해진 간격마다 생존 신호를 보냅니다.
- * macOS·Linux는 앱 밖 감시 프로세스(셸)가 같은 일을 하므로 띄우지 않습니다.
+ * 컴퓨터가 잠들 때는 쉬라고 알립니다. macOS·Linux는 앱 밖 감시 프로세스(셸)가 같은 일을 하므로 띄우지 않습니다.
  */
-function startHeartbeatWatchdog(): void {
+function startHeartbeatWatchdog(logger: Logger): void {
     if (process.platform !== "win32") return;
+    let quitting = false;
+    app.on("before-quit", () => {
+        quitting = true;
+    });
     try {
         const watchdog = utilityProcess.fork(join(import.meta.dirname, "heartbeat-watchdog.js"), [], {serviceName: "Hamboogie Watchdog"});
-        // 감시 프로세스에 문제가 생겨도 앱은 그대로 돕니다(앱 안의 확인은 계속됩니다).
-        watchdog.on("error", () => {});
+        // 감시 프로세스에 문제가 생겨도 앱은 그대로 돕니다(앱 안의 확인은 계속됩니다). 앱을 끄는 중이 아닌데 끝났으면 기록합니다.
+        watchdog.on("error", (type) => logger.warn(`앱 감시 프로세스 오류: ${type}`));
+        watchdog.on("exit", (code) => {
+            if (!quitting) logger.warn(`앱 감시 프로세스가 끝났습니다(코드 ${code}). 앱이 멈추면 스스로 끄는 안전장치 하나가 빠진 상태입니다.`);
+        });
         watchdog.postMessage({pid: process.pid});
         setInterval(() => watchdog.postMessage({}), HEARTBEAT_MS).unref();
-    } catch {
-        // 띄우지 못해도 앱 안의 확인은 그대로 돕니다.
+        powerMonitor.on("suspend", () => watchdog.postMessage({pause: true}));
+        powerMonitor.on("resume", () => watchdog.postMessage({}));
+    } catch (error) {
+        logger.warn(`앱 감시 프로세스를 띄우지 못했습니다: ${errorMessage(error)}`);
     }
 }
 
@@ -78,6 +97,8 @@ function startHeartbeatWatchdog(): void {
 async function offerMoveToApplications(): Promise<boolean> {
     if (process.platform !== "darwin" || !app.isPackaged || app.isInApplicationsFolder()) return false;
     if (!process.execPath.startsWith("/Volumes/") && !process.execPath.includes("/AppTranslocation/")) return false;
+    // dmg와 임시 위치는 쓸 수 없는 곳입니다. 쓸 수 있는 외장 디스크에 일부러 둔 앱이면 묻지 않습니다.
+    if (isWritable(dirname(appRoot(process.execPath)))) return false;
     const {response} = await dialog.showMessageBox({
         type: "warning",
         message: "디스크 이미지(dmg)에서 바로 실행 중입니다",
@@ -151,7 +172,7 @@ async function main(): Promise<void> {
     });
     // 앱이 고장 나 CPU를 붙잡거나 실행 파일이 사라지면(실행 중인 dmg를 꺼냄 등) 스스로 끝냅니다.
     startWatchdog();
-    startHeartbeatWatchdog();
+    startHeartbeatWatchdog(logger);
     watchCpu({
         sample: () => app.getAppMetrics().map((metric) => ({pid: metric.pid, seconds: metric.cpu.cumulativeCPUUsage ?? 0})),
         onRunaway: (percent, scope) => {

@@ -9,9 +9,11 @@ const monitor = new HeartbeatMonitor(HEARTBEAT_MISSES);
 let mainPid = 0;
 
 process.parentPort.on("message", (event) => {
-    const data = event.data as {pid?: unknown} | undefined;
+    const data = event.data as {pid?: unknown; pause?: unknown} | undefined;
     if (typeof data?.pid === "number") mainPid = data.pid;
-    monitor.beat();
+    // 메인 프로세스가 컴퓨터가 잠든다고 알리면, 깨어나 다시 신호를 보낼 때까지 세지 않습니다.
+    if (data?.pause === true) monitor.pause();
+    else monitor.beat();
 });
 
 setInterval(() => {

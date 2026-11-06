@@ -67,6 +67,15 @@ describe("HeartbeatMonitor", () => {
         expect([monitor.tick(), monitor.tick(), monitor.tick()]).toEqual([false, false, false]);
         expect(monitor.tick()).toBe(true);
     });
+
+    it("잠든다고 알린 뒤에는 다시 생존 신호가 올 때까지 세지 않는다", () => {
+        const monitor = new HeartbeatMonitor(2);
+        monitor.tick();
+        monitor.pause();
+        expect([monitor.tick(), monitor.tick(), monitor.tick()]).toEqual([false, false, false]);
+        monitor.beat();
+        expect([monitor.tick(), monitor.tick(), monitor.tick()]).toEqual([false, false, true]);
+    });
 });
 
 /** `watchCpu`에 넣을 가짜 측정값입니다. 부를 때마다 프로세스 하나가 `percent`(코어 하나 = 100)만큼 1초씩 더 쓴 것으로 셉니다. */
@@ -279,6 +288,23 @@ describe.skipIf(process.platform === "win32")("앱 밖 감시 프로세스", () 
             app.kill("SIGKILL");
         }
     }, 20_000);
+
+    it("앱이 끝난 뒤 같은 pid를 받은 다른 프로세스는 앱으로 보지 않는다", async () => {
+        // 감시를 시작할 때의 시작 시각과 다르면 끝난 것으로 봅니다. 시작 시각을 바꿀 수는 없으므로, 감시 대상이 아닌 프로세스의
+        // 시작 시각으로 감시를 시작한 것처럼 스크립트의 저장값을 바꿔 확인합니다.
+        const app = spawn("/bin/sh", ["-c", "trap '' TERM; while :; do :; done"], {stdio: "ignore"});
+        const script = WATCHDOG_SCRIPT.replace('started=$(ps -o lstart= -p "$pid" 2>/dev/null)', "started='Thu Jan  1 00:00:00 1970'");
+        const watchdog = spawn("/bin/sh", ["-c", script, "test", String(app.pid), "/bin/sh", "/nonexistent-root", "30", "1", "30", "1", "1", "1"], {stdio: "ignore"});
+        const watchdogExit = new Promise((resolve) => watchdog.on("exit", resolve));
+        try {
+            await Promise.race([watchdogExit, new Promise((resolve) => setTimeout(resolve, 8000))]);
+            // CPU 한도를 넘었지만 다른 프로세스로 보았으므로 건드리지 않았습니다.
+            expect(() => process.kill(app.pid!, 0)).not.toThrow();
+        } finally {
+            app.kill("SIGKILL");
+            watchdog.kill("SIGKILL");
+        }
+    }, 15_000);
 
     it("평범한 프로세스는 건드리지 않고, 앱이 끝나면 스스로 끝난다", async () => {
         const app = spawn("/bin/sleep", ["4"], {stdio: "ignore"});
