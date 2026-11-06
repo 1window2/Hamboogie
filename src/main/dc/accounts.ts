@@ -32,6 +32,9 @@ const DCCON_RETRY_MS = 10 * 60 * 1000;
  */
 export class CommentNotPostedError extends Error {}
 
+/** 댓글을 보내기 직전에 이 계정의 로그인 세션이 바뀌어(다시 로그인, 계정 삭제, 아이디 변경) 보내지 않은 경우입니다. */
+class SessionChangedError extends CommentNotPostedError {}
+
 /**
  * 댓글이 달리지 않은 것이 확실한 실패인지 확인합니다. 서버가 명시적으로 거절했거나(ApiError 계열),
  * 댓글 요청을 보내기 전 단계(앱 인증, 디시콘 준비 등)에서 실패해 `CommentNotPostedError`로 바꾼 경우입니다.
@@ -40,6 +43,8 @@ export class CommentNotPostedError extends Error {}
 export function isDefiniteCommentFailure(error: unknown): boolean {
     return error instanceof ApiError || error instanceof CommentNotPostedError || isAppIdFailure(error);
 }
+
+const CHANGED_ACCOUNT_MESSAGE = "그사이 이 계정의 로그인이 바뀌어(다시 로그인, 계정 삭제, 아이디 변경) 이 세션으로 댓글을 달지 않았습니다.";
 
 const APP_ID_REFUSED_MESSAGE = "디시 앱 인증(app_id) 발급이 일시적으로 거절되었습니다. 같은 IP에서 짧은 시간에 여러 번 발급받으면 한동안 막히며, 잠시 후 다시 시도합니다.";
 
@@ -130,6 +135,8 @@ export class AccountManager {
     private refusal = APP_ID_REFUSED_MESSAGE;
     /** 진행 중인 로그인입니다. 같은 계정의 재로그인이 겹치면 하나만 하고 결과를 함께 씁니다. */
     private readonly pendingLogins = new Map<string, Promise<AccountStatus>>();
+    /** 진행 중인 계정 점검(`maintain`)입니다. */
+    private maintaining: Promise<boolean> | null = null;
 
     constructor(
         private readonly secrets: Pick<SecretStore, "get" | "has" | "set">,
@@ -150,12 +157,13 @@ export class AccountManager {
      *
      * @param otp 사용자가 입력한 OTP 6자리입니다.
      * @param freshDevice 저장된 기기 정보를 버리고 새로 받습니다.
+     * @param manual 사용자가 로그인 버튼으로 직접 한 로그인입니다. 이미 로그인된 계정을 다시 로그인하다 실패하면 원래 로그인을 그대로 씁니다.
      */
-    async login(account: AccountConfig, otp?: string, freshDevice = false): Promise<AccountStatus> {
+    async login(account: AccountConfig, otp?: string, freshDevice = false, manual = false): Promise<AccountStatus> {
         // OTP를 넣은 로그인은 사용자가 직접 한 것이라 겹치지 않습니다. 자동 재로그인만 합칩니다.
         const pending = otp ? undefined : this.pendingLogins.get(account.id);
         if (pending) return pending;
-        const attempt = this.doLogin(account, otp, freshDevice);
+        const attempt = this.doLogin(account, otp, freshDevice, manual);
         if (!otp) this.pendingLogins.set(account.id, attempt);
         try {
             return await attempt;
@@ -164,7 +172,7 @@ export class AccountManager {
         }
     }
 
-    private async doLogin(account: AccountConfig, otp: string | undefined, freshDevice: boolean): Promise<AccountStatus> {
+    private async doLogin(account: AccountConfig, otp: string | undefined, freshDevice: boolean, manual: boolean): Promise<AccountStatus> {
         const password = this.secrets.get(`account:${account.id}`);
         if (!account.loginId || !password) {
             const message = account.loginId && this.secrets.has(`account:${account.id}`)
@@ -201,8 +209,18 @@ export class AccountManager {
             // 기기 정보를 새로 받는 로그인은 그 자체가 오래 이어진 거절을 풀려는 시도라 예외입니다.
             if (freshDevice || this.appId.canTry()) {
                 if (await this.loadDccons(loggedIn) === "login_expired") {
+                    client.logout();
                     if (dropped()) return {state: "logged_out"};
-                    return this.setStatus(account.id, {state: "error", message: "로그인 직후 세션이 끊겼습니다. 잠시 뒤 다시 로그인하세요."});
+                    const message = "로그인 직후 세션이 끊겼습니다. 잠시 뒤 다시 로그인하세요.";
+                    // 이미 로그인된 계정을 다시 로그인하다 그런 것이면 원래 로그인은 그대로 씁니다(화면 상태도 원래대로).
+                    const kept = manual ? this.sessions.get(account.id) : undefined;
+                    if (kept) {
+                        this.setStatus(account.id, this.loggedInStatus(account, kept));
+                        return {state: "error", message: `${message} 그동안 원래 로그인을 그대로 씁니다.`};
+                    }
+                    this.sessions.get(account.id)?.client.logout();
+                    this.sessions.delete(account.id);
+                    return this.setStatus(account.id, {state: "error", message});
                 }
             } else {
                 loggedIn.dcconError = this.refusal;
@@ -210,17 +228,38 @@ export class AccountManager {
             if (dropped()) return {state: "logged_out"};
             // app_id를 받은 뒤에 저장해야 앱을 다시 켰을 때 app_id를 또 발급받지 않습니다.
             await saveDevice(this.secrets, deviceKey, client);
+            // 저장하는 사이 계정을 지웠거나 로그인을 내려놓았을 수 있습니다. 그러면 세션을 버리고 라이브러리의 자동 재로그인도 막습니다.
+            if (dropped()) {
+                client.logout();
+                return {state: "logged_out"};
+            }
+            this.sessions.get(account.id)?.client.logout();
             this.sessions.set(account.id, loggedIn);
             this.retries.delete(account.id);
             return this.setStatus(account.id, this.loggedInStatus(account, loggedIn));
         } catch (error) {
             if (dropped()) return {state: "logged_out"};
+            // 로그인된 계정을 사용자가 다시 로그인하다 실패했으면(네트워크가 잠깐 끊김, OTP 요구 등) 원래 로그인은 그대로 씁니다.
+            // OTP를 요구받았으면 OTP를 넣을 때까지 원래 로그인으로 감시를 이어가고, OTP를 넣으면 새 로그인으로 바꿉니다.
+            const kept = manual ? this.sessions.get(account.id) : undefined;
+            if (kept && error instanceof OtpRequiredError) {
+                this.retries.delete(account.id);
+                this.awaitingOtp.set(account.id, client);
+                return this.setStatus(account.id, {state: "otp_required", message: "OTP 번호를 입력하세요. 입력할 때까지 원래 로그인을 그대로 씁니다."});
+            }
+            if (kept) {
+                client.logout();
+                this.setStatus(account.id, this.loggedInStatus(account, kept));
+                return {state: "error", message: `다시 로그인하지 못해 원래 로그인을 그대로 씁니다: ${errorMessage(error)}`};
+            }
+            this.sessions.get(account.id)?.client.logout();
             this.sessions.delete(account.id);
             if (error instanceof OtpRequiredError) {
                 // OTP를 직접 넣어야 하므로 자동 재로그인을 그만둡니다(계속 시도하면 확인할 때마다 비밀번호 로그인이 나갑니다).
                 this.retries.delete(account.id);
-                this.awaitingOtp.set(account.id, client);
                 await saveDevice(this.secrets, deviceKey, client);
+                if (dropped()) return {state: "logged_out"};
+                this.awaitingOtp.set(account.id, client);
                 // 저장된 토큰으로 실패했다면 만료된 것이므로 지웁니다.
                 if (otpToken) await this.secrets.set(otpKey, "");
                 return this.setStatus(account.id, {
@@ -254,19 +293,36 @@ export class AccountManager {
         });
     }
 
-    /** 이 계정의 로그인 세션과 자동 재로그인 예정을 버립니다. 그 전에 시작한 로그인의 결과도 버려집니다. */
+    /**
+     * 이 계정의 로그인 세션과 자동 재로그인 예정을 버립니다. 그 전에 시작한 로그인의 결과도 버려집니다.
+     * 이미 내준 클라이언트(글 읽기나 댓글 달기 도중인 것)도 로그아웃시킵니다. 라이브러리는 로그인 비밀번호를 기억해 두었다가
+     * 세션이 만료되면 스스로 다시 로그인하므로, 그대로 두면 지운 계정이나 바꾸기 전 아이디로 다시 로그인해 하던 일을 이어갑니다.
+     */
     private forget(accountId: string): void {
         this.generations.set(accountId, (this.generations.get(accountId) ?? 0) + 1);
+        this.sessions.get(accountId)?.client.logout();
+        this.awaitingOtp.get(accountId)?.logout();
         this.pendingLogins.delete(accountId);
         this.sessions.delete(accountId);
         this.awaitingOtp.delete(accountId);
         this.retries.delete(accountId);
     }
 
-    /** 로그인 세션을 버립니다(설정에서 아이디를 바꾼 경우). 다시 로그인해야 그 아이디로 쓰입니다. */
+    /** 로그인 세션을 버립니다(새 계정에 처음 아이디를 넣었을 때, 아이디를 바꿨을 때). 다시 로그인해야 쓰입니다. */
     logout(accountId: string): void {
         this.forget(accountId);
         this.setStatus(accountId, {state: "logged_out"});
+    }
+
+    /**
+     * 설정에서 계정의 아이디를 바꿨을 때 부릅니다. 예전 아이디의 세션을 버리고, 예전 아이디의 OTP 토큰과 기기 정보를 지웁니다.
+     * 같은 기기 정보로 두 계정이 이어져 보이지 않게 하기 위해서입니다. 비밀번호는 지우지 않습니다(새 계정을 추가하며
+     * 비밀번호를 먼저 저장하고 아이디를 나중에 저장하는 경우가 있어서입니다).
+     */
+    async changeLoginId(accountId: string): Promise<void> {
+        this.logout(accountId);
+        await this.secrets.set(`device:${accountId}`, "");
+        await this.secrets.set(`otp:${accountId}`, "");
     }
 
     /** 일시적인 오류로 자동 재로그인을 기다리는 계정인지입니다. */
@@ -333,6 +389,12 @@ export class AccountManager {
      * 상태가 바뀐 계정이 있으면 true를 돌려줍니다.
      */
     async maintain(accounts: AccountConfig[]): Promise<boolean> {
+        // 여러 갤러리의 확인이 함께 시작되면 겹쳐 불립니다. 디시콘 목록 요청이 두 번 나가거나 app_id 거절을 두 번 세지 않게 하나만 돌립니다.
+        this.maintaining ??= this.doMaintain(accounts).finally(() => (this.maintaining = null));
+        return this.maintaining;
+    }
+
+    private async doMaintain(accounts: AccountConfig[]): Promise<boolean> {
         let changed = false;
         // 일시적인 오류로 로그인하지 못한 계정은 때가 되면 다시 로그인합니다(잠자기에서 깨어난 직후 네트워크가 없었을 때 등).
         for (const [id, retry] of [...this.retries]) {
@@ -348,7 +410,10 @@ export class AccountManager {
         for (const [id, loggedIn] of this.sessions) {
             if (!loggedIn.dcconError || !this.appId.canTry()) continue;
             if (loggedIn.dcconRetryAt !== undefined && this.now() < loggedIn.dcconRetryAt) continue;
-            if (await this.loadDccons(loggedIn) === "login_expired") {
+            const loaded = await this.loadDccons(loggedIn);
+            // 불러오는 사이 계정을 지웠거나 로그인을 내려놓았으면 상태를 되살리지 않습니다.
+            if (this.sessions.get(id) !== loggedIn) continue;
+            if (loaded === "login_expired") {
                 // 확인할 때마다 로그인을 다시 시도하지 않도록, OTP 토큰으로도 살릴 수 없으면 세션을 내려놓습니다.
                 await this.recoverLogin(id, "보유 디시콘을 불러오다 로그인이 풀림");
             } else {
@@ -405,6 +470,7 @@ export class AccountManager {
             // OTP를 다시 입력해야 하거나, 일시적인 오류라 자동으로 다시 로그인할 예정이면 그 안내를 그대로 둡니다.
             if (status.state === "otp_required" || this.retries.has(accountId)) return false;
         }
+        loggedIn.client.logout();
         this.sessions.delete(accountId);
         this.setStatus(accountId, {state: "error", message: `로그인이 풀렸습니다. 계정 탭에서 다시 로그인하세요. (${reason})`});
         return false;
@@ -440,22 +506,29 @@ export class AccountManager {
     async writeComment(accountId: string, galleryId: string, postNo: number, content: CommentContent): Promise<void> {
         const loggedIn = this.sessions.get(accountId);
         if (!loggedIn) throw new CommentNotPostedError("로그인되지 않은 계정입니다.");
-        // 받아 둔 app_id가 아직 유효하면 대기 중이어도 씁니다(발급 요청이 나가지 않습니다).
-        // 유효 기간은 라이브러리가 app_id를 발급받은 시각부터 셉니다.
-        const issuedAt = loggedIn.client.auth.exportCredentials()?.appIdIssuedAt;
-        const hasFreshAppId = typeof issuedAt === "number" && Date.now() - issuedAt < APP_ID_FRESH_MS;
-        if (!hasFreshAppId && !this.appId.canTry()) throw new CommentNotPostedError(this.refusal);
+        this.ensureAppIdUsable(loggedIn);
+        // 댓글을 보내기 직전에 이 세션이 아직 이 계정의 것인지 봅니다(그사이 계정을 지웠거나 아이디를 바꿨으면 달지 않습니다).
+        const current = () => this.sessions.get(accountId) === loggedIn;
+        // 계정을 지웠거나 아이디를 바꾸면 세대가 바뀝니다. 같은 계정으로 다시 로그인한 것뿐이면 세대는 그대로입니다.
+        const generation = this.generations.get(accountId) ?? 0;
+        const sameAccount = () => !this.removed.has(accountId) && (this.generations.get(accountId) ?? 0) === generation;
         try {
-            await this.write(loggedIn.client, galleryId, postNo, content);
+            await this.write(loggedIn.client, galleryId, postNo, content, current);
             this.appId.succeed();
             return;
         } catch (error) {
             let renewed: LoggedIn | undefined;
-            if (isAppIdFailure(error)) {
+            if (error instanceof SessionChangedError) {
+                // 같은 계정으로 다시 로그인해 세션만 바뀐 것이면(자동 재로그인, 기기 정보 갱신 등) 새 세션으로 한 번 더 시도합니다.
+                renewed = this.sessions.get(accountId);
+                if (!sameAccount() || !renewed) throw error;
+            } else if (isAppIdFailure(error)) {
                 const needsFreshDevice = this.refuseAppId(error);
                 // 앱 버전이 낮아 거절된 것이면 기기 정보를 새로 받아도 풀리지 않습니다.
                 if (isOutdatedAppError(error)) throw new CommentNotPostedError(OUTDATED_APP_MESSAGE);
                 if (!needsFreshDevice) throw new CommentNotPostedError(APP_ID_REFUSED_MESSAGE);
+                // 그사이 계정을 지웠거나 아이디를 바꿨으면, 예전 설정으로 다시 로그인해 예전 계정으로 댓글을 달지 않습니다.
+                if (!sameAccount()) throw new SessionChangedError(CHANGED_ACCOUNT_MESSAGE);
                 const status = await this.login(loggedIn.account, undefined, true);
                 renewed = this.sessions.get(accountId);
                 if (status.state !== "logged_in" || !renewed) {
@@ -472,15 +545,27 @@ export class AccountManager {
             } else {
                 throw error;
             }
-            await this.write(renewed.client, galleryId, postNo, content);
+            const session = renewed;
+            this.ensureAppIdUsable(session);
+            await this.write(session.client, galleryId, postNo, content, () => sameAccount() && this.sessions.get(accountId) === session);
         }
+    }
+
+    /**
+     * 받아 둔 app_id가 아직 유효하면 거절로 쉬는 중이어도 씁니다(발급 요청이 나가지 않습니다). 유효하지 않은데 쉬는 중이면
+     * 발급 요청을 늘리지 않도록 확실한 실패로 처리합니다. 유효 기간은 라이브러리가 app_id를 발급받은 시각부터 셉니다.
+     */
+    private ensureAppIdUsable(session: LoggedIn): void {
+        const issuedAt = session.client.auth.exportCredentials()?.appIdIssuedAt;
+        const hasFreshAppId = typeof issuedAt === "number" && this.now() - issuedAt < APP_ID_FRESH_MS;
+        if (!hasFreshAppId && !this.appId.canTry()) throw new CommentNotPostedError(this.refusal);
     }
 
     /**
      * 댓글 요청을 보내기 전 단계(앱 인증, 디시콘 준비)는 먼저 마치고, 여기서 난 오류는 댓글이 달리지 않은 것이 확실하므로
      * `CommentNotPostedError`로 바꿉니다. 앱 인증 거절과 로그인 만료는 위에서 따로 처리하도록 그대로 던집니다.
      */
-    private async write(client: DCInside, galleryId: string, postNo: number, content: CommentContent): Promise<void> {
+    private async write(client: DCInside, galleryId: string, postNo: number, content: CommentContent, current: () => boolean): Promise<void> {
         let message: string | {dccons: {tag: string; detailIdx: number}[]};
         try {
             await client.auth.appId();
@@ -492,9 +577,12 @@ export class AccountManager {
                 message = {dccons: [{tag: inserted.img_tag, detailIdx: content.dccon.detailIdx}]};
             }
         } catch (error) {
+            // 준비하는 사이 다시 로그인해 이 클라이언트가 로그아웃됐으면(로그인이 필요하다는 오류) 세션이 바뀐 것으로 봅니다.
+            if (!current()) throw new SessionChangedError(CHANGED_ACCOUNT_MESSAGE);
             if (isAppIdFailure(error) || isLoginExpired(error) || error instanceof CommentNotPostedError) throw error;
             throw new CommentNotPostedError(`댓글을 보내기 전에 실패했습니다: ${errorMessage(error)}`);
         }
+        if (!current()) throw new SessionChangedError(CHANGED_ACCOUNT_MESSAGE);
         await client.comments.write(galleryId, postNo, message);
     }
 
@@ -511,6 +599,10 @@ export class AccountManager {
         this.removed.add(accountId);
         this.forget(accountId);
         this.statuses.delete(accountId);
+        await this.clearSecrets(accountId);
+    }
+
+    private async clearSecrets(accountId: string): Promise<void> {
         // 앞부분이 같은 다른 키까지 지우지 않도록 정확한 키만 지웁니다.
         await this.secrets.set(`account:${accountId}`, "");
         await this.secrets.set(`device:${accountId}`, "");

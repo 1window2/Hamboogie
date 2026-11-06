@@ -64,8 +64,8 @@ export function startUpdater(onChange: (state: UpdateState) => void, beforeInsta
             if (!response.ok) return;
             const release = await response.json() as {tag_name?: string; html_url?: string};
             if (release.tag_name && isNewerVersion(release.tag_name, app.getVersion())) {
-                // 응답에 담긴 주소는 이 저장소의 릴리스 페이지일 때만 씁니다.
-                const url = release.html_url?.startsWith(`https://github.com${REPO_PATH}/releases/`) ? release.html_url : RELEASES_PAGE;
+                // 응답에 담긴 주소는 이 저장소의 릴리스 페이지일 때만 씁니다. "../" 같은 경로로 다른 곳을 가리키지 못하게 해석한 주소로 봅니다.
+                const url = isReleasePage(release.html_url) ? release.html_url! : RELEASES_PAGE;
                 set({state: "available", version: release.tag_name.replace(/^v/, ""), url});
             }
         } catch {
@@ -75,6 +75,17 @@ export function startUpdater(onChange: (state: UpdateState) => void, beforeInsta
     void check();
     setInterval(() => void check(), CHECK_INTERVAL_MS);
     return updater;
+}
+
+/** 이 저장소의 릴리스 페이지 주소인지입니다. 주소를 해석한 뒤의 경로로 봅니다. */
+export function isReleasePage(url: string | undefined): boolean {
+    if (!url) return false;
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === "https:" && parsed.hostname === "github.com" && parsed.port === "" && parsed.pathname.startsWith(`${REPO_PATH}/releases/`);
+    } catch {
+        return false;
+    }
 }
 
 /** Windows: GitHub Release의 latest.yml로 새 버전을 백그라운드에서 받아 두고, 재시작하거나 종료할 때 설치합니다. */

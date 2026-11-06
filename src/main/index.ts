@@ -1,5 +1,6 @@
 import {copyFileSync, existsSync, mkdirSync} from "node:fs";
 import {join} from "node:path";
+import {pathToFileURL} from "node:url";
 import {app, BrowserWindow, dialog, nativeImage, net, Notification, powerMonitor, powerSaveBlocker, session, shell, type IpcMainInvokeEvent} from "electron";
 import {PROVIDERS} from "@shared/settings";
 import type {AccountConfig, AppState, DcconPackage, SecretKey, Settings} from "@shared/types";
@@ -18,6 +19,7 @@ import {push, trustedHandle} from "./ipc";
 import {errorMessage} from "@shared/errors";
 import {DcconImages} from "./dc/dccon-images";
 import {loadPostImages, type ShrinkImage} from "./dc/post-images";
+import {isDecodableSize} from "./dc/image-size";
 
 /** 두 주소의 출처(프로토콜, 호스트, 포트)가 같은지 봅니다. 앞부분만 비교하면 `localhost:51730`이 `localhost:5173`을 통과합니다. */
 function sameOrigin(a: string, b: string): boolean {
@@ -33,7 +35,8 @@ function isAllowedExternalUrl(raw: string): boolean {
     try {
         const url = new URL(raw);
         if (url.protocol !== "https:") return false;
-        if (/(^|\.)dcinside\.com$/.test(url.hostname)) return true;
+        // 앱이 만드는 링크는 모바일 글 주소와 갤러리 주소뿐입니다.
+        if (url.hostname === "m.dcinside.com" || url.hostname === "gall.dcinside.com") return true;
         return url.hostname === "github.com" && url.pathname.startsWith(`${REPO_PATH}/`);
     } catch {
         return false;
@@ -43,8 +46,16 @@ function isAllowedExternalUrl(raw: string): boolean {
 /** LLM에 보낼 사진의 긴 변(px)입니다. 캡처 속 글자는 읽히면서 토큰은 너무 많이 쓰지 않는 크기입니다. */
 const POST_IMAGE_EDGE = 1024;
 
-/** 사진을 긴 변 기준으로 줄여 JPEG로 바꿉니다. Electron이 읽지 못하는 형식(움직이는 GIF 등 일부)은 빠집니다. */
+/** 비밀 정보(비밀번호, API 키)로 받는 값의 최대 길이입니다. */
+const SECRET_LENGTH_MAX = 4096;
+
+/**
+ * 사진을 긴 변 기준으로 줄여 JPEG로 바꿉니다. Electron이 읽지 못하는 형식(움직이는 GIF 등 일부)은 빠집니다.
+ * 풀기 전에 파일 머리에서 크기를 읽어, 해상도가 지나치게 큰 사진은 풀지 않습니다. 파일은 작아도 풀면 메모리를
+ * 몇 GB씩 쓰는 사진을 글에 올려 앱을 멈추게 하지 못하게 하기 위해서입니다.
+ */
 const shrinkImage: ShrinkImage = (bytes) => {
+    if (!isDecodableSize(bytes)) return null;
     const image = nativeImage.createFromBuffer(bytes);
     if (image.isEmpty()) return null;
     const {width, height} = image.getSize();
@@ -82,6 +93,7 @@ async function main(): Promise<void> {
     const dataDir = app.getPath("userData");
     const logger = new Logger(join(dataDir, "hamboogie.log"));
     const settingsStore = new SettingsStore(dataDir);
+    for (const note of settingsStore.loadNotes) logger.warn(note);
     const secrets = new SecretStore(dataDir);
     const ledger = new Ledger(dataDir);
     const history = new HistoryStore(dataDir);
@@ -134,7 +146,7 @@ async function main(): Promise<void> {
             if (Notification.isSupported()) new Notification({title, body}).show();
         },
         recordJudgment: (record) => judgments.append(record),
-        postImages: (urls) => loadPostImages(urls, shrinkImage),
+        postImages: (urls, stats) => loadPostImages(urls, shrinkImage, fetch, undefined, stats),
         usage: new LlmUsage(() => usageStore.load(), (record) => {
             usageStore.save(record);
             pushState();
@@ -204,9 +216,22 @@ async function main(): Promise<void> {
     // 창이 다른 페이지로 넘어가는 것은 아래에서 막지만, 혹시 다른 페이지가 preload API를 쓰려 해도 거절합니다.
     // 배포 빌드는 환경 변수로 다른 페이지를 띄울 수 없게, 개발 서버 주소를 개발 모드에서만 씁니다.
     const rendererUrl = app.isPackaged ? undefined : process.env["ELECTRON_RENDERER_URL"];
+    // 앱에 들어 있는 화면 파일의 경로입니다. 주소 표기(퍼센트 인코딩, Windows 드라이브 문자 대소문자)가 조금 달라도 같은 파일로 보도록 풀어서 비교합니다.
+    const filePath = (url: string) => {
+        const decoded = decodeURIComponent(new URL(url).pathname);
+        return process.platform === "win32" ? decoded.toLowerCase() : decoded;
+    };
+    const appPage = filePath(pathToFileURL(join(import.meta.dirname, "../renderer/index.html")).href);
     const fromApp = (event: IpcMainInvokeEvent): boolean => {
-        const url = event.senderFrame?.url ?? "";
-        return rendererUrl ? sameOrigin(url, rendererUrl) : url.startsWith("file://") && url.includes("/renderer/index.html");
+        const frame = event.senderFrame;
+        // 창의 최상위 화면에서 온 요청만 받습니다(혹시 생길 수 있는 하위 프레임은 받지 않습니다).
+        if (!frame || frame.parent !== null) return false;
+        if (rendererUrl) return sameOrigin(frame.url, rendererUrl);
+        try {
+            return new URL(frame.url).protocol === "file:" && filePath(frame.url) === appPage;
+        } catch {
+            return false;
+        }
     };
     const handle = trustedHandle(fromApp);
 
@@ -220,7 +245,15 @@ async function main(): Promise<void> {
     handle("getLogs", () => logger.recent());
     handle("getHistory", () => history.all());
     handle("installUpdate", () => updater?.install());
-    handle("saveSettings", async (_event, next: Settings) => {
+    // 설정 저장은 하나씩 처리합니다. 겹치면 뒤의 저장이 앞의 (아직 쓰지 못한) 설정을 기준으로 지운 계정을 계산해, 앞 저장이 실패했을 때
+    // 지운 계정의 비밀번호 정리를 빠뜨릴 수 있기 때문입니다.
+    let savingSettings: Promise<unknown> = Promise.resolve();
+    handle("saveSettings", (_event, next: Settings) => {
+        const saving = savingSettings.then(() => saveSettings(next));
+        savingSettings = saving.catch(() => {});
+        return saving;
+    });
+    async function saveSettings(next: Settings) {
         const before = settingsStore.get().accounts;
         // 먼저 저장해 봅니다. 저장이 실패하면 지운 계정의 비밀번호도 지우지 않습니다.
         await settingsStore.save(next);
@@ -228,23 +261,28 @@ async function main(): Promise<void> {
         for (const account of before) {
             const after = saved.find((item) => item.id === account.id);
             if (!after) await accounts.remove(account.id);
-            // 로그인된 계정의 아이디를 바꿨으면 예전 아이디의 세션을 버립니다(다시 로그인해야 새 아이디로 쓰입니다).
-            else if (after.loginId !== account.loginId) accounts.logout(account.id);
+            // 계정의 아이디를 바꿨으면 예전 아이디의 세션과 OTP 토큰·기기 정보를 버립니다(다시 로그인해야 새 아이디로 쓰입니다).
+            // 새로 추가한 계정에 처음 아이디를 넣은 것이면 버릴 것이 없습니다.
+            else if (after.loginId !== account.loginId) {
+                if (account.loginId) await accounts.changeLoginId(account.id);
+                else accounts.logout(account.id);
+            }
         }
         engine.syncGalleries();
         engine.refreshAutoStop();
         pushState();
         return state();
-    });
+    }
     handle("setSecret", async (_event, key: SecretKey, value: string) => {
         const valid = PROVIDERS.some((provider) => key === `llm:${provider}`)
             || (key.startsWith("account:") && settingsStore.get().accounts.some((account) => key === `account:${account.id}`));
         if (!valid) throw new Error("알 수 없는 항목입니다.");
+        if (typeof value !== "string" || value.length > SECRET_LENGTH_MAX) throw new Error("값이 올바르지 않습니다.");
         await secrets.set(key, value);
         return state();
     });
     async function loginAccount(account: AccountConfig, otp?: string): Promise<void> {
-        const pending = accounts.login(account, otp);
+        const pending = accounts.login(account, otp, false, true);
         pushState();
         const status = await pending;
         if (status.state === "logged_in") {
@@ -349,10 +387,14 @@ async function main(): Promise<void> {
             if (isAllowedExternalUrl(url)) void shell.openExternal(url);
             return {action: "deny"};
         });
-        // 앱 화면이 다른 페이지(창에 끌어다 놓은 파일 등)로 넘어가지 않게 합니다.
+        // 앱 화면이 다른 페이지(창에 끌어다 놓은 파일 등)로 넘어가지 않게 합니다. 하위 프레임과 webview도 막습니다.
         created.webContents.on("will-navigate", (event, url) => {
             if (!rendererUrl || !sameOrigin(url, rendererUrl)) event.preventDefault();
         });
+        created.webContents.on("will-frame-navigate", (event) => {
+            if (!event.isMainFrame) event.preventDefault();
+        });
+        created.webContents.on("will-attach-webview", (event) => event.preventDefault());
         if (rendererUrl) await created.loadURL(rendererUrl);
         else await created.loadFile(join(import.meta.dirname, "../renderer/index.html"));
         return created;
@@ -378,7 +420,8 @@ async function main(): Promise<void> {
         engine.stop();
         if (flushed) return;
         event.preventDefault();
-        void flushAllJson().finally(() => {
+        // 로그와 판단 기록의 마지막 줄도 마저 씁니다.
+        void Promise.all([flushAllJson(), logger.flush(), judgments.flush()]).finally(() => {
             flushed = true;
             app.quit();
         });

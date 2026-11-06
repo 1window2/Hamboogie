@@ -1,5 +1,6 @@
 import type {GalleryConfig, MemberType} from "@shared/types";
 import {DEFAULT_COMMENT_TEXT} from "@shared/settings";
+import {hasHiddenCharacter, normalizeForMatch, truncateChars} from "@shared/text";
 import {DAY_MS, kstDayStart} from "@shared/time";
 import type {Decision} from "../llm/decision";
 
@@ -36,9 +37,14 @@ export type Plan =
         /** 예약한 뒤 설정이 바뀌었을 때 실행 직전에 다시 확인하려고 남겨 둡니다. */
         requirement: Decision["member_requirement"];
         isFood: boolean;
+        /** 글에 줄 서기 시작 시각이 있어 그 시각에 맞춰 섰는지입니다. 실행 직전에 글이 바뀌어 시작 시각이 새로 생겼는지 볼 때 씁니다. */
+        hasStartTime?: boolean;
         /** 줄을 서기로 한 LLM의 근거입니다. 성공 알림에 함께 보냅니다. */
         basis?: string;
     };
+
+/** 사진 속 글자(LLM이 옮겨 적은 것)는 이만큼만 검사합니다. 사진 속 글자는 보통 짧고, LLM이 길게 써도 검사가 늘어지지 않게 합니다. */
+const IMAGE_TEXT_MAX = 2000;
 
 /** 요구 문구는 짧은 것만 자동으로 답니다. 긴 문구는 사람이 확인하도록 알림으로 넘깁니다. */
 const TEXT_MAX_LENGTH = 20;
@@ -50,8 +56,8 @@ export const END_MARGIN_MS = 2000;
 const PAST_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 /**
- * `HH:MM` 또는 `HH:MM:SS`(한국 시간)를 기준 시각 근처의 실제 시각으로 바꿉니다. 나눔 글의 시각은 보통 "오늘"을 뜻하므로
- * 같은 날 그 시각을 먼저 보고, 그 시각이 기준보다 6시간 넘게 이르면 다음 날(예: 23:50에 본 "00:30까지")로 봅니다.
+ * `HH:MM` 또는 `HH:MM:SS`(한국 시간)를 기준 시각(글을 올린 시각) 근처의 실제 시각으로 바꿉니다. 나눔 글의 시각은 보통 "오늘"을 뜻하므로
+ * 같은 날 그 시각을 먼저 보고, 그 시각이 기준보다 6시간 넘게 이르면 다음 날(예: 23:50에 올린 "00:30까지")로 봅니다.
  * 형식이 다르면 null입니다.
  */
 export function resolveClock(clock: string, reference: number): number | null {
@@ -70,8 +76,12 @@ const REASON_MAX = 200;
 
 /** LLM이 쓴 글(판단 근거, 시각)을 알림에 넣을 수 있게 자릅니다. */
 export function brief(text: string, max = REASON_MAX): string {
-    const chars = Array.from(text);
-    return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : text;
+    return truncateChars(text, max);
+}
+
+/** 낱말 검사에 쓰는 글입니다. "매.크.로"처럼 기호를 끼워 넣어도 찾도록 맞춰 볼 값에서 기호까지 지웁니다. */
+function compactForWords(text: string): string {
+    return normalizeForMatch(text).replace(/[\p{P}\p{S}]/gu, "");
 }
 
 export function eligible(account: {memberType: MemberType | null}, requirement: Decision["member_requirement"]): boolean {
@@ -88,11 +98,6 @@ export function eligible(account: {memberType: MemberType | null}, requirement: 
     }
 }
 
-/** 비교하기 쉽게 문구를 정리합니다: 전각/호환 문자 통일, 숨은 문자와 공백 제거, 소문자. */
-export function normalizeForMatch(text: string): string {
-    return text.normalize("NFKC").replace(/[\p{Cf}\s]/gu, "").toLowerCase();
-}
-
 /**
  * 봇 색출용 낚시 문구에 자주 쓰이는 단어입니다. 이런 문구를 요구하면 자동으로 달지 않고 알립니다.
  * "저는 AI입니다", "사람 아님"처럼 내 계정이 사람이 아니라고 자백하게 만드는 말도 막습니다.
@@ -107,15 +112,21 @@ const BAIT_WORDS = [
  * ("댓글 단 매크로 차단" 같은 글). "로봇"처럼 흔한 낱말 안에 들어 있는 것은 세지 않습니다.
  */
 const POST_BAIT_WORDS = ["봇", "매크로", "bot", "macro", "크롤", "자동댓글", "자동으로댓글"];
-const POST_BAIT_IGNORED = ["로봇", "robot"];
+const POST_BAIT_IGNORED = ["로봇", "robot", "스크롤", "밀크롤", "봇치"];
+
+/**
+ * 사진 속 글자(LLM이 옮겨 적은 것)에서 찾는 영어 봇 단어입니다. 상품 사진의 "bottle", "bottom" 같은 낱말에 걸리지 않도록
+ * 낱말 하나로 떨어져 있을 때만 찾습니다. "b.o.t"처럼 글자 사이에 기호나 공백을 조금 끼운 것도 찾습니다.
+ */
+const IMAGE_ENGLISH_BAIT = /(?<![a-z])(b[^a-z0-9]{0,2}o[^a-z0-9]{0,2}t|m[^a-z0-9]{0,2}a[^a-z0-9]{0,2}c[^a-z0-9]{0,2}r[^a-z0-9]{0,2}o)s?(?![a-z])/;
 
 /**
  * 글에 봇 색출로 보이는 말이 있으면 그 말을 돌려줍니다. "매.크.로"처럼 기호를 끼워 넣어도 찾도록 기호를 지운 뒤 봅니다.
  * 흔한 낱말을 미리 지우지 않고, 찾은 자리가 그 낱말 안일 때만 넘깁니다("매크로봇"이 "매크"로 바뀌어 빠지지 않게).
  */
-export function findBaitWord(postText: string): string | null {
-    const text = normalizeForMatch(postText).replace(/[\p{P}\p{S}]/gu, "");
-    for (const word of POST_BAIT_WORDS) {
+export function findBaitWord(postText: string, words = POST_BAIT_WORDS): string | null {
+    const text = compactForWords(postText);
+    for (const word of words) {
         for (let at = text.indexOf(word); at !== -1; at = text.indexOf(word, at + 1)) {
             const insideCommonWord = POST_BAIT_IGNORED.some((common) => {
                 const offset = common.indexOf(word);
@@ -125,6 +136,14 @@ export function findBaitWord(postText: string): string | null {
         }
     }
     return null;
+}
+
+/** 사진 속 글자(LLM이 옮겨 적은 것)에서 봇 색출로 보이는 말을 찾습니다. 한글 낱말은 글과 같이, 영어 낱말은 떨어진 낱말로만 찾습니다. */
+export function findImageBaitWord(imageText: string): string | null {
+    const korean = findBaitWord(imageText, POST_BAIT_WORDS.filter((word) => !/^[a-z]+$/.test(word)));
+    if (korean) return korean;
+    const english = IMAGE_ENGLISH_BAIT.exec(imageText.normalize("NFKC").replace(/[\p{Cf}\p{M}\p{Default_Ignorable_Code_Point}]/gu, "").toLowerCase());
+    return english ? (english[1]!.startsWith("b") ? "bot" : "macro") : null;
 }
 
 /**
@@ -152,14 +171,19 @@ const INJECTION_PATTERNS = [
     /(너는|넌|니가)(이제|지금부터|앞으로)|(이제부터|지금부터|앞으로)(너는|넌|니가)/,
     /(forget|ignore|disregard|override)(all|the|your|any|every|of|my|these|those|previous|prior|above|earlier|preceding|system)*(rules?|instructions?|prompts?|directions?|guidelines?|context|everything|commands?)/
 ];
-/** LLM에 보내는 글의 구역을 나누는 태그입니다. 글에 이런 태그가 있으면 구역을 닫고 지시를 끼워 넣으려는 것일 수 있습니다. */
-const PROMPT_TAG = /<\s*\/?\s*(post|title|body|images|posted_at)\b/i;
+/**
+ * LLM에 보내는 글의 구역을 나누는 태그입니다. 글에 이런 태그가 있으면 구역을 닫고 지시를 끼워 넣으려는 것일 수 있습니다.
+ * `<\s*\/?\s*`처럼 공백 반복이 이어 붙으면 공백만 길게 이어진 글에서 검사가 글 길이의 제곱만큼 느려지므로, 겹치지 않게 씁니다.
+ */
+const PROMPT_TAG = /<\s*(?:\/\s*)?(post|title|body|images|posted_at)\b/i;
+/** 꺾쇠처럼 보이는 글자입니다. LLM에 보낼 때 꺾쇠를 이런 글자로 바꾸므로, 글이 처음부터 이런 글자로 태그를 흉내 내도 찾습니다. */
+const ANGLE_LOOKALIKES = /[\u2039\u3008\u300A\u276E\u27E8\uFE64\u02C2]/g;
 
 /** 글에 LLM 판단을 바꾸려는 듯한 말이 있으면 그 말을 돌려줍니다. */
 export function findInjectionWord(postText: string): string | null {
-    const tag = PROMPT_TAG.exec(postText);
+    const tag = PROMPT_TAG.exec(postText.normalize("NFKC").replace(ANGLE_LOOKALIKES, "<"));
     if (tag) return tag[0];
-    const text = normalizeForMatch(postText).replace(/[\p{P}\p{S}]/gu, "");
+    const text = compactForWords(postText);
     const word = INJECTION_WORDS.find((word) => text.includes(word));
     if (word) return word;
     for (const pattern of INJECTION_PATTERNS) {
@@ -193,7 +217,7 @@ const PRIVACY_PATTERNS = [
 
 /** 글에 개인정보나 계정·설정 정보를 캐내려는 듯한 말이 있으면 그 말을 돌려줍니다. */
 export function findPrivacyProbe(postText: string): string | null {
-    const text = normalizeForMatch(postText).replace(/[\p{P}\p{S}]/gu, "");
+    const text = compactForWords(postText);
     const word = PRIVACY_WORDS.find((word) => text.includes(word));
     if (word) return word;
     for (const pattern of PRIVACY_PATTERNS) {
@@ -219,8 +243,14 @@ export function containsSecret(text: string, secrets: (string | null | undefined
 /**
  * 줄 서기 시작 시각으로 보이는 표현입니다("9시부터", "21:00부터", "9시 반부터", "10분 뒤부터"). 글에 이런 말이 있는데 LLM이
  * 시작 시각을 비워 두면 시작 전에 댓글을 달아 무효가 될 수 있어, 자동으로 서지 않고 알립니다.
+ * 숫자 반복은 자릿수를 정하고 앞에 숫자가 없을 때만 시작합니다. 아주 긴 숫자열이 든 글에서 검사가 글 길이의 제곱만큼 느려지지 않게 하기 위해서입니다.
  */
-const START_HINT = /(\d{1,2}\s*시(\s*\d{1,2}\s*분|\s*반)?|\d{1,2}:\d{2})\s*(부터|되면|에\s*시작)|\d+\s*분\s*(뒤|후)\s*(부터|에)/;
+const START_HINT = /(?<!\d)(\d{1,2}\s*시(\s*\d{1,2}\s*분|\s*반)?|\d{1,2}:\d{2})\s*(부터|되면|에\s*시작)|(?<!\d)\d{1,4}\s*분\s*(뒤|후)\s*(부터|에)/;
+
+/** 글에 "21시부터"처럼 줄 서기 시작 시각으로 보이는 말이 있는지입니다. */
+export function hasStartHint(postText: string): boolean {
+    return START_HINT.test(postText);
+}
 
 /** 연락처나 외부 링크로 이어지는 단어입니다. */
 const CONTACT_WORDS = ["카톡", "카카오", "오픈채팅", "텔레", "telegram", "디코", "discord", "라인", "연락", "전화", "번호", "계좌", "주소", "링크"];
@@ -240,10 +270,11 @@ const BLOCKED_COMMENT_WORDS = [...BAIT_WORDS, ...CONTACT_WORDS, ...PRIVATE_INFO_
 export function isSafeCommentText(text: string): boolean {
     const normalized = text.normalize("NFKC");
     if (normalized.length === 0 || normalized.length > TEXT_MAX_LENGTH) return false;
-    // 제어 문자, 줄바꿈, 숨은 서식 문자(제로폭 문자, 방향 전환 문자 등)
-    if (/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(normalized)) return false;
-    // 한글, 영문, 숫자, 공백, 기본 문장부호만 허용합니다.
-    if (!/^[\p{Script=Hangul}A-Za-z0-9 .,!?~^♡♥()'"_-]+$/u.test(normalized)) return false;
+    // 제어 문자, 줄바꿈, 숨은 글자(제로폭 문자, 방향 전환 문자, 한글 채움 문자처럼 보이지 않는 글자)
+    if (/[\p{Cc}\u2028\u2029]/u.test(normalized) || hasHiddenCharacter(normalized)) return false;
+    // 한글(완성형과 자모), 영문, 숫자, 공백, 기본 문장부호만 허용합니다. 한글 방점(〮 〯) 같은 결합 부호는 받지 않습니다.
+    // NFKC는 호환 자모(ㅋ)를 첫가끝 자모(U+1100대)로 바꾸므로 두 범위를 모두 받습니다.
+    if (!/^[가-힣\u1100-\u11FF\u3131-\u318EA-Za-z0-9 .,!?~^♡♥()'"_-]+$/u.test(normalized)) return false;
     const compactText = normalizeForMatch(normalized);
     // 링크처럼 보이는 것(점 뒤 영문 2자 이상), 숫자 5자리 이상(전화번호 등)
     if (/\.[a-z]{2,}/.test(compactText) || /\d{5,}/.test(compactText.replace(/[^0-9]/g, ""))) return false;
@@ -251,33 +282,44 @@ export function isSafeCommentText(text: string): boolean {
     return true;
 }
 
-function compact(text: string): string {
-    return text.replace(/\s+/g, "").toLowerCase();
+export function findDccon(dccons: OwnedDccon[], keyword: string): OwnedDccon | null {
+    const needle = normalizeForMatch(keyword);
+    if (!needle) return null;
+    return dccons.find((dccon) => normalizeForMatch(dccon.title).includes(needle))
+        ?? dccons.find((dccon) => normalizeForMatch(dccon.packageTitle).includes(needle))
+        ?? null;
 }
 
-export function findDccon(dccons: OwnedDccon[], keyword: string): OwnedDccon | null {
-    const needle = compact(keyword);
-    if (!needle) return null;
-    return dccons.find((dccon) => compact(dccon.title).includes(needle))
-        ?? dccons.find((dccon) => compact(dccon.packageTitle).includes(needle))
-        ?? null;
+/** 계획을 세울 때의 시각들입니다. */
+export interface PlanTimes {
+    /** 글을 감지한 시각(ms)입니다. 마감이 지났는지, 언제부터 줄을 설 수 있는지 볼 때 기준입니다. */
+    detectedAt: number;
+    /**
+     * 글을 올린 시각(ms)입니다. 글에 적힌 "23:59까지" 같은 시각이 어느 날인지 이 시각을 기준으로 정합니다.
+     * 감지한 시각으로 정하면 자정 직전에 올라와 자정 뒤에 감지한 글의 "23:59까지"를 다음 날로 잘못 읽습니다. 모르면 감지한 시각입니다.
+     */
+    postedAt?: number;
+    /** 마감을 이만큼 앞당겨 봅니다. 작성 시각을 초까지 모를 때 상대 마감이 늦게 계산되는 것을 막습니다. */
+    deadlineSlackMs?: number;
+    /** 기본 디시콘을 고를 때 씁니다(테스트에서 바꿀 수 있게). */
+    random?: () => number;
 }
 
 /**
  * LLM 판단을 실제 행동 계획으로 바꿉니다.
  *
  * @param accounts 갤러리의 대기 계정을 우선순위 순서로, 로그인된 것만 넘깁니다. 비어 있으면 줄을 설 수 없으므로 알림 계획이 됩니다.
- * @param detectedAt 글을 감지한 시각(ms)입니다.
- * @param postText 글의 제목과 본문입니다. LLM이 말한 요구 문구가 실제로 글에 있는지 확인합니다.
- * @param deadlineSlackMs 마감을 이만큼 앞당겨 봅니다. 작성 시각을 초까지 모를 때 상대 마감이 늦게 계산되는 것을 막습니다.
+ * @param postText 글의 제목과 본문입니다. LLM이 말한 요구 문구와 디시콘이 실제로 글에 있는지 확인합니다.
  */
-export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: CandidateAccount[], detectedAt: number, postText: string, deadlineSlackMs = 0, random: () => number = Math.random): Plan {
+export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: CandidateAccount[], postText: string, times: PlanTimes): Plan {
+    const {detectedAt, deadlineSlackMs = 0, random = Math.random} = times;
+    const clockBase = times.postedAt ?? detectedAt;
     if (!decision.is_giveaway) return {kind: "skip", reason: "나눔 글이 아님"};
     if (gallery.category === "food" && !decision.is_food) return {kind: "skip", reason: "음식 나눔이 아님"};
 
     let endsAt: number | null = null;
     if (decision.ends_at) {
-        endsAt = resolveClock(decision.ends_at, detectedAt);
+        endsAt = resolveClock(decision.ends_at, clockBase);
         if (endsAt === null) return {kind: "notify", reason: `마감 시각을 해석할 수 없음: ${brief(decision.ends_at, 20)}`};
         // 작성 시각을 초까지 모르면 "5분 후 마감" 같은 상대 마감이 실제보다 늦게 계산될 수 있어 그만큼 앞당겨 봅니다.
         endsAt -= deadlineSlackMs;
@@ -289,19 +331,23 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     if (qualified.length === 0) return {kind: "skip", reason: "참여 자격에 맞는 대기 계정이 없음"};
 
     if (decision.needs_extra_action) return {kind: "notify", reason: `댓글 외의 행동이 필요함: ${brief(decision.reason)}`};
-    const bait = findBaitWord(postText);
+    // 아래 검사는 사진 속 글자(LLM이 옮겨 적은 것)도 함께 봅니다. 사진에 적은 봇 함정이나 지시를 프롬프트 규칙만으로 거르지 않게 합니다.
+    // 요구 문구와 디시콘 이름은 실제 글자에 있는지 보는 것이라 글의 제목과 본문만 봅니다.
+    const imageText = decision.image_text?.slice(0, IMAGE_TEXT_MAX) ?? "";
+    const checkedText = imageText ? `${postText}\n${imageText}` : postText;
+    const bait = findBaitWord(postText) ?? (imageText ? findImageBaitWord(imageText) : null);
     if (bait) return {kind: "notify", reason: `글에 봇을 걸러내려는 듯한 말("${bait}")이 있어 직접 확인이 필요함`};
     // LLM이 지시에 넘어가 나눔이 아닌 글을 나눔으로 판단했을 수 있으므로 자동으로 서지 않습니다.
-    const injection = findInjectionWord(postText);
+    const injection = findInjectionWord(checkedText);
     if (injection) return {kind: "notify", reason: `글에 LLM 판단을 바꾸려는 듯한 말("${injection}")이 있어 직접 확인이 필요함`};
-    const privacy = findPrivacyProbe(postText);
+    const privacy = findPrivacyProbe(checkedText);
     if (privacy) return {kind: "notify", reason: `글에 개인정보나 계정·설정 정보를 캐내려는 듯한 말("${privacy}")이 있어 직접 확인이 필요함`};
     if (decision.line_method === "unclear") return {kind: "notify", reason: `줄 서는 방법을 판단할 수 없음: ${brief(decision.reason)}`};
-    if (!decision.starts_at && START_HINT.test(postText)) return {kind: "notify", reason: "글에 줄 서기 시작 시각이 있는 것 같은데 판단에서 빠져 직접 확인이 필요함"};
+    if (!decision.starts_at && hasStartHint(checkedText)) return {kind: "notify", reason: "글에 줄 서기 시작 시각이 있는 것 같은데 판단에서 빠져 직접 확인이 필요함"};
 
     let notBefore = detectedAt;
     if (decision.starts_at) {
-        const startsAt = resolveClock(decision.starts_at, detectedAt);
+        const startsAt = resolveClock(decision.starts_at, clockBase);
         if (startsAt === null) return {kind: "notify", reason: `시작 시각을 해석할 수 없음: ${brief(decision.starts_at, 20)}`};
         // 이미 시작했어도 정각 직후라면 여유 시간까지는 기다립니다.
         notBefore = Math.max(detectedAt, startsAt + START_MARGIN_MS);
@@ -311,7 +357,7 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     if (endsAt !== null && notBefore > endsAt - END_MARGIN_MS) {
         return {kind: "skip", reason: `줄 서기 지연 때문에 마감 시각(${decision.ends_at}) 전에 댓글을 달 수 없음`};
     }
-    const common = {notBefore, requirement: decision.member_requirement, isFood: decision.is_food, ...(endsAt !== null ? {deadline: endsAt} : {})};
+    const common = {notBefore, requirement: decision.member_requirement, isFood: decision.is_food, hasStartTime: Boolean(decision.starts_at), ...(endsAt !== null ? {deadline: endsAt} : {})};
 
     // 기본 디시콘을 정해 둔 계정은 "줄" 대신 그중 하나를 무작위로 답니다. 글이 디시콘 댓글을 인정하지 않으면 "줄"입니다.
     const pickDefault = (account: CandidateAccount): CommentContent | null => {
@@ -341,6 +387,10 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
         });
         if (attempts.length === 0) return {kind: "notify", reason: "디시콘으로 줄을 서야 하는데 기본 디시콘을 정한 대기 계정이 없음"};
         return {kind: "comment", attempts, ...common};
+    }
+    // LLM이 지어낸 디시콘을 달지 않도록, 요구 디시콘의 이름도 글에 실제로 있어야 합니다(요구 문구와 같은 규칙).
+    if (!normalizeForMatch(postText).includes(normalizeForMatch(keyword))) {
+        return {kind: "notify", reason: `요구 디시콘이 글에 없음: "${brief(keyword, 40)}"`};
     }
     const attempts = qualified.flatMap((account) => {
         const dccon = findDccon(account.dccons, keyword);

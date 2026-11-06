@@ -56,4 +56,14 @@ describe("글 사진", () => {
         expect(buildUserMessage("23분까지", "축하합니다", undefined, 2)).toBe("<post>\n<title>23분까지</title>\n<body>축하합니다</body>\n<images>2</images>\n</post>");
         expect(buildUserMessage("23분까지", "")).not.toContain("<images>");
     });
+
+    it("같은 사진은 서버 주소가 달라도 한 번만 넣는다", () => {
+        expect(postImageUrls(`<img src="${PHOTO(1)}"><img src="${PHOTO(1).replace("dcimg7", "dcimg5")}"><img src="${PHOTO(2)}">`)).toEqual([PHOTO(1), PHOTO(2)]);
+    });
+
+    it("닫히지 않은 img 태그가 이어진 글도 빨리 훑는다", () => {
+        const started = performance.now();
+        expect(postImageUrls("<img".repeat(50000))).toEqual([]);
+        expect(performance.now() - started).toBeLessThan(300);
+    });
 });

@@ -71,6 +71,10 @@ export function createFakeClientFactory(log: (message: string) => void): (creden
     return () => {
         let userId = "";
         return {
+            logout() {
+                userId = "";
+                return this;
+            },
             auth: {exportCredentials: () => ({offline: true})},
             async login(id: string, password: string, _options: LoginOptions = {}) {
                 log(`오프라인 로그인: ${id}`);

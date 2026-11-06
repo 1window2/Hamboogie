@@ -61,5 +61,11 @@ reports/
 device.json
 credentials*.json
 secrets.json
+settings.json
+history.json
 llm-usage.json
 ledger.json
+*.broken*
+*.pem
+*.key
+*.p12

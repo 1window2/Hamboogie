@@ -44,7 +44,16 @@ export interface LlmProvider {
     decideMany(posts: PostInput[]): Promise<(Decision | null)[]>;
 }
 
-export class LlmError extends Error {}
+/**
+ * LLM 판단 실패입니다. `contentRelated`는 글 내용 때문일 수 있는 실패(응답을 해석하지 못함, 거절, 잘못된 요청, 응답 시간 초과)인지입니다.
+ * 묶음 판단이 이런 이유로 실패하면 묶인 글 하나 때문일 수 있어 글을 하나씩 다시 판단하고, 키나 모델이 틀렸거나 서비스가 멈춘 것처럼
+ * 글과 상관없는 실패면 다시 판단하지 않습니다(요청만 늘어납니다).
+ */
+export class LlmError extends Error {
+    constructor(message: string, readonly contentRelated = true) {
+        super(message);
+    }
+}
 
 /**
  * 요청 한도를 하루치(또는 결제 한도)까지 다 써서, 잠깐 기다려서는 풀리지 않는 오류입니다.
@@ -52,7 +61,7 @@ export class LlmError extends Error {}
  */
 export class LlmQuotaExhaustedError extends LlmError {
     constructor(message: string, readonly until: number) {
-        super(message);
+        super(message, false);
     }
 }
 
@@ -62,9 +71,25 @@ function httpStatus(error: unknown): number | null {
     return typeof status === "number" ? status : null;
 }
 
-/** 응답을 기다리다 시간이 다 돼 끊긴 오류인지입니다. */
+/** 응답을 기다리다 시간이 다 돼 끊긴 오류인지입니다(SDK마다 이름이 다릅니다). */
 function isTimeout(error: unknown): boolean {
-    return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+    return error instanceof Error && (/^(TimeoutError|AbortError|APIConnectionTimeoutError)$/.test(error.name) || error.constructor.name === "APIConnectionTimeoutError"
+        || /timed? ?out|시간 초과/i.test(error.message) && httpStatus(error) === null);
+}
+
+/** 서버에 닿지 못한 오류(연결 끊김, DNS 실패 등)인지입니다. 상태 코드 없이 연결 오류로 끝난 경우입니다. */
+function isConnectionError(error: unknown): boolean {
+    if (!(error instanceof Error) || httpStatus(error) !== null) return false;
+    return /Connection/.test(error.name) || /Connection/.test(error.constructor.name) || /fetch failed|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|network/i.test(error.message);
+}
+
+/** 응답 헤더의 retry-after(초)입니다. 없으면 null입니다. */
+function retryAfterHeader(error: unknown): number | null {
+    const headers = (error as {headers?: unknown} | null)?.headers;
+    const value = headers instanceof Headers ? headers.get("retry-after")
+        : headers && typeof headers === "object" ? (headers as Record<string, unknown>)["retry-after"] : null;
+    const seconds = Number(value);
+    return value !== null && value !== undefined && Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : null;
 }
 
 /**
@@ -114,16 +139,18 @@ export function describeLlmError(provider: string, error: unknown): string {
 }
 
 /**
- * Gemini 오류가 다시 시도할 만하면 기다릴 시간을 돌려줍니다. 429는 응답의 "Please retry in 6.8s"를 쓰고,
+ * LLM 오류가 다시 시도할 만하면 기다릴 시간을 돌려줍니다. 429는 응답의 "Please retry in 6.8s"를 쓰고,
  * 서버 쪽 일시적 오류(500, 502, 503 과부하, 504 처리 시간 초과)와 응답 시간 초과는 2초 뒤 한 번 더 보냅니다.
  * 판단에 실패한 글은 키워드가 있어야만 알림으로 넘어가므로, 그사이 올라온 나눔을 놓치지 않기 위해서입니다.
  */
 function retryDelayMs(error: unknown): number | null {
     const status = httpStatus(error);
-    if (status === 500 || status === 502 || status === 503 || status === 504 || isTimeout(error)) return 2000;
+    if (isQuotaExhausted(error)) return null;
+    if (status === 408 || status === 409 || status === 500 || status === 502 || status === 503 || status === 504 || status === 529) return retryAfterHeader(error) ?? 2000;
+    if (status === null && (isTimeout(error) || isConnectionError(error))) return 2000;
     if (status !== 429 || !(error instanceof Error)) return null;
     const match = /retry in ([\d.]+)s/i.exec(error.message);
-    return match ? Math.ceil(Number(match[1]) * 1000) : null;
+    return match ? Math.ceil(Number(match[1]) * 1000) : retryAfterHeader(error) ?? 2000;
 }
 
 /** 처음 쓸 때 한 번만 만듭니다. 고른 서비스의 SDK만 불러와서, 쓰지 않는 SDK는 메모리에 올리지 않습니다. */
@@ -154,10 +181,13 @@ type Structured = <S extends z.ZodType>(request: StructuredRequest<S>) => Promis
 
 type UsageReporter = ((usage: TokenUsage) => void) | undefined;
 
+/** 다시 보내기 전에 부릅니다. 다시 보내는 요청도 분당 요청 한도와 하루 요청 수에 셉니다. */
+type RetryHook = (() => Promise<void>) | undefined;
+
 function claudeStructured(apiKey: string, model: string, onUsage: UsageReporter): Structured {
     const sdk = lazy(async () => {
         const [{default: Anthropic}, {zodOutputFormat}] = await Promise.all([import("@anthropic-ai/sdk"), import("@anthropic-ai/sdk/helpers/zod")]);
-        return {client: new Anthropic({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 1}), zodOutputFormat};
+        return {client: new Anthropic({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 0}), zodOutputFormat};
     });
     return async ({schema, system, user, images = []}) => {
         const {client, zodOutputFormat} = await sdk();
@@ -183,7 +213,7 @@ function claudeStructured(apiKey: string, model: string, onUsage: UsageReporter)
 function openaiStructured(apiKey: string, model: string, onUsage: UsageReporter): Structured {
     const sdk = lazy(async () => {
         const [{default: OpenAI}, {zodTextFormat}] = await Promise.all([import("openai"), import("openai/helpers/zod")]);
-        return {client: new OpenAI({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 1}), zodTextFormat};
+        return {client: new OpenAI({apiKey, timeout: LLM_TIMEOUT_MS, maxRetries: 0}), zodTextFormat};
     });
     return async <S extends z.ZodType>({schema, name, system, user, images = []}: StructuredRequest<S>) => {
         const {client, zodTextFormat} = await sdk();
@@ -205,7 +235,7 @@ function openaiStructured(apiKey: string, model: string, onUsage: UsageReporter)
     };
 }
 
-function geminiStructured(apiKey: string, model: string, onUsage: UsageReporter): Structured {
+function geminiStructured(apiKey: string, model: string, onUsage: UsageReporter, beforeRetry: RetryHook): Structured {
     const sdk = lazy(async () => {
         const {GoogleGenAI, ThinkingLevel} = await import("@google/genai");
         return {client: new GoogleGenAI({apiKey, httpOptions: {timeout: LLM_TIMEOUT_MS}}), minimal: ThinkingLevel.MINIMAL};
@@ -239,10 +269,12 @@ function geminiStructured(apiKey: string, model: string, onUsage: UsageReporter)
             const wait = retryDelayMs(error);
             if (wait !== null && wait <= RATE_LIMIT_MAX_WAIT_MS) {
                 await sleep(wait);
+                await beforeRetry?.();
                 response = await generate();
             } else if (thinkingConfig && /thinking level/i.test(errorMessage(error))) {
                 thinkingSupported = false;
                 thinkingConfig = undefined;
+                await beforeRetry?.();
                 response = await generate();
             } else {
                 throw error;
@@ -261,6 +293,21 @@ function geminiStructured(apiKey: string, model: string, onUsage: UsageReporter)
         const parsed = schema.safeParse(JSON.parse(text));
         if (!parsed.success) throw new LlmError("Gemini 응답이 정해진 형식과 다릅니다.");
         return parsed.data;
+    };
+}
+
+/** 일시적인 오류면 기다렸다가 한 번 더 보냅니다(Gemini는 자체적으로 같은 규칙을 씁니다). */
+function retryOnce(structured: Structured, beforeRetry: RetryHook): Structured {
+    return async (request) => {
+        try {
+            return await structured(request);
+        } catch (error) {
+            const wait = retryDelayMs(error);
+            if (wait === null || wait > RATE_LIMIT_MAX_WAIT_MS || isQuotaExhausted(error)) throw error;
+            await sleep(wait);
+            await beforeRetry?.();
+            return structured(request);
+        }
     };
 }
 
@@ -283,11 +330,21 @@ export function providerFrom(structured: Structured): LlmProvider {
     };
 }
 
-/** @param onUsage 요청마다 쓴 토큰 수를 받습니다. */
-export function createProvider(provider: LlmProviderId, apiKey: string, model: string, onUsage?: (usage: TokenUsage) => void): LlmProvider {
-    const structured = provider === "claude" ? claudeStructured(apiKey, model, onUsage)
-        : provider === "openai" ? openaiStructured(apiKey, model, onUsage)
-            : geminiStructured(apiKey, model, onUsage);
+export interface ProviderHooks {
+    /** 요청마다 쓴 토큰 수를 받습니다. */
+    onUsage?: (usage: TokenUsage) => void;
+    /** 일시적인 오류로 같은 요청을 다시 보내기 전에 부릅니다. 다시 보내는 요청도 요청 수에 세게 합니다. */
+    beforeRetry?: () => Promise<void>;
+}
+
+/**
+ * LLM 서비스 클라이언트를 만듭니다. 일시적인 오류(서버 오류, 응답 시간 초과, 짧은 429)는 한 번 더 보냅니다.
+ * SDK의 자동 재시도는 끄고 여기서 다시 보내, 다시 보낸 요청도 `beforeRetry`로 분당·하루 요청 수에 셉니다.
+ */
+export function createProvider(provider: LlmProviderId, apiKey: string, model: string, hooks: ProviderHooks = {}): LlmProvider {
+    const {onUsage, beforeRetry} = hooks;
+    const structured: Structured = provider === "gemini" ? geminiStructured(apiKey, model, onUsage, beforeRetry) : retryOnce(
+        provider === "claude" ? claudeStructured(apiKey, model, onUsage) : openaiStructured(apiKey, model, onUsage), beforeRetry);
     const label = PROVIDER_LABELS[provider];
     return providerFrom(async (request) => {
         try {
@@ -297,7 +354,10 @@ export function createProvider(provider: LlmProviderId, apiKey: string, model: s
                 const until = nextPacificMidnight();
                 throw new LlmQuotaExhaustedError(`${label} 요청 한도를 다 썼습니다(무료 등급이면 하루 한도). 한국 시간 ${kstClockText(until)}에 초기화됩니다.`, until);
             }
-            throw new LlmError(describeLlmError(label, error));
+            // 글 내용 때문일 수 있는 실패: 응답 해석·거절(이미 LlmError), 잘못된 요청(400, 413), 응답 시간 초과.
+            if (error instanceof LlmError) throw error;
+            const status = httpStatus(error);
+            throw new LlmError(describeLlmError(label, error), status === 400 || status === 413 || (status === null && isTimeout(error)));
         }
     });
 }

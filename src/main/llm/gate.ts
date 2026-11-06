@@ -11,6 +11,15 @@ export interface LlmGateDeps {
     logger: Logger;
     /** 오늘 보낸 LLM 요청 수입니다(무료 등급 하루 한도). 없으면 앱을 켜 둔 동안만 셉니다. */
     usage?: LlmUsage;
+    /** 테스트에서 시각을 바꿀 수 있게 합니다. */
+    now?(): number;
+}
+
+/** 무료 등급 하루 LLM 요청 수를 다 써서 요청을 보내지 않았다는 오류입니다. */
+export class LlmDailyLimitError extends Error {
+    constructor() {
+        super("무료 등급 하루 LLM 요청 수를 다 씀");
+    }
 }
 
 /**
@@ -24,18 +33,21 @@ export class LlmGate {
     /** LLM 클라이언트를 만드는 함수입니다. 테스트에서 바꿉니다. */
     create = createProvider;
     /** 갤러리와 상관없이 앱 전체의 LLM 요청 수를 셉니다. */
-    private readonly limiter = new RateLimiter(() => effectiveRpm(this.deps.settings().llm));
+    private readonly limiter = new RateLimiter(() => effectiveRpm(this.deps.settings().llm), () => this.now());
     /** 같은 서비스/모델/키라면 LLM 클라이언트를 다시 만들지 않습니다. */
     private cached: {key: string; instance: LlmProvider} | null = null;
 
+    private readonly now: () => number;
+
     /** @param onPause 한도를 다 써서 쉬기 시작할 때 한 번 부릅니다(알림용). */
     constructor(private readonly deps: LlmGateDeps, private readonly onPause: (message: string) => Promise<void>) {
+        this.now = deps.now ?? Date.now;
         this.usage = deps.usage ?? new LlmUsage(() => null, () => {});
     }
 
     /** 한도를 다 써서 쉬는 중인지입니다. */
     get paused(): boolean {
-        return this.pause !== null && Date.now() < this.pause.until;
+        return this.pause !== null && this.now() < this.pause.until;
     }
 
     /** 무료 등급이면 하루 LLM 요청 수 한도, 유료 요금제면 0(제한 없음)입니다. */
@@ -69,18 +81,22 @@ export class LlmGate {
         if (this.cached?.key !== key) {
             // 서비스나 키를 바꿨으면 이전 키의 한도와는 상관없으므로 쉬던 것을 풉니다.
             this.pause = null;
-            this.cached = {key, instance: this.watchQuota(this.create(llm.provider, apiKey, model))};
+            this.cached = {key, instance: this.watchQuota(this.create(llm.provider, apiKey, model, {beforeRetry: () => this.request()}))};
         }
         return this.cached.instance;
     }
 
-    /** 분당 요청 한도 안에서 요청 자리를 하나 받고(한도에 닿았으면 기다림), 오늘 쓴 요청 수에 셉니다. */
+    /**
+     * 분당 요청 한도 안에서 요청 자리를 하나 받고(한도에 닿았으면 기다림), 오늘 쓴 요청 수에 셉니다.
+     * 자리를 기다리는 사이 다른 요청이 하루 요청 수를 다 썼으면 보내지 않고 `LlmDailyLimitError`를 던집니다.
+     */
     async request(galleryId?: string): Promise<void> {
         if (!this.hasSlotNow()) {
             const limit = effectiveRpm(this.deps.settings().llm);
             this.deps.logger.info(`LLM 분당 요청 한도(${limit}회)에 닿아 잠시 기다립니다.`, galleryId ? {galleryId} : undefined);
         }
         await this.limiter.acquire();
+        if (!this.canUseToday()) throw new LlmDailyLimitError();
         this.usage.add();
     }
 
