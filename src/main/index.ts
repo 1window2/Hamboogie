@@ -20,6 +20,7 @@ import {errorMessage} from "@shared/errors";
 import {DcconImages} from "./dc/dccon-images";
 import {loadPostImages, type ShrinkImage} from "./dc/post-images";
 import {isDecodableSize} from "./dc/image-size";
+import {handleQuitSignals, QUIT_DEADLINE_MS, quitDeadline, startWatchdog, watchCpu} from "./safety";
 
 /** 두 주소의 출처(프로토콜, 호스트, 포트)가 같은지 봅니다. 앞부분만 비교하면 `localhost:51730`이 `localhost:5173`을 통과합니다. */
 function sameOrigin(a: string, b: string): boolean {
@@ -40,6 +41,38 @@ function isAllowedExternalUrl(raw: string): boolean {
         return url.hostname === "github.com" && url.pathname.startsWith(`${REPO_PATH}/`);
     } catch {
         return false;
+    }
+}
+
+/**
+ * 앱을 끕니다. 정상 종료(기록 저장)를 시도하되, 앱이 고장 나 정상 종료마저 멈추면 시간이 지난 뒤 강제로 끝냅니다.
+ * 실행 파일이 사라졌거나 CPU를 오래 많이 쓸 때처럼, 앱이 제대로 돈다고 믿을 수 없을 때 부릅니다.
+ */
+function quitForSafety(): void {
+    setTimeout(() => process.kill(process.pid, "SIGKILL"), QUIT_DEADLINE_MS * 2).unref();
+    app.quit();
+}
+
+/**
+ * macOS에서 dmg 안의 앱을 바로 실행했으면 Applications 폴더로 옮길지 묻습니다. dmg를 꺼내면 실행 중인 앱의 파일이
+ * 사라져 앱이 고장 나기 때문입니다. 옮기면 Applications의 앱으로 다시 켜집니다.
+ */
+async function offerMoveToApplications(): Promise<void> {
+    if (process.platform !== "darwin" || !app.isPackaged || app.isInApplicationsFolder()) return;
+    if (!process.execPath.startsWith("/Volumes/")) return;
+    const {response} = await dialog.showMessageBox({
+        type: "warning",
+        message: "디스크 이미지(dmg)에서 바로 실행 중입니다",
+        detail: "이대로 쓰다가 dmg를 꺼내면 앱이 고장 납니다. Applications 폴더로 옮겨서 실행할까요? Applications에 이미 Hamboogie가 있으면 이 버전으로 바꿉니다.",
+        buttons: ["Applications로 옮기기", "그대로 실행"],
+        defaultId: 0,
+        cancelId: 1
+    });
+    if (response !== 0) return;
+    try {
+        app.moveToApplicationsFolder({conflictHandler: (type) => type === "exists"});
+    } catch (error) {
+        dialog.showErrorBox("Applications 폴더로 옮기지 못했습니다", `${errorMessage(error)}\ndmg 창에서 Hamboogie를 Applications 폴더로 직접 끌어다 놓으세요.`);
     }
 }
 
@@ -92,6 +125,27 @@ async function main(): Promise<void> {
     if (import.meta.env.DEV && process.platform === "darwin") app.dock?.setIcon(join(app.getAppPath(), "build/icon.png"));
     const dataDir = app.getPath("userData");
     const logger = new Logger(join(dataDir, "hamboogie.log"));
+    // 종료 신호(터미널의 kill, Ctrl+C 등)를 받으면 기록을 저장하고 끕니다. Electron은 이 신호를 받아도 앱을 끄지 않습니다.
+    handleQuitSignals((signal) => {
+        logger.info(`종료 신호(${signal})를 받아 앱을 끕니다.`);
+        app.quit();
+    });
+    // 앱이 고장 나 CPU를 붙잡거나 실행 파일이 사라지면(실행 중인 dmg를 꺼냄 등) 스스로 끝냅니다.
+    startWatchdog();
+    watchCpu({
+        cpuPercent: () => app.getAppMetrics().reduce((sum, metric) => sum + metric.cpu.percentCPUUsage, 0),
+        onRunaway: (percent) => {
+            const message = `앱이 CPU를 오래 많이 써서(약 ${Math.round(percent)}%) 다른 작업을 막지 않도록 앱을 끕니다. 다시 켜 주세요.`;
+            logger.warn(message);
+            if (Notification.isSupported()) new Notification({title: "Hamboogie를 껐습니다", body: message}).show();
+            quitForSafety();
+        },
+        onExecutableGone: () => {
+            logger.warn("앱 실행 파일이 사라져(실행 중인 dmg를 꺼냄 등) 앱을 끕니다.");
+            quitForSafety();
+        }
+    });
+    await offerMoveToApplications();
     const settingsStore = new SettingsStore(dataDir);
     for (const note of settingsStore.loadNotes) logger.warn(note);
     const secrets = new SecretStore(dataDir);
@@ -415,7 +469,10 @@ async function main(): Promise<void> {
 
     // 끄기 전에 밀린 파일 쓰기(처리한 글 기록 등)를 마칩니다. 처리한 글 기록을 잃으면 다시 켰을 때 같은 글에 또 댓글을 달 수 있습니다.
     let flushed = false;
+    // 저장이 멈춰 앱이 끝나지 않는 일이 없도록, 끄기 시작하고 정해진 시간이 지나면 저장을 기다리지 않고 끝냅니다.
+    const startQuitDeadline = quitDeadline(() => app.exit(0));
     app.on("before-quit", (event) => {
+        startQuitDeadline();
         quitting = true;
         engine.stop();
         if (flushed) return;
