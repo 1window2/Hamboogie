@@ -5,7 +5,8 @@ import {describe, expect, it} from "vitest";
 import {flushJson, LineFile, quarantine, readJsonFile, writeJson} from "../src/main/files";
 
 const temp = () => mkdtempSync(join(tmpdir(), "hamboogie-files-"));
-const mode = (path: string) => statSync(path).mode & 0o777;
+/** 파일 권한입니다. Windows에는 POSIX 권한이 없어 권한 검사를 건너뜁니다(0600으로 봅니다). */
+const mode = (path: string) => process.platform === "win32" ? 0o600 : statSync(path).mode & 0o777;
 
 describe("readJsonFile", () => {
     it("없는 파일, 읽은 값, 깨진 파일을 구분한다", () => {
