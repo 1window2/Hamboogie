@@ -1,8 +1,9 @@
 import {useState} from "react";
-import {DEFAULT_MODELS, FREE_DAILY_LLM_REQUESTS, FREE_LLM_RPM, POST_IMAGES_MAX, PROVIDER_LABELS, PROVIDERS} from "@shared/settings";
+import {DEFAULT_MODELS, FREE_DAILY_LLM_REQUESTS, FREE_LLM_RPM, LLM_RPM_MAX, MODEL_NAME_PATTERN, POST_IMAGES_MAX, PROVIDER_LABELS, PROVIDERS} from "@shared/settings";
 import type {SettingsTabProps} from "../App";
 import {NumberInput} from "../components/NumberInput";
-import type {LlmProviderId} from "@shared/types";
+import {SecretField} from "../components/SecretField";
+import type {LlmConfig, LlmProviderId} from "@shared/types";
 import {isDiscordWebhookUrl} from "@shared/text";
 import {errorMessage} from "@shared/errors";
 import {kstClockText} from "@shared/time";
@@ -14,6 +15,7 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
     const [showWebhook, setShowWebhook] = useState(false);
     const [testingWebhook, setTestingWebhook] = useState(false);
     const webhookSaved = draft.discordWebhookUrl === state.settings.discordWebhookUrl;
+    const updateLlm = (patch: Partial<LlmConfig>) => setDraft((prev) => ({...prev, llm: {...prev.llm, ...patch}}));
 
     return (
         <div className="stack">
@@ -28,7 +30,7 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
                     {PROVIDERS.map((provider) => (
                         <label key={provider} className="check">
                             <input type="radio" name="provider" checked={draft.llm.provider === provider}
-                                   onChange={() => setDraft({...draft, llm: {...draft.llm, provider}})}/>
+                                   onChange={() => updateLlm({provider})}/>
                             {PROVIDER_LABELS[provider]}{provider === "gemini" && " (기본)"}
                         </label>
                     ))}
@@ -39,15 +41,16 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
                 <div className="field">
                     <label className="check">
                         <input type="checkbox" checked={draft.llm.paidPlan}
-                               onChange={(event) => setDraft({...draft, llm: {...draft.llm, paidPlan: event.target.checked}})}/>
+                               onChange={(event) => updateLlm({paidPlan: event.target.checked})}/>
                         유료 요금제 사용 중
                     </label>
                     {draft.llm.paidPlan ? (
                         <label className="field">
                             <span>분당 요청 상한</span>
-                            <NumberInput value={draft.llm.requestsPerMinute} min={0}
-                                         onChange={(requestsPerMinute) => setDraft({...draft, llm: {...draft.llm, requestsPerMinute}})}/>
-                            <small className="muted">사용 중인 요금제의 분당 요청 한도에 맞추세요. 0이면 제한하지 않습니다.</small>
+                            <NumberInput className="short" value={draft.llm.requestsPerMinute} min={0} onChange={(requestsPerMinute) => updateLlm({requestsPerMinute})}/>
+                            <small className={draft.llm.requestsPerMinute > LLM_RPM_MAX ? "error-text" : "muted"}>
+                                사용 중인 요금제의 분당 요청 한도에 맞추세요. 0이면 제한하지 않습니다. 최대 {LLM_RPM_MAX}회이고, 넘으면 저장할 때 맞춰집니다.
+                            </small>
                         </label>
                     ) : (
                         <small className="muted">
@@ -68,7 +71,10 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
                 <p className="muted">줄 서기에 실패했거나 자동으로 판단할 수 없는 글이 있을 때 알림을 보냅니다.</p>
                 <label className="check">
                     <input type="checkbox" checked={draft.notifyOnSuccess}
-                           onChange={(event) => setDraft({...draft, notifyOnSuccess: event.target.checked})}/>
+                           onChange={(event) => {
+                               const notifyOnSuccess = event.target.checked;
+                               setDraft((prev) => ({...prev, notifyOnSuccess}));
+                           }}/>
                     줄 서기에 성공했을 때도 알림 받기
                 </label>
                 <label className="field">
@@ -78,7 +84,8 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
                         <input type={showWebhook ? "text" : "password"} value={draft.discordWebhookUrl} autoComplete="off"
                                placeholder="https://discord.com/api/webhooks/…"
                                onChange={(event) => {
-                                   setDraft({...draft, discordWebhookUrl: event.target.value});
+                                   const discordWebhookUrl = event.target.value;
+                                   setDraft((prev) => ({...prev, discordWebhookUrl}));
                                    setWebhookResult(null);
                                }}/>
                         <button className="button small" onClick={() => setShowWebhook(!showWebhook)}>{showWebhook ? "가리기" : "보기"}</button>
@@ -107,30 +114,32 @@ export function LlmTab({draft, setDraft, state, run}: Props) {
 }
 
 function ProviderRow({provider, draft, setDraft, state, run}: Props & {provider: LlmProviderId}) {
-    const [apiKey, setApiKey] = useState("");
     const hasKey = state.secretsSet[`llm:${provider}`] === true;
+    const model = draft.llm.models[provider].trim();
+    // 저장할 때 형식이 맞지 않는 이름은 기본 모델로 바뀌므로 미리 알립니다.
+    const badModel = model !== "" && !MODEL_NAME_PATTERN.test(model);
     return (
         <div className="provider-row">
             <strong>{PROVIDER_LABELS[provider]}</strong>
             <label className="field">
                 <span>모델</span>
-                <input value={draft.llm.models[provider]} placeholder={DEFAULT_MODELS[provider]}
-                       onChange={(event) => setDraft({...draft, llm: {...draft.llm, models: {...draft.llm.models, [provider]: event.target.value}}})}/>
+                <input value={draft.llm.models[provider]} placeholder={DEFAULT_MODELS[provider]} aria-invalid={badModel}
+                       onChange={(event) => {
+                           const value = event.target.value;
+                           setDraft((prev) => ({...prev, llm: {...prev.llm, models: {...prev.llm.models, [provider]: value}}}));
+                       }}/>
+                {badModel && <small className="error-text">모델 이름에는 영문, 숫자, 점(.), 밑줄(_), 하이픈(-), 콜론(:)만 쓸 수 있습니다. 이대로 저장하면 기본 모델({DEFAULT_MODELS[provider]})을 씁니다.</small>}
             </label>
-            <label className="field">
-                <span>API 키 {hasKey && <em className="ok-text">(저장됨)</em>}</span>
-                <div className="row">
-                    <input type="password" value={apiKey} autoComplete="off" placeholder={hasKey ? "바꾸려면 새로 입력" : ""}
-                           onChange={(event) => setApiKey(event.target.value)}/>
-                    <button className="button small" disabled={!apiKey}
-                            onClick={() => run(() => window.hamboogie.setSecret(`llm:${provider}`, apiKey.trim()), true).then(() => setApiKey(""))}>
-                        저장
-                    </button>
-                    {hasKey && (
-                        <button className="button small" onClick={() => run(() => window.hamboogie.setSecret(`llm:${provider}`, ""), true)}>지우기</button>
-                    )}
-                </div>
-            </label>
+            <SecretField label="API 키" saved={hasKey} trim
+                         onSave={(apiKey) => run(() => window.hamboogie.setSecret(`llm:${provider}`, apiKey), true)}
+                         clear={{
+                             confirm: {
+                                 title: `${PROVIDER_LABELS[provider]} API 키를 지울까요?`,
+                                 message: <p>이 컴퓨터에 저장된 키를 지웁니다. 다시 쓰려면 키를 새로 입력해야 합니다.</p>,
+                                 confirmLabel: "지우기"
+                             },
+                             onClear: () => run(() => window.hamboogie.setSecret(`llm:${provider}`, ""), true)
+                         }}/>
         </div>
     );
 }

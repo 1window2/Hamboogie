@@ -1,109 +1,84 @@
-import {existsSync, readFileSync, renameSync, statSync} from "node:fs";
-import {appendFile, rename, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import {safeStorage} from "electron";
 import {defaultSettings, HISTORY_LIMIT, normalizeSettings} from "@shared/settings";
+import {normalizeText} from "@shared/text";
 import type {HistoryEntry, SecretKey, Settings} from "@shared/types";
 import type {UsageRecord} from "./llm/usage";
+import {flushJson, LineFile, quarantine, readJsonFile, readList, writeJson} from "./files";
 import type {JudgmentRecord} from "./pipeline/engine";
 
-function readJson<T>(path: string, fallback: T): T {
-    if (!existsSync(path)) return fallback;
-    try {
-        return JSON.parse(readFileSync(path, "utf8")) as T;
-    } catch {
-        return fallback;
-    }
-}
-
-/**
- * 목록 파일(처리한 글, 줄 서기 기록)을 읽습니다. 깨졌거나 목록이 아니면 남겨 두고(`.broken`) 빈 목록으로 시작합니다.
- * 형태가 다른 파일 때문에 앱이 켜지지 않거나, 다음 저장 때 남은 내용까지 덮어쓰지 않게 하기 위해서입니다.
- */
-function readList<T>(path: string, valid: (item: unknown) => item is T): T[] {
-    if (!existsSync(path)) return [];
-    try {
-        const loaded: unknown = JSON.parse(readFileSync(path, "utf8"));
-        if (Array.isArray(loaded)) return loaded.filter(valid);
-    } catch {
-        // 아래에서 남겨 둡니다.
-    }
-    try {
-        renameSync(path, `${path}.broken`);
-    } catch {
-        // 남기지 못해도 빈 목록으로 시작합니다.
-    }
-    return [];
-}
-
-interface FileWriter {
-    /** 아직 쓰지 않은 최신 내용입니다. */
-    pending: string | null;
-    /** 진행 중인 쓰기입니다. 끝나면 pending까지 모두 쓴 상태입니다. */
-    writing: Promise<void> | null;
-}
-
-const writers = new Map<string, FileWriter>();
-
-/**
- * 임시 파일에 쓴 뒤 바꿔치기합니다. 같은 파일에 대한 쓰기는 하나씩 처리하고, 쓰는 동안 밀린 요청은
- * 최신 내용 하나로 합칩니다. 동시에 저장해도 내용이 깨지지 않고, 연달아 기록해도 파일을 매번 다시 쓰지 않습니다.
- * 돌려준 Promise는 이 호출의 내용(또는 그보다 최신 내용)이 디스크에 쓰였을 때 끝납니다.
- */
-function writeJson(path: string, value: unknown): Promise<void> {
-    let writer = writers.get(path);
-    if (!writer) {
-        writer = {pending: null, writing: null};
-        writers.set(path, writer);
-    }
-    writer.pending = JSON.stringify(value, null, 2);
-    writer.writing ??= drain(path, writer);
-    return writer.writing;
-}
-
-async function drain(path: string, writer: FileWriter): Promise<void> {
-    try {
-        while (writer.pending !== null) {
-            const content = writer.pending;
-            writer.pending = null;
-            const temp = `${path}.tmp`;
-            // 계정 비밀번호(암호화됨), 웹훅 주소, 처리 기록이 들어 있어 이 사용자만 읽을 수 있게 둡니다.
-            await writeFile(temp, content, {encoding: "utf8", mode: 0o600});
-            await rename(temp, path);
-        }
-    } finally {
-        writer.writing = null;
-    }
-}
-
-/** 이 파일에 밀린 쓰기가 모두 끝날 때까지 기다립니다. */
-function flushJson(path: string): Promise<void> {
-    return writers.get(path)?.writing?.catch(() => {}) ?? Promise.resolve();
-}
-
-/** 모든 파일에 밀린 쓰기가 끝날 때까지 기다립니다. 앱을 끄기 전에 부릅니다. */
-export function flushAllJson(): Promise<void> {
-    return Promise.all([...writers.keys()].map(flushJson)).then(() => {});
-}
+export {flushAllJson} from "./files";
 
 /** 일반 설정입니다. 비밀 정보는 들어 있지 않습니다. */
 export class SettingsStore {
     private readonly path: string;
     private current: Settings;
+    /** 마지막으로 파일에 쓰인(또는 읽어 온) 설정입니다. 저장에 실패하면 이 설정으로 되돌립니다. */
+    private written: Settings;
+    /** 설정을 읽으며 버리거나 바로잡은 것입니다. 앱이 켜진 뒤 로그에 남깁니다(로거보다 먼저 만들어질 수 있어 모아 둡니다). */
+    readonly loadNotes: string[] = [];
 
     constructor(dir: string) {
         this.path = join(dir, "settings.json");
-        const saved = readJson<Partial<Settings>>(this.path, {});
-        try {
-            this.current = normalizeSettings({...defaultSettings(), ...saved});
-        } catch {
-            // 형태가 망가진 설정 파일이면 남겨 두고(settings.json.broken) 기본 설정으로 시작합니다.
+        this.current = this.load();
+        this.written = this.current;
+    }
+
+    /**
+     * 저장된 설정을 읽습니다. 깨졌거나(JSON이 아님) 형태가 망가진 설정 파일이면 남겨 두고 기본 설정으로 시작합니다.
+     * 그대로 두면 다음 저장 때 기본 설정으로 덮어써 갤러리·계정 설정을 잃습니다.
+     */
+    private load(): Settings {
+        const read = readJsonFile(this.path);
+        if (read.state === "missing") return defaultSettings();
+        if (read.state === "ok" && read.value && typeof read.value === "object" && !Array.isArray(read.value)) {
+            const saved = read.value as Record<string, unknown>;
+            // 형태가 틀린 항목(목록이 아닌 갤러리·계정 목록 등)은 다듬으면서 버려지므로, 다음 저장 때 덮어써 잃기 전에 원본을 남겨 둡니다.
+            const malformed = [
+                ...["galleries", "accounts"].filter((key) => key in saved && !Array.isArray(saved[key])),
+                ...["llm", "autoStop"].filter((key) => key in saved && (typeof saved[key] !== "object" || saved[key] === null))
+            ];
             try {
-                renameSync(this.path, `${this.path}.broken`);
+                const settings = normalizeSettings({...defaultSettings(), ...saved as Partial<Settings>});
+                this.noteDropped(saved, settings);
+                if (malformed.length > 0) {
+                    quarantine(this.path);
+                    this.loadNotes.push(`설정 파일의 ${malformed.join(", ")} 항목 형태가 맞지 않아 기본값으로 시작했습니다. 원본은 settings.json.broken-… 파일로 남겨 두었습니다.`);
+                }
+                return settings;
             } catch {
-                // 옮기지 못해도 기본 설정으로 시작합니다.
+                // 아래에서 남겨 둡니다.
             }
-            this.current = defaultSettings();
+        }
+        quarantine(this.path);
+        this.loadNotes.push("설정 파일이 깨져 기본 설정으로 시작했습니다. 원본은 settings.json.broken-… 파일로 남겨 두었습니다.");
+        return defaultSettings();
+    }
+
+    /** 다듬으며 버린 계정·갤러리·모델 이름을 기록합니다. 설정이 사라진 까닭을 로그에서 알 수 있게 합니다. */
+    private noteDropped(saved: Record<string, unknown>, settings: Settings): void {
+        for (const [key, kept] of [["accounts", settings.accounts.length], ["galleries", settings.galleries.length]] as const) {
+            const before = Array.isArray(saved[key]) ? saved[key].length : 0;
+            if (before > kept) this.loadNotes.push(`설정 파일의 ${key} 중 ${before - kept}개는 형식이 맞지 않아 버렸습니다.`);
+        }
+        // 1.3.5부터 너무 긴 키워드(30자 넘음)와 넘치는 키워드는 저장하지 않습니다. 예전 버전에서 저장한 것이 말없이 사라지지 않게 남깁니다.
+        const savedGalleries = Array.isArray(saved.galleries) ? saved.galleries as Partial<Record<string, unknown>>[] : [];
+        for (const gallery of settings.galleries) {
+            const original = savedGalleries.find((item) => item?.id === gallery.id);
+            for (const [field, label] of [["keywords", "키워드"], ["excludeKeywords", "제외 키워드"]] as const) {
+                const before = original?.[field];
+                if (!Array.isArray(before)) continue;
+                const kept = new Set(gallery[field]);
+                const dropped = before.filter((keyword): keyword is string => typeof keyword === "string" && keyword.trim() !== "" && !kept.has(normalizeText(keyword).trim()));
+                if (dropped.length > 0) this.loadNotes.push(`${gallery.galleryId || "(ID 없음)"} 갤러리의 ${label} 중 저장하지 않는 것(너무 길거나, 겹치거나, 개수를 넘음): ${dropped.join(", ")}`);
+            }
+        }
+        const models = (saved.llm as {models?: Record<string, unknown>} | undefined)?.models;
+        for (const [provider, model] of Object.entries(settings.llm.models)) {
+            const original = models?.[provider];
+            if (typeof original === "string" && original.trim() !== "" && original.trim() !== model) {
+                this.loadNotes.push(`${provider} 모델 이름이 올바르지 않아 기본 모델(${model})을 씁니다.`);
+            }
         }
     }
 
@@ -112,9 +87,17 @@ export class SettingsStore {
     }
 
     async save(settings: Settings): Promise<Settings> {
-        this.current = normalizeSettings(settings);
-        await writeJson(this.path, this.current);
-        return this.current;
+        const next = normalizeSettings(settings);
+        this.current = next;
+        try {
+            await writeJson(this.path, next);
+            this.written = next;
+        } catch (error) {
+            // 파일에 쓰지 못했으면 마지막으로 파일에 쓰인 설정으로 되돌립니다(그사이 다른 저장이 있었으면 그 설정을 둡니다).
+            if (this.current === next) this.current = this.written;
+            throw error;
+        }
+        return next;
     }
 }
 
@@ -127,20 +110,22 @@ export type InternalSecretKey = `device:${string}` | `otp:${string}`;
 export class SecretStore {
     private readonly path: string;
     private readonly data: Record<string, string>;
+    /** 저장을 부른 횟수와, 그중 파일에 쓰인 마지막 차례입니다. 쓰기에 실패한 값이 뒤의 저장과 함께 쓰였는지 볼 때 씁니다. */
+    private setCount = 0;
+    private writtenCount = 0;
 
     constructor(dir: string) {
         this.path = join(dir, "secrets.json");
-        const loaded = readJson<unknown>(this.path, {});
-        // 객체가 아니면(배열 등) 깨진 것으로 보고 비웁니다. 아래에서 백업합니다.
-        this.data = loaded && typeof loaded === "object" && !Array.isArray(loaded) ? loaded as Record<string, string> : {};
-        // 파일이 깨져서 읽지 못했다면, 다음 저장 때 덮어써서 남은 내용까지 잃지 않도록 백업해 둡니다.
-        if (existsSync(this.path) && Object.keys(this.data).length === 0) {
-            try {
-                if (readFileSync(this.path, "utf8").trim() !== "{}") renameSync(this.path, `${this.path}.broken-${Date.now()}`);
-            } catch {
-                // 백업에 실패해도 앱은 계속 동작합니다.
-            }
+        this.data = {};
+        const read = readJsonFile(this.path);
+        if (read.state === "missing") return;
+        // 객체가 아니면(배열 등) 깨진 것으로 보고, 다음 저장 때 덮어써서 남은 내용까지 잃지 않도록 남겨 둡니다.
+        if (read.state !== "ok" || !read.value || typeof read.value !== "object" || Array.isArray(read.value)) {
+            quarantine(this.path);
+            return;
         }
+        // 값은 암호화한 문자열이어야 합니다. 손으로 고친 파일 등에서 다른 값은 버립니다.
+        for (const [key, value] of Object.entries(read.value)) if (typeof value === "string") this.data[key] = value;
     }
 
     private ensureAvailable(): void {
@@ -163,13 +148,31 @@ export class SecretStore {
     }
 
     async set(key: SecretKey | InternalSecretKey, value: string): Promise<void> {
+        const sequence = ++this.setCount;
+        const previous = this.data[key];
+        let next: string | undefined;
         if (value) {
             this.ensureAvailable();
-            this.data[key] = safeStorage.encryptString(value).toString("base64");
+            next = safeStorage.encryptString(value).toString("base64");
+            this.data[key] = next;
         } else {
             delete this.data[key];
         }
-        await writeJson(this.path, this.data);
+        try {
+            await writeJson(this.path, this.data);
+            this.writtenCount = Math.max(this.writtenCount, sequence);
+        } catch (error) {
+            // 뒤이어 저장한 다른 항목과 함께 이 값도 쓰였으면 저장된 것입니다.
+            await flushJson(this.path);
+            if (this.writtenCount > sequence) return;
+            // 파일에 쓰지 못했으면 되돌립니다. 화면에 "(저장됨)"으로 보였다가 앱을 다시 켜면 사라지지 않게 합니다.
+            // 그사이 같은 항목을 다시 저장했으면 그 값을 둡니다.
+            if (this.data[key] === next) {
+                if (previous === undefined) delete this.data[key];
+                else this.data[key] = previous;
+            }
+            throw error;
+        }
     }
 }
 
@@ -223,19 +226,19 @@ const JUDGMENT_LOG_BYTES = 5 * 1024 * 1024;
  * 놓친 글이나 잘못 선 글을 나중에 되짚는 데 씁니다. 5MB를 넘으면 .old로 바꾸고 새로 씁니다.
  */
 export class JudgmentLog {
-    private readonly path: string;
+    private readonly file: LineFile;
 
     constructor(dir: string) {
-        this.path = join(dir, "judgments.jsonl");
+        this.file = new LineFile(join(dir, "judgments.jsonl"), JUDGMENT_LOG_BYTES);
     }
 
     append(record: JudgmentRecord): void {
-        try {
-            if (existsSync(this.path) && statSync(this.path).size > JUDGMENT_LOG_BYTES) renameSync(this.path, `${this.path}.old`);
-        } catch {
-            // 바꾸지 못해도 이어서 씁니다.
-        }
-        void appendFile(this.path, `${JSON.stringify(record)}\n`, {encoding: "utf8", mode: 0o600}).catch(() => {});
+        this.file.append(`${JSON.stringify(record)}\n`);
+    }
+
+    /** 남긴 기록이 파일에 다 쓰일 때까지 기다립니다. */
+    flush(): Promise<void> {
+        return this.file.flush();
     }
 }
 
@@ -248,9 +251,18 @@ export class UsageStore {
     }
 
     load(): UsageRecord | null {
-        const saved = readJson<{resetAt?: unknown; count?: unknown} | null>(this.path, null);
-        if (!saved || typeof saved.resetAt !== "number" || typeof saved.count !== "number") return null;
-        return {resetAt: saved.resetAt, count: saved.count};
+        let read: ReturnType<typeof readJsonFile>;
+        try {
+            read = readJsonFile(this.path);
+        } catch {
+            // 읽지 못하면 오늘 쓴 수를 0부터 셉니다(한도 계산만 어긋나고 다른 데이터는 잃지 않습니다).
+            return null;
+        }
+        if (read.state !== "ok" || !read.value || typeof read.value !== "object") return null;
+        const {resetAt, count} = read.value as {resetAt?: unknown; count?: unknown};
+        // 손상되거나 손으로 고친 값(음수, 무한대)으로 하루 한도 계산이 틀어지지 않게 합니다.
+        if (typeof resetAt !== "number" || !Number.isFinite(resetAt) || typeof count !== "number" || !Number.isInteger(count) || count < 0) return null;
+        return {resetAt, count};
     }
 
     save(record: UsageRecord): void {

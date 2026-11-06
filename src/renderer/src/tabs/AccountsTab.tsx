@@ -1,8 +1,11 @@
-import {useState} from "react";
+import {useRef, useState} from "react";
 import type {AccountConfig, AccountStatus, AccountView} from "@shared/types";
 import type {SettingsTabProps} from "../App";
 import {isCommitEnter} from "../components/keys";
 import {DefaultDccons} from "../components/DefaultDccons";
+import {SecretField} from "../components/SecretField";
+import {useConfirm} from "../components/ConfirmDialog";
+import {applyAccountChange, draftAfterAccountChange, type AccountChange} from "../components/account-change";
 
 type Props = SettingsTabProps;
 
@@ -24,23 +27,43 @@ function statusText(status: AccountStatus): string {
 }
 
 export function AccountsTab({draft, setDraft, state, run}: Props) {
+    const [confirm, confirmDialog] = useConfirm();
+    // 계정 추가·삭제 저장이 끝나기 전에 또 누르면, 앞 변경이 빠진 설정으로 덮어써 방금 추가한 계정이 지워집니다. 하나씩 처리합니다.
+    const changing = useRef(false);
+    const [busy, setBusy] = useState(false);
+
     function update(id: string, patch: Partial<AccountConfig>) {
-        setDraft({...draft, accounts: draft.accounts.map((account) => account.id === id ? {...account, ...patch} : account)});
+        setDraft((prev) => ({...prev, accounts: prev.accounts.map((account) => account.id === id ? {...account, ...patch} : account)}));
     }
 
-    // 비밀번호와 로그인은 저장된 계정에만 쓸 수 있으므로, 계정 추가와 삭제는 다른 변경 사항과 함께 바로 저장합니다.
+    // 비밀번호와 로그인은 저장된 계정에만 쓸 수 있으므로, 계정 추가와 삭제는 바로 저장합니다. 이때 마지막으로 저장된 설정에
+    // 이 변경만 더해 저장하고, 초안에도 같은 변경만 적용합니다. 다른 탭에서 고치던 내용은 함께 저장되지도, 사라지지도 않습니다.
+    async function saveAccountChange(change: AccountChange) {
+        if (changing.current) return;
+        changing.current = true;
+        setBusy(true);
+        try {
+            await run(() => window.hamboogie.saveSettings(applyAccountChange(state.settings, change)),
+                (prev, saved) => draftAfterAccountChange(prev, saved, change));
+        } finally {
+            changing.current = false;
+            setBusy(false);
+        }
+    }
+
     function addAccount() {
-        const account: AccountConfig = {id: crypto.randomUUID(), loginId: "", memberTypeOverride: "auto", defaultDccons: []};
-        void run(() => window.hamboogie.saveSettings({...draft, accounts: [...draft.accounts, account]}));
+        void saveAccountChange({kind: "add", account: {id: crypto.randomUUID(), loginId: "", memberTypeOverride: "auto", defaultDccons: []}});
     }
 
-    function removeAccount(id: string) {
-        if (!confirm("이 계정을 삭제할까요? 저장된 비밀번호도 함께 지워집니다.")) return;
-        void run(() => window.hamboogie.saveSettings({
-            ...draft,
-            accounts: draft.accounts.filter((account) => account.id !== id),
-            galleries: draft.galleries.map((gallery) => ({...gallery, accountIds: gallery.accountIds.filter((item) => item !== id)}))
-        }));
+    async function removeAccount(account: AccountConfig) {
+        if (changing.current) return;
+        const confirmed = await confirm({
+            title: "이 계정을 삭제할까요?",
+            message: <p>{account.loginId ? `${account.loginId} 계정과 ` : ""}저장된 비밀번호를 함께 지웁니다. 갤러리의 대기 계정에서도 빠집니다.</p>,
+            confirmLabel: "삭제",
+            danger: true
+        });
+        if (confirmed) void saveAccountChange({kind: "remove", id: account.id});
     }
 
     return (
@@ -50,31 +73,33 @@ export function AccountsTab({draft, setDraft, state, run}: Props) {
                 const view = state.accounts.find((item) => item.id === account.id);
                 return view && (
                     <AccountCard key={account.id} account={account} view={view} onChange={(patch) => update(account.id, patch)}
-                                 run={run} onRemove={() => removeAccount(account.id)}
+                                 run={run} onRemove={() => void removeAccount(account)} removing={busy}
                                  saved={JSON.stringify(state.settings.accounts.find((item) => item.id === account.id)) === JSON.stringify(account)}/>
                 );
             })}
-            <button className="button add" onClick={addAccount}>+ 계정 추가</button>
+            <button className="button add" onClick={addAccount} disabled={busy}>+ 계정 추가</button>
+            {confirmDialog}
         </div>
     );
 }
 
-function AccountCard({account, view, onChange, run, onRemove, saved}: {
+function AccountCard({account, view, onChange, run, onRemove, removing, saved}: {
     account: AccountConfig;
     view: AccountView;
     onChange(patch: Partial<AccountConfig>): void;
     run: Props["run"];
     onRemove(): void;
+    /** 계정 추가·삭제를 저장하는 중이라 지금은 삭제할 수 없는지입니다. */
+    removing: boolean;
     saved: boolean;
 }) {
-    const [password, setPassword] = useState("");
     const [otp, setOtp] = useState("");
     const status = view.status;
     const otpValid = /^\d{6}$/.test(otp);
 
     function submitOtp() {
         if (!otpValid) return;
-        void run(() => window.hamboogie.login(account.id, otp), true).then(() => setOtp(""));
+        void run(() => window.hamboogie.login(account.id, otp), true).then((ok) => ok && setOtp(""));
     }
 
     return (
@@ -84,17 +109,8 @@ function AccountCard({account, view, onChange, run, onRemove, saved}: {
                     <span>디시 아이디</span>
                     <input value={account.loginId} autoComplete="off" onChange={(event) => onChange({loginId: event.target.value})}/>
                 </label>
-                <label className="field">
-                    <span>비밀번호 {view.hasPassword && <em className="ok-text">(저장됨)</em>}</span>
-                    <div className="row">
-                        <input type="password" value={password} autoComplete="new-password" placeholder={view.hasPassword ? "바꾸려면 새로 입력" : ""}
-                               onChange={(event) => setPassword(event.target.value)}/>
-                        <button className="button small" disabled={!password}
-                                onClick={() => run(() => window.hamboogie.setSecret(`account:${account.id}`, password), true).then(() => setPassword(""))}>
-                            저장
-                        </button>
-                    </div>
-                </label>
+                <SecretField label="비밀번호" saved={view.hasPassword} autoComplete="new-password"
+                             onSave={(password) => run(() => window.hamboogie.setSecret(`account:${account.id}`, password), true)}/>
                 <label className="field">
                     <span>계정 종류</span>
                     <select value={account.memberTypeOverride}
@@ -126,7 +142,7 @@ function AccountCard({account, view, onChange, run, onRemove, saved}: {
                         onClick={() => run(() => window.hamboogie.login(account.id), true)}>
                     {status.state === "logged_in" ? "다시 로그인" : "로그인"}
                 </button>
-                <button className="button danger small" onClick={onRemove}>삭제</button>
+                <button className="button danger small" onClick={onRemove} disabled={removing}>삭제</button>
             </div>
         </section>
     );

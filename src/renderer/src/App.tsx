@@ -13,13 +13,21 @@ import {errorMessage} from "@shared/errors";
 /** 설정 초안 갱신 함수입니다. 값이나, 이전 초안을 받아 새 초안을 돌려주는 함수를 받습니다. */
 export type DraftSetter = (next: Settings | ((prev: Settings) => Settings)) => void;
 
+/**
+ * 요청이 끝난 뒤 초안을 어떻게 할지입니다. `false`면 받은 설정으로 바꾸고, `true`면 고치던 초안을 그대로 둡니다.
+ * 함수면 그사이 고친 최신 초안과 저장된 설정으로 새 초안을 만듭니다(계정 추가·삭제처럼 일부만 저장할 때).
+ */
+export type KeepDraft = boolean | ((prev: Settings, saved: Settings) => Settings);
+
+/** main에 요청을 보내고 받은 상태로 화면을 바꿉니다. 실패하면 위쪽에 오류를 보여 주고 false를 돌려줍니다. */
+export type RunAction = (action: () => Promise<AppState>, keepDraft?: KeepDraft) => Promise<boolean>;
+
 /** 설정을 고치고 main에 요청을 보내는 탭(계정, LLM · 알림)이 받는 값입니다. */
 export interface SettingsTabProps {
     draft: Settings;
     setDraft: DraftSetter;
     state: AppState;
-    /** main에 요청을 보내고 받은 상태로 화면을 바꿉니다. 실패하면 위쪽에 오류를 보여 줍니다. `keepDraft`면 고치던 초안을 그대로 둡니다. */
-    run(action: () => Promise<AppState>, keepDraft?: boolean): Promise<void>;
+    run: RunAction;
 }
 
 type TabId = "galleries" | "accounts" | "llm" | "history" | "logs" | "devTest";
@@ -56,16 +64,20 @@ export function App() {
 
     const dirty = JSON.stringify(draft) !== JSON.stringify(state.settings);
 
-    async function run(action: () => Promise<AppState>, keepDraft = false) {
+    // 성공 여부를 돌려줘서, 부르는 쪽이 성공했을 때만 입력칸을 비우게 합니다(실패했는데 입력한 비밀번호가 사라지지 않게).
+    const run: RunAction = async (action, keepDraft = false) => {
         setError(null);
         try {
             const next = await action();
             setState(next);
-            if (!keepDraft) setDraft(next.settings);
+            if (typeof keepDraft === "function") setDraft((prev) => prev && keepDraft(prev, next.settings));
+            else if (!keepDraft) setDraft(next.settings);
+            return true;
         } catch (caught) {
             setError(errorMessage(caught));
+            return false;
         }
-    }
+    };
 
     const save = () => run(() => window.hamboogie.saveSettings(draft));
 
@@ -82,7 +94,8 @@ export function App() {
                     ))}
                 </nav>
                 <div className="header-actions">
-                    <span className={state.running ? "badge running" : "badge"}>
+                    <span className={state.running ? "status-pill running" : "status-pill"} role="status">
+                        <span className="status-dot" aria-hidden="true"/>
                         {state.running ? `감시 중 · 갤러리 ${state.watching}개` : "멈춤"}
                         {state.running && state.autoStopAt !== null && ` · ${clockText(state.autoStopAt)} 자동 중지`}
                     </span>

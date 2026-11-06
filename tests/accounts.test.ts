@@ -1,4 +1,4 @@
-import {describe, expect, it} from "vitest";
+import {describe, expect, it, vi} from "vitest";
 import {APP, ApiError, AuthExpiredError, DCInsideError, OtpRequiredError, type DCInside, type DeviceCredentials, type LoginOptions} from "@green-1052/dcinside.js";
 import {AccountManager, CommentNotPostedError, isAppIdFailure} from "../src/main/dc/accounts";
 import {DC_APP_VERSION_CODE} from "../src/main/dc/app-version";
@@ -33,47 +33,68 @@ interface FakeServer {
     savedDeviceBroken: boolean;
     /** false면 OTP 없이 로그인됩니다(OTP를 쓰지 않는 계정). */
     otpRequired?: boolean;
+    /** 있으면 로그인 요청이 이 오류로 실패합니다(네트워크 오류 등). */
+    loginError?: Error;
+    /** 보유 디시콘 목록을 요청한 횟수입니다. */
+    dcconLists?: number;
+    /** 만든 클라이언트입니다. `loggedOut`으로 로그아웃됐는지 볼 수 있습니다. */
+    clients?: FakeClient[];
 }
+
+/** 가짜 클라이언트입니다. 로그아웃하면 `loggedOut`이 true가 됩니다. */
+type FakeClient = DCInside & {loggedOut?: boolean};
 
 const APP_ID_REFUSED = () => new DCInsideError('app_id 발급 실패: {"result":false,"cause":"2114 DC Error Description :service id mismatched."}');
 
 function fakeClientFactory(server: FakeServer) {
-    return (credentials?: DeviceCredentials) => (server.clientsCreated++, {
-        async login(_id: string, _password: string, options: LoginOptions = {}) {
-            server.loginCalls.push(options);
-            const viaToken = options.otpToken === server.validOtpToken;
-            if (server.otpRequired !== false && !viaToken && options.otp !== "123456") throw new OtpRequiredError("OTP가 필요합니다.", null);
-            return {type: "login", id: _id, password: _password, userId: "tester", result: {
-                result: true, user_id: "tester", name: "테스트닉", is_gonick: 1,
-                otp_token: options.otp ? server.validOtpToken : undefined
-            }};
-        },
-        auth: {
-            exportCredentials: () => ({androidId: "1"}),
-            async appId() {
-                if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
-                return "app-id";
-            }
-        },
-        dccons: {
-            async list() {
-                if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
-                return {tab: [{title: "음식콘"}], list: [[{package_idx: 1, detail_idx: 11, title: "햄버거"}]]};
+    return (credentials?: DeviceCredentials) => {
+        server.clientsCreated++;
+        const client = {
+            loggedOut: false,
+            logout() {
+                client.loggedOut = true;
+                return client;
             },
-            insert: async () => ({img_tag: "<img>"})
-        },
-        comments: {
-            async write(_gallery: string, _no: number, content: unknown) {
-                if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
-                if (server.expireWrites > 0) {
-                    server.expireWrites--;
-                    throw new AuthExpiredError("login", "세션 만료");
+            async login(_id: string, _password: string, options: LoginOptions = {}) {
+                server.loginCalls.push(options);
+                if (server.loginError) throw server.loginError;
+                const viaToken = options.otpToken === server.validOtpToken;
+                if (server.otpRequired !== false && !viaToken && options.otp !== "123456") throw new OtpRequiredError("OTP가 필요합니다.", null);
+                return {type: "login", id: _id, password: _password, userId: "tester", result: {
+                    result: true, user_id: "tester", name: "테스트닉", is_gonick: 1,
+                    otp_token: options.otp ? server.validOtpToken : undefined
+                }};
+            },
+            auth: {
+                exportCredentials: () => ({androidId: "1"}),
+                async appId() {
+                    if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
+                    return "app-id";
                 }
-                server.written.push(String(content));
-                return {result: "true"};
+            },
+            dccons: {
+                async list() {
+                    server.dcconLists = (server.dcconLists ?? 0) + 1;
+                    if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
+                    return {tab: [{title: "음식콘"}], list: [[{package_idx: 1, detail_idx: 11, title: "햄버거"}]]};
+                },
+                insert: async () => ({img_tag: "<img>"})
+            },
+            comments: {
+                async write(_gallery: string, _no: number, content: unknown) {
+                    if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
+                    if (server.expireWrites > 0) {
+                        server.expireWrites--;
+                        throw new AuthExpiredError("login", "세션 만료");
+                    }
+                    server.written.push(String(content));
+                    return {result: "true"};
+                }
             }
-        }
-    }) as unknown as DCInside;
+        } as unknown as FakeClient;
+        (server.clients ??= []).push(client);
+        return client;
+    };
 }
 
 function setup(secretsInit: Record<string, string> = {}) {
@@ -312,5 +333,190 @@ describe("dcinside.js 2.0.2 오류 분류", () => {
         withOtpButExpired.server.validOtpToken = "다른 토큰";
         expect(await withOtpButExpired.manager.recoverLogin("acc1", "세션 만료")).toBe(false);
         expect(withOtpButExpired.manager.readingClient([ACCOUNT], [ACCOUNT.id])).toBeNull();
+    });
+});
+
+/** 로그인된 세션의 클라이언트입니다. */
+const sessionClient = (manager: AccountManager, id = "acc1") => (manager as unknown as {sessions: Map<string, {client: FakeClient}>}).sessions.get(id)!.client;
+
+/** 풀어 줄 때까지 기다리는 문입니다. */
+function gate() {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    return {opened, open};
+}
+
+const DCCON = {packageIdx: 1, detailIdx: 11, title: "햄버거", packageTitle: "음식콘"};
+
+describe("AccountManager 로그아웃", () => {
+    it("로그아웃하거나 계정을 지우면 그 세션의 클라이언트도 로그아웃시킨다(라이브러리의 자동 재로그인을 막음)", async () => {
+        const {manager} = setup({"otp:acc1": "token-abc"});
+        await manager.login(ACCOUNT);
+        const first = sessionClient(manager);
+        manager.logout("acc1");
+        expect(first.loggedOut).toBe(true);
+        expect(manager.status("acc1").state).toBe("logged_out");
+
+        await manager.login(ACCOUNT);
+        const second = sessionClient(manager);
+        expect(second).not.toBe(first);
+        await manager.remove("acc1");
+        expect(second.loggedOut).toBe(true);
+        expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])).toBeNull();
+    });
+
+    it("기기 정보를 저장하는 사이 로그아웃하면 끝난 로그인을 세션으로 쓰지 않는다", async () => {
+        const {server, secrets, manager} = setup({"otp:acc1": "token-abc"});
+        const saving = gate();
+        let waiting = false;
+        const original = secrets.set;
+        secrets.set = async (key: string, value: string) => {
+            if (key.startsWith("device:") && value) {
+                waiting = true;
+                await saving.opened;
+            }
+            return original(key, value);
+        };
+        const login = manager.login(ACCOUNT);
+        await vi.waitFor(() => expect(waiting).toBe(true));
+        manager.logout("acc1");
+        saving.open();
+        expect(await login).toEqual({state: "logged_out"});
+        expect(manager.status("acc1").state).toBe("logged_out");
+        expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])).toBeNull();
+        // 로그인하던 클라이언트도 로그아웃시켜 라이브러리가 스스로 다시 로그인하지 않게 합니다.
+        expect(server.clients![0]!.loggedOut).toBe(true);
+    });
+
+    it("아이디를 바꾸면 예전 아이디의 기기 정보와 OTP 토큰을 지우고 로그아웃하되, 비밀번호는 남긴다(비밀번호를 먼저 저장했을 수 있음)", async () => {
+        const {secrets, manager} = setup({"otp:acc1": "token-abc", "account:acc10": "other"});
+        await manager.login(ACCOUNT);
+        const client = sessionClient(manager);
+        expect(secrets.data["device:acc1"]).toBeDefined();
+        await manager.changeLoginId("acc1");
+        expect(Object.keys(secrets.data).sort()).toEqual(["account:acc1", "account:acc10"]);
+        expect(client.loggedOut).toBe(true);
+        expect(manager.status("acc1").state).toBe("logged_out");
+        expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])).toBeNull();
+    });
+});
+
+describe("AccountManager 댓글 직전 계정 확인", () => {
+    for (const step of ["appId", "insert"] as const) {
+        it(`댓글 준비(${step}) 중에 계정을 지우면 댓글을 보내지 않고 확실한 실패로 처리한다`, async () => {
+            const {server, manager} = setup({"otp:acc1": "token-abc"});
+            await manager.login(ACCOUNT);
+            const client = sessionClient(manager) as unknown as {auth: {appId: () => Promise<string>}; dccons: {insert: () => Promise<unknown>}};
+            const pending = gate();
+            let started = false;
+            const hold = async <T>(value: T) => {
+                started = true;
+                await pending.opened;
+                return value;
+            };
+            if (step === "appId") client.auth.appId = () => hold("app-id");
+            else client.dccons.insert = () => hold({img_tag: "<img>"});
+            const writing = manager.writeComment("acc1", "gf2", 1, {type: "dccon", dccon: DCCON}).then(() => null, (error: unknown) => error);
+            await vi.waitFor(() => expect(started).toBe(true));
+            await manager.remove("acc1");
+            pending.open();
+            expect(await writing).toBeInstanceOf(CommentNotPostedError);
+            expect(server.written).toEqual([]);
+        });
+    }
+
+    it("댓글 준비 중에 같은 계정으로 다시 로그인했으면(세션만 바뀜) 새 세션으로 한 번 더 시도해 단다", async () => {
+        const {server, manager} = setup({"otp:acc1": "token-abc"});
+        await manager.login(ACCOUNT);
+        const client = sessionClient(manager) as unknown as {auth: {appId: () => Promise<string>}};
+        const pending = gate();
+        let started = false;
+        client.auth.appId = async () => {
+            started = true;
+            await pending.opened;
+            return "app-id";
+        };
+        const writing = manager.writeComment("acc1", "gf2", 1, {type: "text", text: "줄"});
+        await vi.waitFor(() => expect(started).toBe(true));
+        await manager.login(ACCOUNT, undefined, false, true);
+        expect(sessionClient(manager)).not.toBe(client);
+        pending.open();
+        await writing;
+        expect(server.written).toHaveLength(1);
+    });
+
+    it("디시콘 준비 중에 같은 계정으로 다시 로그인해 예전 클라이언트가 로그아웃돼도 새 세션으로 단다", async () => {
+        const {server, manager} = setup({"otp:acc1": "token-abc"});
+        await manager.login(ACCOUNT);
+        const client = sessionClient(manager) as unknown as {dccons: {insert: () => Promise<unknown>}};
+        const pending = gate();
+        let started = false;
+        client.dccons.insert = async () => {
+            started = true;
+            await pending.opened;
+            throw new Error("로그인이 필요합니다");
+        };
+        const writing = manager.writeComment("acc1", "gf2", 1, {type: "dccon", dccon: DCCON});
+        await vi.waitFor(() => expect(started).toBe(true));
+        await manager.login(ACCOUNT, undefined, false, true);
+        pending.open();
+        await writing;
+        expect(server.written).toHaveLength(1);
+    });
+});
+
+describe("AccountManager 직접 다시 로그인", () => {
+    it("로그인된 계정을 직접 다시 로그인하다 일시적인 오류가 나면 원래 로그인을 그대로 쓴다", async () => {
+        const {server, manager} = setup({"otp:acc1": "token-abc"});
+        await manager.login(ACCOUNT);
+        const client = sessionClient(manager);
+        server.loginError = new TypeError("fetch failed");
+        const status = await manager.login(ACCOUNT, undefined, false, true);
+        expect(status).toMatchObject({state: "error", message: expect.stringContaining("원래 로그인을 그대로")});
+        expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])?.client).toBe(client);
+        expect(manager.status("acc1").state).toBe("logged_in");
+        expect(client.loggedOut).toBe(false);
+    });
+
+    it("로그인된 계정을 직접 다시 로그인하다 OTP를 요구받으면, OTP를 넣을 때까지 원래 로그인을 그대로 쓴다", async () => {
+        const {secrets, server, manager} = setup({"otp:acc1": "token-abc"});
+        await manager.login(ACCOUNT);
+        const client = sessionClient(manager);
+        delete secrets.data["otp:acc1"];
+        server.otpRequired = true;
+        const status = await manager.login(ACCOUNT, undefined, false, true);
+        expect(status).toMatchObject({state: "otp_required", message: expect.stringContaining("원래 로그인을 그대로")});
+        expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])?.client).toBe(client);
+        expect(client.loggedOut).toBe(false);
+        // OTP를 넣으면 새 로그인으로 바꾸고 원래 세션은 로그아웃합니다.
+        expect(await manager.login(ACCOUNT, "123456")).toMatchObject({state: "logged_in"});
+        expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])?.client).not.toBe(client);
+        expect(client.loggedOut).toBe(true);
+    });
+
+    it("자동 재로그인이 일시적인 오류로 실패하면 세션을 내려놓고 다시 시도할 때를 잡는다", async () => {
+        const {server, manager} = setup({"otp:acc1": "token-abc"});
+        await manager.login(ACCOUNT);
+        const client = sessionClient(manager);
+        server.loginError = new TypeError("fetch failed");
+        expect(await manager.login(ACCOUNT)).toMatchObject({state: "error", retryAt: expect.any(Number)});
+        expect(manager.readingClient([ACCOUNT], [ACCOUNT.id])).toBeNull();
+        expect(client.loggedOut).toBe(true);
+    });
+});
+
+describe("AccountManager 점검 겹침", () => {
+    it("계정 점검이 겹쳐 불려도 보유 디시콘은 한 번만 다시 불러온다", async () => {
+        let now = 1_000_000;
+        const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0, savedDeviceBroken: true};
+        const secrets = memorySecrets({"account:acc1": "pw", "otp:acc1": "token-abc", "device:acc1": JSON.stringify({androidId: "old"})});
+        const manager = new AccountManager(secrets, fakeClientFactory(server), new AppIdBackoff(() => now), () => now);
+        expect(await manager.login(ACCOUNT)).toMatchObject({state: "logged_in", dcconCount: 0});
+        expect(server.dcconLists).toBe(1);
+        server.savedDeviceBroken = false;
+        now += 5 * 60 * 1000;
+        expect(await Promise.all([manager.maintain([ACCOUNT]), manager.maintain([ACCOUNT])])).toEqual([true, true]);
+        expect(server.dcconLists).toBe(2);
+        expect(manager.status("acc1")).toMatchObject({state: "logged_in", dcconCount: 1});
     });
 });

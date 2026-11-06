@@ -1,9 +1,8 @@
-import {existsSync, renameSync, statSync} from "node:fs";
-import {appendFile} from "node:fs/promises";
 import {LOG_LIMIT} from "@shared/settings";
 import type {LogEntry, LogLevel} from "@shared/types";
+import {LineFile} from "./files";
 
-/** 로그 파일이 이보다 크면 앱을 켤 때 `.old`로 넘기고 새로 시작합니다. */
+/** 로그 파일이 이보다 크면 `.old`로 넘기고 새로 시작합니다. */
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 /** 로그가 어느 갤러리, 어느 글에 대한 것인지입니다. */
@@ -16,15 +15,10 @@ export interface LogContext {
 export class Logger {
     private readonly entries: LogEntry[] = [];
     private readonly listeners = new Set<(entry: LogEntry) => void>();
-    /** 파일 쓰기 순서입니다. 줄마다 따로 쓰면 거의 동시에 남긴 줄의 순서가 뒤바뀌므로, 앞 줄을 다 쓴 뒤에 씁니다. */
-    private writing: Promise<void> = Promise.resolve();
+    private readonly file: LineFile;
 
-    constructor(private readonly filePath: string) {
-        try {
-            if (existsSync(filePath) && statSync(filePath).size > MAX_FILE_BYTES) renameSync(filePath, `${filePath}.old`);
-        } catch {
-            // 로그 파일 정리에 실패해도 앱은 계속 동작합니다.
-        }
+    constructor(filePath: string) {
+        this.file = new LineFile(filePath, MAX_FILE_BYTES);
     }
 
     log(level: LogLevel, message: string, context: LogContext = {}): void {
@@ -33,9 +27,9 @@ export class Logger {
         if (this.entries.length > LOG_LIMIT) this.entries.splice(0, this.entries.length - LOG_LIMIT);
         for (const listener of this.listeners) listener(entry);
         const where = context.galleryId ? ` [${context.galleryId}${context.postNo ? `#${context.postNo}` : ""}]` : "";
-        const line = `${new Date(entry.time).toISOString()} ${level.toUpperCase()}${where} ${message}\n`;
-        // 로그인 아이디와 글 내용이 들어 있어 다른 데이터 파일처럼 이 사용자만 읽을 수 있게 만듭니다.
-        this.writing = this.writing.then(() => appendFile(this.filePath, line, {mode: 0o600})).catch(() => {});
+        // 글 제목이나 LLM 판단 근거에 든 줄바꿈으로 가짜 로그 줄이 생기지 않게, 한 기록은 파일에서도 한 줄로 씁니다.
+        const oneLine = message.replace(/\r\n|[\r\n\u2028\u2029]/g, " ⏎ ");
+        this.file.append(`${new Date(entry.time).toISOString()} ${level.toUpperCase()}${where} ${oneLine}\n`);
     }
 
     info(message: string, context?: LogContext): void {
@@ -56,7 +50,7 @@ export class Logger {
 
     /** 남긴 로그가 파일에 다 쓰일 때까지 기다립니다. */
     flush(): Promise<void> {
-        return this.writing;
+        return this.file.flush();
     }
 
     recent(): LogEntry[] {

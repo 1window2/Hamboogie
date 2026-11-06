@@ -12,6 +12,18 @@
     --warn: #b7791f;
     --warn-bg: #fff4d6;
     --info-bg: #e8f0fb;
+    --ok-bg: #e3f2e6;
+    /* 버튼: 누를 수 있는 버튼은 흰 바탕에 테두리와 그림자, 누를 수 없는 버튼은 그림자 없는 회색 바탕입니다. */
+    --button-border: #cfcac0;
+    --hover-bg: #f2f0eb;
+    --shadow: rgba(31, 29, 26, 0.06);
+    --disabled-bg: #eeece7;
+    --disabled-border: #e2dfd8;
+    --disabled-text: #8a857c;
+    /* 흰 글자를 올리는 빨간 바탕(삭제 확인 버튼)입니다. */
+    --danger-solid: #c42b1c;
+    --focus: #d9481f;
+    --backdrop: rgba(20, 18, 15, 0.4);
     --mono: ui-monospace, "D2Coding", Consolas, monospace;
     color-scheme: light;
 }
@@ -29,6 +41,16 @@
         --danger-bg: #3d1a17;
         --warn-bg: #3a3014;
         --info-bg: #1b2a3d;
+        --ok-bg: #1c3324;
+        --button-border: #4a453e;
+        --hover-bg: #2c2a26;
+        --shadow: rgba(0, 0, 0, 0.3);
+        --disabled-bg: #2a2825;
+        --disabled-border: #2f2c28;
+        --disabled-text: #7a746b;
+        --danger-solid: #d23a2a;
+        --focus: #f0643a;
+        --backdrop: rgba(0, 0, 0, 0.6);
         color-scheme: dark;
     }
 }
@@ -43,6 +65,26 @@ body {
     color: var(--text);
     font-family: "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
     font-size: 14px;
+    line-height: 1.45;
+    /* 한글을 낱말 중간("섭니/다")이 아니라 띄어쓰기에서 줄바꿈합니다. 칸보다 긴 낱말만 중간에서 끊습니다. */
+    word-break: keep-all;
+    overflow-wrap: break-word;
+}
+
+/* 주소처럼 띄어쓰기 없이 긴 글자가 올 수 있는 곳은 칸 크기를 넘지 않게 어디서든 끊습니다. */
+.banner, .error-text, .modal-message, .log .message, .history-detail, .json {
+    overflow-wrap: anywhere;
+}
+
+small {
+    font-size: 12.5px;
+    line-height: 1.55;
+}
+
+/* 키보드로 옮겨 다닐 때만 포커스 테두리를 보여줍니다(마우스로 누를 때는 보이지 않음). */
+:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
 }
 
 h1 {
@@ -58,6 +100,7 @@ h1 {
 
 .card p {
     margin: 0;
+    line-height: 1.6;
 }
 
 .note {
@@ -70,21 +113,6 @@ h1 {
 a.button {
     text-decoration: none;
 }
-
-.button:not(:disabled):hover {
-    border-color: var(--muted);
-}
-
-.button.primary:not(:disabled):hover {
-    filter: brightness(1.08);
-}
-
-.button.selected {
-    background: var(--text);
-    color: var(--surface);
-    border-color: var(--text);
-}
-
 
 h2 {
     font-size: 15px;
@@ -101,7 +129,7 @@ input, select, textarea {
     min-width: 0;
 }
 
-input:focus, select:focus, textarea:focus {
+input:not([type="checkbox"], [type="radio"]):focus, select:focus, textarea:focus {
     outline: 2px solid var(--accent);
     outline-offset: -1px;
 }
@@ -125,8 +153,9 @@ fieldset {
 
 .header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 20px;
+    gap: 8px 20px;
     padding: 12px 20px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
@@ -141,6 +170,7 @@ fieldset {
 }
 
 .tab {
+    white-space: nowrap;
     font: inherit;
     color: var(--muted);
     background: none;
@@ -148,6 +178,10 @@ fieldset {
     border-radius: 6px;
     padding: 6px 12px;
     cursor: pointer;
+}
+
+.tab:hover {
+    color: var(--text);
 }
 
 .tab.active {
@@ -164,6 +198,7 @@ fieldset {
 }
 
 .badge {
+    white-space: nowrap;
     font-size: 12px;
     padding: 3px 8px;
     border-radius: 999px;
@@ -174,6 +209,69 @@ fieldset {
 .badge.running {
     background: var(--ok);
     color: #fff;
+}
+
+/* 머리글의 감시 상태입니다. 감시 중이면 초록 점과 글자, 멈춤이면 회색으로 한눈에 구분합니다. */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 11px 4px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.status-dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    opacity: 0.6;
+}
+
+.status-pill.running {
+    border-color: transparent;
+    background: var(--ok-bg);
+    color: var(--ok);
+}
+
+.status-pill.running .status-dot {
+    background: var(--ok);
+    opacity: 1;
+    animation: status-pulse 2s ease-out infinite;
+}
+
+@keyframes status-pulse {
+    0% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent);
+    }
+    100% {
+        box-shadow: 0 0 0 6px transparent;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .status-pill.running .status-dot {
+        animation: none;
+    }
+}
+
+/* 창이 좁으면(최소 860px) 머리글 사이를 좁혀 한 줄에 들어가게 합니다. */
+@media (max-width: 960px) {
+    .header {
+        column-gap: 12px;
+        padding: 12px 16px;
+    }
+
+    .tab {
+        padding: 6px 9px;
+    }
 }
 
 .content {
@@ -212,6 +310,11 @@ fieldset {
     gap: 14px;
 }
 
+/* 칸이 하나뿐이어도 줄 전체로 늘이지 않습니다. */
+.grid.fill {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
 .provider-row {
     display: grid;
     grid-template-columns: 80px minmax(0, 1fr) minmax(0, 1.3fr);
@@ -240,6 +343,23 @@ fieldset {
 .field.inline {
     flex-direction: row;
     align-items: center;
+}
+
+/* 같은 칸의 안내 문구가 여러 줄이면 사이를 좁힙니다. */
+.field > small + small {
+    margin-top: -3px;
+}
+
+.field > input.short {
+    align-self: flex-start;
+    width: 130px;
+}
+
+/* 위 설정을 켰을 때만 쓰는 하위 설정입니다. */
+.field.nested {
+    margin-top: 4px;
+    padding-left: 12px;
+    border-left: 2px solid var(--border);
 }
 
 .row {
@@ -272,30 +392,78 @@ fieldset {
     margin-left: auto;
 }
 
+/* 버튼은 기본(테두리), 주요(주황 바탕), 위험(빨간 글자, 확인 창에서는 빨간 바탕) 세 가지입니다. */
 .button {
     font: inherit;
     color: var(--text);
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--button-border);
     border-radius: 6px;
     padding: 6px 14px;
     cursor: pointer;
     white-space: nowrap;
+    box-shadow: 0 1px 1px var(--shadow);
+    transition: background-color 0.12s, border-color 0.12s, filter 0.12s;
 }
 
-.button:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
+.button:not(:disabled):hover {
+    background: var(--hover-bg);
+    border-color: var(--muted);
+}
+
+.button:not(:disabled):active {
+    transform: translateY(1px);
+    box-shadow: none;
 }
 
 .button.primary {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-text);
+    font-weight: 600;
+}
+
+.button.primary:not(:disabled):hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    filter: brightness(1.08);
 }
 
 .button.danger {
     color: var(--error);
+}
+
+.button.danger:not(:disabled):hover {
+    background: var(--danger-bg);
+    border-color: var(--error);
+}
+
+.button.danger.solid {
+    background: var(--danger-solid);
+    border-color: var(--danger-solid);
+    color: #fff;
+    font-weight: 600;
+}
+
+.button.danger.solid:not(:disabled):hover {
+    background: var(--danger-solid);
+    filter: brightness(1.1);
+}
+
+.button.selected,
+.button.selected:not(:disabled):hover {
+    background: var(--text);
+    color: var(--surface);
+    border-color: var(--text);
+}
+
+/* 누를 수 없는 버튼은 종류와 상관없이 그림자 없는 회색 바탕으로 보여, 흐리게 칠한 주요 버튼과 헷갈리지 않게 합니다. */
+.button:disabled {
+    background: var(--disabled-bg);
+    border-color: var(--disabled-border);
+    color: var(--disabled-text);
+    box-shadow: none;
+    cursor: not-allowed;
 }
 
 .button.small {
@@ -306,6 +474,7 @@ fieldset {
 .button.add {
     border-style: dashed;
     padding: 12px;
+    box-shadow: none;
 }
 
 .banner {
@@ -354,11 +523,16 @@ fieldset {
 
 .chip button {
     border: none;
+    border-radius: 50%;
     background: none;
     color: var(--muted);
     cursor: pointer;
     font-size: 15px;
     line-height: 1;
+}
+
+.chip button:hover {
+    color: var(--error);
 }
 
 .account-order {
@@ -414,6 +588,10 @@ fieldset {
     border-bottom: 1px solid var(--border);
 }
 
+.log .message {
+    min-width: 0;
+}
+
 .log time {
     color: var(--muted);
     white-space: nowrap;
@@ -441,7 +619,10 @@ fieldset {
     color: var(--error);
 }
 
-.otp-input {
+/* .row input의 flex: 1보다 앞서도록 .row 안에서도 폭을 고정합니다. */
+.otp-input,
+.row input.otp-input {
+    flex: 0 0 110px;
     width: 110px;
     letter-spacing: 2px;
     text-align: center;
@@ -551,4 +732,113 @@ textarea {
 
 .dccon-item.selected {
     border-color: var(--accent);
+}
+
+/* 갤러리 카드의 고급 설정(접어 둠) */
+.advanced {
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+}
+
+.advanced > summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+    cursor: pointer;
+    list-style: none;
+    font-size: 13px;
+    border-radius: 6px;
+}
+
+.advanced > summary::-webkit-details-marker {
+    display: none;
+}
+
+.advanced > summary::before {
+    content: "▸";
+    color: var(--muted);
+    transition: transform 0.12s;
+}
+
+.advanced[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+.advanced-title {
+    font-weight: 600;
+}
+
+.advanced-item {
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    font-size: 12px;
+}
+
+.advanced-item.warn {
+    border-color: transparent;
+    background: var(--danger-bg);
+    color: var(--error);
+}
+
+.advanced-body {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-top: 14px;
+}
+
+/* 확인 창 */
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: var(--backdrop);
+}
+
+.modal {
+    width: min(440px, 100%);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.25);
+}
+
+/* 창 자체가 포커스를 받아도(안의 글자를 눌렀을 때) 테두리는 그리지 않습니다. 버튼의 포커스 표시는 그대로입니다. */
+.modal:focus {
+    outline: none;
+}
+
+.modal h2 {
+    font-size: 16px;
+    margin: 0;
+}
+
+.modal-message {
+    line-height: 1.6;
+}
+
+.modal-message p {
+    margin: 0 0 6px;
+}
+
+.modal-message p:last-child {
+    margin-bottom: 0;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
 }

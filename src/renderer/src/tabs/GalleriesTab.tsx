@@ -1,10 +1,14 @@
 import {useEffect, useState} from "react";
-import {BODY_READ_LIMIT_SAFE, DEFAULT_KEYWORDS, estimatedWatchHours, GALLERY_ID_PATTERN, FREE_DAILY_LLM_REQUESTS, INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery} from "@shared/settings";
+import {
+    BODY_READ_LIMIT_DEFAULT, BODY_READ_LIMIT_MAX, BODY_READ_LIMIT_SAFE, DEFAULT_KEYWORDS, DELAY_MAX_SEC, estimatedWatchHours, GALLERY_ID_PATTERN, FREE_DAILY_LLM_REQUESTS,
+    INTERVAL_MAX_SEC, INTERVAL_MIN_SEC, newGallery
+} from "@shared/settings";
 import type {AccountView, GalleryConfig, GalleryStatus, Settings} from "@shared/types";
 import type {DraftSetter} from "../App";
 import {NumberInput} from "../components/NumberInput";
 import {KeywordEditor} from "../components/KeywordEditor";
 import {AutoStopCard} from "../components/AutoStopCard";
+import {useConfirm} from "../components/ConfirmDialog";
 import {galleryIdFromInput} from "@shared/text";
 import {errorMessage} from "@shared/errors";
 import {timeText} from "@shared/time";
@@ -69,6 +73,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
     onRemove(): void;
 }) {
     const [checking, setChecking] = useState(false);
+    const [confirm, confirmDialog] = useConfirm();
     const [checkError, setCheckError] = useState<string | null>(null);
     const checked = Boolean(gallery.galleryId) && gallery.checkedId === gallery.galleryId;
     const validId = GALLERY_ID_PATTERN.test(gallery.galleryId.trim());
@@ -103,6 +108,20 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
         onChange({accountIds: ids});
     }
 
+    async function remove() {
+        const name = gallery.title || gallery.galleryId.trim();
+        const confirmed = await confirm({
+            title: "이 갤러리를 삭제할까요?",
+            message: <p>{name ? `${name}의 ` : ""}감시 설정(키워드, 대기 계정 등)을 지웁니다. 설정을 저장하기 전에는 되돌리기로 되살릴 수 있습니다.</p>,
+            confirmLabel: "삭제",
+            danger: true
+        });
+        if (confirmed) onRemove();
+    }
+
+    const advanced = advancedSummary(gallery);
+    const bodyLimitRisky = isBodyLimitRisky(gallery.bodyReadLimit);
+
     const accountLabel = (id: string) => {
         const account = accounts.find((item) => item.id === id);
         if (!account) return id;
@@ -115,9 +134,14 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                 <label className="field inline">
                     <span>갤러리 ID</span>
                     <input value={gallery.galleryId} placeholder="예: gf2 또는 갤러리 주소"
-                           onChange={(event) => onChange({galleryId: galleryIdFromInput(event.target.value)})}/>
+                           onChange={(event) => {
+                               // 한글을 조합하는 중에 값을 바꾸면 입력이 깨지므로, 조합이 끝난 뒤에 다듬습니다.
+                               const composing = (event.nativeEvent as InputEvent).isComposing;
+                               onChange({galleryId: composing ? event.target.value : galleryIdFromInput(event.target.value)});
+                           }}
+                           onCompositionEnd={(event) => onChange({galleryId: galleryIdFromInput(event.currentTarget.value)})}/>
                 </label>
-                <button className="button small" disabled={checking || !validId || checked} onClick={check}>
+                <button className="button small" disabled={checking || !validId || checked} title={checked ? "이미 확인한 갤러리입니다" : undefined} onClick={check}>
                     {checking ? "확인 중…" : "확인"}
                 </button>
 
@@ -128,7 +152,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                 {gallery.galleryId && (
                     <a className="button small push-right" href={galleryUrl(gallery)} target="_blank" rel="noreferrer">갤러리 열기</a>
                 )}
-                <button className={gallery.galleryId ? "button danger small" : "button danger small push-right"} onClick={onRemove}>삭제</button>
+                <button className={gallery.galleryId ? "button danger small" : "button danger small push-right"} onClick={() => void remove()}>삭제</button>
             </div>
             {checked
                 ? <small className="ok-text check-status">✓ {gallery.title}{gallery.isMinor ? " (마이너 갤러리)" : ""}</small>
@@ -137,32 +161,12 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                         : gallery.galleryId.trim() && <small className="error-text check-status">갤러리 ID를 확인해야 감시할 수 있습니다.</small>}
             {status && (
                 <small className="muted check-status">
-                    마지막 확인 {timeText(status.lastCheckedAt, true)} · 새 글 {status.newPosts}개 · 나눔 판단 {status.matched}개
+                    마지막 확인 {timeText(status.lastCheckedAt, true)} · 새 글 {status.newPosts}개 · 키워드 걸린 글 {status.matched}개 · 감시 시작 뒤 나눔 판단 {status.giveaways}개
                 </small>
             )}
 
-            <div className="grid">
+            <div className="grid fill">
                 <IntervalField value={gallery.intervalSec} onChange={(intervalSec) => onChange({intervalSec})}/>
-
-                <label className="field">
-                    <span>줄 서기 지연 (초)</span>
-                    <NumberInput value={gallery.delaySec} onChange={(delaySec) => onChange({delaySec})}/>
-                    <small className="muted">나눔 글을 감지한 뒤 기다릴 시간입니다. 0이면 즉시 줄을 섭니다.</small>
-                </label>
-
-                <fieldset className="field">
-                    <legend>나눔 종류</legend>
-                    <div className="row">
-                        <label className="check">
-                            <input type="radio" name={`category-${gallery.id}`} checked={gallery.category === "food"} onChange={() => onChange({category: "food"})}/>
-                            음식만
-                        </label>
-                        <label className="check">
-                            <input type="radio" name={`category-${gallery.id}`} checked={gallery.category === "all"} onChange={() => onChange({category: "all"})}/>
-                            모두
-                        </label>
-                    </div>
-                </fieldset>
             </div>
 
             <KeywordEditor label="우선 키워드" keywords={gallery.keywords} onChange={(keywords) => onChange({keywords})} defaults={DEFAULT_KEYWORDS}
@@ -171,34 +175,6 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                                키워드와 상관없이 새 글은 전부 LLM이 판단합니다. 제목에 키워드가 있는 글은 본문 요청 상한과 상관없이 본문을 먼저 읽고,
                                판단에 실패하면 알림으로 보냅니다.
                            </small>}/>
-
-            <div className="field">
-                <label className="check">
-                    <input type="checkbox" checked={gallery.scanBody} onChange={(event) => onChange({scanBody: event.target.checked})}/>
-                    키워드 없는 글도 본문 읽기
-                </label>
-                <small className="muted">
-                    새 글마다 본문을 열어 제목과 함께 LLM에 보냅니다. 제목에 티를 안 내는 나눔 글도 잡지만 새 글마다 디시 요청이 하나씩 늘어납니다.
-                    끄면 키워드에 걸린 글만 본문을 읽고, 나머지는 제목만 보냅니다.
-                </small>
-                {gallery.scanBody && (
-                    <label className="field">
-                        <span>본문 요청 상한 (한 번 확인할 때)</span>
-                        <NumberInput value={gallery.bodyReadLimit} min={0} onChange={(bodyReadLimit) => onChange({bodyReadLimit})}/>
-                        <small className="muted">
-                            제목에 키워드가 없는 새 글은 최근 글부터 이 개수까지만 본문을 엽니다. 나머지는 제목만 보내고,
-                            제목만 본 글은 나눔으로 판단돼도 자동으로 줄 서지 않고 알립니다. 0이면 제한하지 않습니다.
-                        </small>
-                        <small className={gallery.bodyReadLimit === 0 || gallery.bodyReadLimit > BODY_READ_LIMIT_SAFE ? "error-text" : "muted"}>
-                            주의: 분당 글이 수십개씩 올라오는 초대형 갤러리에서는 본문 요청 상한을 제거하거나 {BODY_READ_LIMIT_SAFE}개보다 크게 둘 시 IP 차단의 사유가 될 수도 있습니다.
-                        </small>
-                    </label>
-                )}
-            </div>
-
-            <KeywordEditor label="제외 키워드" keywords={gallery.excludeKeywords} onChange={(excludeKeywords) => onChange({excludeKeywords})}
-                           placeholder="제목이나 본문에 있으면 넘길 단어 (쉼표로 여러 개)"
-                           notice={<small className="muted">제목이나 본문에 하나라도 있으면 LLM 판단 없이 넘깁니다. 예: 인증, 구매, 이벤트</small>}/>
 
             <div className="field">
                 <span>대기 계정 (위에 있을수록 먼저 줄을 섭니다)</span>
@@ -222,8 +198,93 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                 </div>
                 <small className="muted">나눔 글 하나에는 계정 하나만 줄을 섭니다. 1순위 계정이 조건에 맞지 않거나 실패하면 다음 순위 계정이 섭니다.</small>
             </div>
+
+            {/* 자주 바꾸지 않는 설정은 접어 둡니다. 기본값과 다른 값은 접힌 줄에 보여서 모르는 새 바뀌어 있지 않게 합니다. */}
+            <details className="advanced">
+                <summary>
+                    <span className="advanced-title">고급 설정</span>
+                    {advanced.length === 0
+                        ? <span className="muted">기본값 사용 중</span>
+                        : advanced.map((item) => <span key={item.text} className={item.warn ? "advanced-item warn" : "advanced-item"}>{item.text}</span>)}
+                </summary>
+                <div className="advanced-body">
+                    <div className="grid">
+                        <label className="field">
+                            <span>줄 서기 지연 (초)</span>
+                            <NumberInput className="short" value={gallery.delaySec} onChange={(delaySec) => onChange({delaySec})}/>
+                            <small className="muted">나눔 글을 감지한 뒤 기다릴 시간입니다. 0이면 즉시 줄을 섭니다.</small>
+                            <small className={gallery.delaySec > DELAY_MAX_SEC ? "error-text" : "muted"}>최대 {DELAY_MAX_SEC}초({DELAY_MAX_SEC / 3600}시간)입니다. 넘으면 저장할 때 맞춰집니다.</small>
+                        </label>
+
+                        <fieldset className="field">
+                            <legend>나눔 종류</legend>
+                            <div className="row">
+                                <label className="check">
+                                    <input type="radio" name={`category-${gallery.id}`} checked={gallery.category === "food"} onChange={() => onChange({category: "food"})}/>
+                                    음식만
+                                </label>
+                                <label className="check">
+                                    <input type="radio" name={`category-${gallery.id}`} checked={gallery.category === "all"} onChange={() => onChange({category: "all"})}/>
+                                    모두
+                                </label>
+                            </div>
+                        </fieldset>
+                    </div>
+
+                    <div className="field">
+                        <label className="check">
+                            <input type="checkbox" checked={gallery.scanBody} onChange={(event) => onChange({scanBody: event.target.checked})}/>
+                            키워드 없는 글도 본문 읽기
+                        </label>
+                        <small className="muted">
+                            새 글마다 본문을 열어 제목과 함께 LLM에 보냅니다. 제목에 티를 안 내는 나눔 글도 잡지만 새 글마다 디시 요청이 하나씩 늘어납니다.
+                            끄면 키워드에 걸린 글만 본문을 읽고, 나머지는 제목만 보냅니다.
+                        </small>
+                        {gallery.scanBody && (
+                            <label className="field nested">
+                                <span>본문 요청 상한 (한 번 확인할 때)</span>
+                                <NumberInput className="short" value={gallery.bodyReadLimit} min={0} onChange={(bodyReadLimit) => onChange({bodyReadLimit})}/>
+                                <small className="muted">
+                                    제목에 키워드가 없는 새 글은 최근 글부터 이 개수까지만 본문을 엽니다. 나머지는 제목만 보내고,
+                                    제목만 본 글은 나눔으로 판단돼도 자동으로 줄 서지 않고 알립니다. 0이면 제한하지 않습니다.
+                                </small>
+                                <small className={gallery.bodyReadLimit > BODY_READ_LIMIT_MAX ? "error-text" : "muted"}>최대 {BODY_READ_LIMIT_MAX}개입니다. 넘으면 저장할 때 맞춰집니다.</small>
+                                <small className={bodyLimitRisky ? "error-text" : "muted"}>
+                                    주의: 분당 글이 수십개씩 올라오는 초대형 갤러리에서는 본문 요청 상한을 제거하거나 {BODY_READ_LIMIT_SAFE}개보다 크게 둘 시 IP 차단의 사유가 될 수도 있습니다.
+                                </small>
+                            </label>
+                        )}
+                    </div>
+
+                    <KeywordEditor label="제외 키워드" keywords={gallery.excludeKeywords} onChange={(excludeKeywords) => onChange({excludeKeywords})}
+                                   placeholder="제목이나 본문에 있으면 넘길 단어 (쉼표로 여러 개)"
+                                   notice={<small className="muted">제목이나 본문에 하나라도 있으면 LLM 판단 없이 넘깁니다. 예: 인증, 구매, 이벤트</small>}/>
+                </div>
+            </details>
+            {confirmDialog}
         </section>
     );
+}
+
+/** 고급 설정 가운데 기본값과 다른 것을 짧게 씁니다. 위험할 수 있는 값은 `warn`입니다. */
+function advancedSummary(gallery: GalleryConfig): {text: string; warn: boolean}[] {
+    const items: {text: string; warn: boolean}[] = [];
+    if (gallery.delaySec !== 0) items.push({text: `줄 서기 지연 ${gallery.delaySec}초`, warn: gallery.delaySec > DELAY_MAX_SEC});
+    if (gallery.category === "all") items.push({text: "나눔 종류 모두", warn: false});
+    if (!gallery.scanBody) items.push({text: "키워드 없는 글은 제목만", warn: false});
+    else if (gallery.bodyReadLimit !== BODY_READ_LIMIT_DEFAULT) {
+        items.push({
+            text: gallery.bodyReadLimit === 0 ? "본문 요청 상한 없음" : `본문 요청 상한 ${gallery.bodyReadLimit}개`,
+            warn: isBodyLimitRisky(gallery.bodyReadLimit)
+        });
+    }
+    if (gallery.excludeKeywords.length > 0) items.push({text: `제외 키워드 ${gallery.excludeKeywords.length}개`, warn: false});
+    return items;
+}
+
+/** 본문 요청 상한을 없앴거나 권장값보다 크게 두었는지입니다(IP 차단 경고). */
+function isBodyLimitRisky(limit: number): boolean {
+    return limit === 0 || limit > BODY_READ_LIMIT_SAFE;
 }
 
 function IntervalField({value, onChange}: {value: number; onChange(value: number): void}) {
@@ -238,7 +299,7 @@ function IntervalField({value, onChange}: {value: number; onChange(value: number
         <label className="field">
             <span>감시 간격</span>
             <div className="row">
-                <NumberInput value={Math.round(value / factor)} min={1} onChange={(amount) => onChange(amount * factor)}/>
+                <NumberInput className="short" value={Math.round(value / factor)} min={1} onChange={(amount) => onChange(amount * factor)}/>
                 <select value={unit} onChange={(event) => {
                     const next = event.target.value as "sec" | "min";
                     setUnit(next);

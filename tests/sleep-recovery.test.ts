@@ -35,6 +35,9 @@ function world(network: {online: () => boolean} = {online: () => true}) {
                 server.valid.add(id);
                 return {type: "login", id: userId, password, userId, result: {result: true, user_id: userId, name: "깡계", is_gonick: 0}};
             },
+            logout() {
+                return this;
+            },
             auth: {exportCredentials: () => ({androidId: String(id)}), appId: async () => "app-id"},
             dccons: {list: async () => ({tab: [], list: []})},
             articles: {

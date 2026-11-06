@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 import {normalizeKeywords} from "@shared/settings";
-import {galleryIdFromInput, isDiscordWebhookUrl, keywordKey, splitKeywords} from "@shared/text";
+import {galleryIdFromInput, hasHiddenCharacter, isDiscordWebhookUrl, keywordKey, normalizeForMatch, splitKeywords} from "@shared/text";
 import {findKeyword} from "../src/main/pipeline/keyword-filter";
 import {errorMessage} from "@shared/errors";
 
@@ -38,6 +38,37 @@ describe("입력 글자 정리", () => {
         expect(isDiscordWebhookUrl("http://discord.com/api/webhooks/1/abc")).toBe(false);
         expect(isDiscordWebhookUrl("https://evil.example/api/webhooks/1/abc")).toBe(false);
         expect(isDiscordWebhookUrl("abc")).toBe(false);
+    });
+});
+
+describe("보이지 않는 글자", () => {
+    const HIDDEN = ["\u3164", "\u115F", "\u1160", "\uFFA0", "\u200B", "\u200D", "\u2060", "\u00AD"];
+
+    it("한글 채움 문자와 제로폭·서식 문자를 지우고 비교한다", () => {
+        for (const hidden of HIDDEN) {
+            const code = hidden.codePointAt(0)!.toString(16);
+            expect(normalizeForMatch(`인${hidden}증`), code).toBe("인증");
+            expect(hasHiddenCharacter(`인${hidden}증`), code).toBe(true);
+        }
+        expect(hasHiddenCharacter("인 증")).toBe(false);
+        expect(hasHiddenCharacter("인증")).toBe(false);
+    });
+
+    it("자모 사이에 끼운 글자나 결합 부호를 지운 뒤 자모를 다시 한 글자로 합친다", () => {
+        expect(normalizeForMatch("\u1106\u200B\u1162크로")).toBe("매크로");
+        expect(normalizeForMatch("\u1106\u302E\u1162크로")).toBe("매크로");
+        expect(normalizeForMatch("매\u0301크로")).toBe("매크로");
+    });
+
+    it("채움 문자를 끼워 넣은 키워드도 같은 키워드로 본다", () => {
+        expect(keywordKey("인ㅤ증")).toBe(keywordKey("인증"));
+        expect(keywordKey("인\u200B증")).toBe(keywordKey("인증"));
+    });
+
+    it("제로폭 문자를 끼워 넣은 글도 키워드에 걸린다", () => {
+        expect(findKeyword("인\u200B증 이벤트", ["인증"])).toBe("인증");
+        expect(findKeyword("인\u3164증 이벤트", ["인증"])).toBe("인증");
+        expect(findKeyword("치\u00AD킨 나눔", ["치킨"])).toBe("치킨");
     });
 });
 

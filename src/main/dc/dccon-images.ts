@@ -10,14 +10,16 @@ const IMAGE_HOST = /^dcimg\d*\.dcinside\.(com|co\.kr)$/i;
 const MAX_PER_CALL = 200;
 const CONCURRENCY = 4;
 const MAX_BYTES = 2 * 1024 * 1024;
-/** 기억해 둘 이미지 수입니다. 넘으면 가장 먼저 받은 것부터 잊습니다. */
+/** 기억해 둘 이미지 수와 전체 크기(data: 주소 글자 수)입니다. 넘으면 가장 먼저 받은 것부터 잊습니다. */
 const CACHE_MAX = 1000;
+const CACHE_MAX_CHARS = 64 * 1024 * 1024;
 
 /** 디시 이미지 서버의 https 주소인지입니다. 디시콘과 글에 올린 사진이 모두 여기 있습니다. */
 export function isDcconImageUrl(url: string): boolean {
     try {
         const parsed = new URL(url);
-        return parsed.protocol === "https:" && IMAGE_HOST.test(parsed.hostname);
+        // 다른 포트로 가는 주소는 쓰지 않습니다(디시 이미지 서버는 기본 포트만 씁니다).
+        return parsed.protocol === "https:" && parsed.port === "" && IMAGE_HOST.test(parsed.hostname);
     } catch {
         return false;
     }
@@ -25,6 +27,7 @@ export function isDcconImageUrl(url: string): boolean {
 
 export class DcconImages {
     private readonly cache = new Map<string, string>();
+    private cacheChars = 0;
 
     constructor(private readonly fetchImpl: typeof fetch = fetch) {}
 
@@ -41,14 +44,29 @@ export class DcconImages {
             for (let url = queue.shift(); url !== undefined; url = queue.shift()) {
                 const data = await this.fetchOne(url);
                 if (data) {
-                    this.cache.set(url, data);
-                    if (this.cache.size > CACHE_MAX) this.cache.delete(this.cache.keys().next().value!);
+                    this.remember(url, data);
                     result[url] = data;
                 }
             }
         };
         await Promise.all(Array.from({length: Math.min(CONCURRENCY, queue.length)}, worker));
         return result;
+    }
+
+    private remember(url: string, data: string): void {
+        // 같은 사진을 겹쳐 받은 경우 앞의 것을 빼고 넣어, 쌓인 글자 수가 실제보다 커지지 않게 합니다.
+        const old = this.cache.get(url);
+        if (old !== undefined) {
+            this.cache.delete(url);
+            this.cacheChars -= old.length;
+        }
+        this.cache.set(url, data);
+        this.cacheChars += data.length;
+        for (const [oldest, value] of this.cache) {
+            if (this.cache.size <= CACHE_MAX && this.cacheChars <= CACHE_MAX_CHARS) break;
+            this.cache.delete(oldest);
+            this.cacheChars -= value.length;
+        }
     }
 
     private async fetchOne(url: string): Promise<string | null> {
@@ -71,29 +89,54 @@ export async function fetchDcImage(url: string, maxBytes: number, fetchImpl: typ
     if (!isDcconImageUrl(url)) return null;
     try {
         const signal = AbortSignal.timeout(timeoutMs);
-        const get = (target: string) => fetchImpl(target, {headers: {Referer: "https://gall.dcinside.com/"}, redirect: "manual", signal});
+        // 압축하지 않은 그대로 받습니다. 압축된 응답은 받은 바이트보다 훨씬 크게 풀릴 수 있어 크기 제한이 무의미해집니다.
+        const get = (target: string) => fetchImpl(target, {headers: {"Referer": "https://gall.dcinside.com/", "Accept-Encoding": "identity"}, redirect: "manual", signal});
         let target = url;
         let response = await get(target);
         for (let hops = 0; response.status >= 300 && response.status < 400; hops++) {
             const location = response.headers.get("location");
+            // 넘겨주는 응답의 본문은 쓰지 않으므로 버려 연결을 돌려줍니다.
+            await response.body?.cancel().catch(() => {});
             if (!location || hops >= MAX_REDIRECTS) return null;
             const next = new URL(location, target);
-            if (next.protocol !== "https:" || !DC_HOST.test(next.hostname)) return null;
+            if (next.protocol !== "https:" || next.port !== "" || !DC_HOST.test(next.hostname)) return null;
             target = next.href;
             response = await get(target);
         }
         const type = (response.headers.get("content-type") ?? "").split(";")[0]!.trim();
         // 글 사진은 형식 없이(application/octet-stream) 오기도 해서, 그때는 파일 앞부분으로 형식을 알아냅니다.
         if (!response.ok || !(type.startsWith("image/") || type === "application/octet-stream")) return null;
-        // 크기를 미리 알려 주면 받기 전에 거릅니다.
-        if (Number(response.headers.get("content-length") ?? 0) > maxBytes) return null;
-        const bytes = Buffer.from(await response.arrayBuffer());
-        if (bytes.length === 0 || bytes.length > maxBytes) return null;
+        // 크기를 미리 알려 주면 받기 전에 거르고, 알려 주지 않으면 받는 동안 세다가 넘으면 끊습니다.
+        if (Number(response.headers.get("content-length") ?? 0) > maxBytes) {
+            await response.body?.cancel().catch(() => {});
+            return null;
+        }
+        const bytes = await readLimited(response, maxBytes);
+        if (!bytes || bytes.length === 0) return null;
         const mimeType = type.startsWith("image/") ? type : sniffImageType(bytes);
         return mimeType ? {mimeType, bytes} : null;
     } catch {
         return null;
     }
+}
+
+/** 응답 본문을 `maxBytes`까지만 받습니다. 넘으면 받기를 멈추고 null입니다. */
+async function readLimited(response: Response, maxBytes: number): Promise<Buffer | null> {
+    if (!response.body) return Buffer.alloc(0);
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > maxBytes) {
+            await reader.cancel().catch(() => {});
+            return null;
+        }
+        chunks.push(value);
+    }
+    return Buffer.concat(chunks);
 }
 
 /** 파일 앞부분으로 이미지 형식을 알아냅니다. 이미지가 아니면 null입니다. */

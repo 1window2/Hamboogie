@@ -18,7 +18,8 @@ export type ShrinkImage = (bytes: Buffer, mimeType: string) => LlmImage | null;
  */
 export function postImageUrls(memo: string, max = POST_IMAGES_MAX): string[] {
     const urls: string[] = [];
-    for (const [tag] of decodeMemo(memo, /<img/i).matchAll(/<img\b[^>]*>/gi)) {
+    // 태그 안에 '<'를 받지 않습니다. "<img<img…"처럼 닫히지 않은 태그가 이어진 글에서 글 길이의 제곱만큼 느려지지 않게 합니다.
+    for (const [tag] of decodeMemo(memo, /<img/i).matchAll(/<img\b[^<>]*>/gi)) {
         // 따옴표 없이 쓴 속성(src=https://...)도 있습니다.
         const attribute = (name: string) => {
             const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(tag);
@@ -27,7 +28,7 @@ export function postImageUrls(memo: string, max = POST_IMAGES_MAX): string[] {
         const raw = attribute("data-original") ?? attribute("data-src") ?? attribute("src");
         if (!raw) continue;
         const url = decodeHtml(raw).trim().replace(/^\/\//, "https://").replace(/^http:\/\//, "https://");
-        if (!isDcconImageUrl(url) || /dccon\.php/i.test(url) || urls.includes(url)) continue;
+        if (!isDcconImageUrl(url) || /dccon\.php/i.test(url) || urls.some((seen) => imageIdentity(seen) === imageIdentity(url))) continue;
         urls.push(url);
         if (urls.length >= max) break;
     }
@@ -35,10 +36,30 @@ export function postImageUrls(memo: string, max = POST_IMAGES_MAX): string[] {
 }
 
 /**
- * 사진을 받아 줄입니다. 받지 못하거나 줄이지 못한 사진은 빠집니다. 디시 이미지 서버에 몰아 보내지 않도록 하나씩 받고,
- * 모두 합쳐 `budgetMs` 안에 받은 사진만 씁니다.
+ * 사진이 같은지 볼 때 쓰는 값입니다. 디시 사진 주소는 같은 사진도 서버 번호(dcimg7 등)가 다를 수 있어, 사진을 가리키는
+ * id·no 값만 봅니다(없으면 서버 이름을 뺀 경로).
  */
-export async function loadPostImages(urls: string[], shrink: ShrinkImage, fetchImpl: typeof fetch = fetch, budgetMs = LOAD_BUDGET_MS): Promise<LlmImage[]> {
+export function imageIdentity(url: string): string {
+    try {
+        const parsed = new URL(url);
+        const id = parsed.searchParams.get("id");
+        const no = parsed.searchParams.get("no");
+        return id || no ? `${id}:${no}` : parsed.pathname;
+    } catch {
+        return url;
+    }
+}
+
+/** 사진을 받으며 센 수입니다. 받았지만 열 수 없었던 사진(형식을 지원하지 않거나 해상도가 지나치게 큰 사진) 수를 셉니다. */
+export interface PostImageStats {
+    unreadable: number;
+}
+
+/**
+ * 사진을 받아 줄입니다. 받지 못하거나 줄이지 못한 사진은 빠집니다. 디시 이미지 서버에 몰아 보내지 않도록 하나씩 받고,
+ * 모두 합쳐 `budgetMs` 안에 받은 사진만 씁니다. `stats`를 넘기면 받았지만 열 수 없었던 사진 수를 셉니다.
+ */
+export async function loadPostImages(urls: string[], shrink: ShrinkImage, fetchImpl: typeof fetch = fetch, budgetMs = LOAD_BUDGET_MS, stats?: PostImageStats): Promise<LlmImage[]> {
     const images: LlmImage[] = [];
     const deadline = Date.now() + budgetMs;
     for (const url of urls.slice(0, POST_IMAGES_MAX)) {
@@ -47,6 +68,7 @@ export async function loadPostImages(urls: string[], shrink: ShrinkImage, fetchI
         const original = await fetchDcImage(url, ORIGINAL_MAX_BYTES, fetchImpl, left);
         const image = original && shrink(original.bytes, original.mimeType);
         if (image) images.push(image);
+        else if (original && stats) stats.unreadable++;
     }
     return images;
 }

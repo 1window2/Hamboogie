@@ -2,6 +2,11 @@
 export const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** `ms`만큼 기다립니다. */
+export function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** 이 시각이 속한 한국 날짜의 0시(ms)입니다. */
 export function kstDayStart(at: number): number {
     const kst = new Date(at + KST_OFFSET_MS);

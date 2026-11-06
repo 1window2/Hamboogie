@@ -5,6 +5,8 @@ export const INTERVAL_MIN_SEC = 10;
 export const INTERVAL_MAX_SEC = 60 * 60;
 export const INTERVAL_DEFAULT_SEC = 5 * 60;
 export const KEYWORD_MAX = 30;
+/** 키워드 하나의 최대 글자 수입니다. 키워드는 글에 그대로 들어 있는지만 보므로 이보다 긴 키워드는 쓸모가 없습니다. */
+export const KEYWORD_LENGTH_MAX = 30;
 export const DELAY_MAX_SEC = 60 * 60;
 export const DEFAULT_COMMENT_TEXT = "줄";
 export const BODY_READ_LIMIT_DEFAULT = 20;
@@ -69,7 +71,7 @@ function clamp(value: number, min: number, max: number, fallback = min): number 
 }
 
 /**
- * 키워드를 다듬고 중복을 없앤 뒤 최대 개수로 자릅니다. 글자 형태를 맞추고(자모 분리 한글, 전각 문자),
+ * 키워드를 다듬고 중복과 너무 긴 키워드를 없앤 뒤 최대 개수로 자릅니다. 글자 형태를 맞추고(자모 분리 한글, 전각 문자),
  * 글과 맞춰 볼 때처럼 공백·대소문자만 다른 키워드("Pizza", "pizza", "피 자")는 처음 것만 남깁니다.
  */
 export function normalizeKeywords(keywords: string[]): string[] {
@@ -79,7 +81,8 @@ export function normalizeKeywords(keywords: string[]): string[] {
         if (typeof raw !== "string") continue;
         const keyword = normalizeText(raw).trim();
         const key = keywordKey(keyword);
-        if (!key || seen.has(key)) continue;
+        // 화면에서 막는 것과 같은 기준으로, 너무 긴 키워드는 저장하지 않습니다.
+        if (!key || keyword.length > KEYWORD_LENGTH_MAX || seen.has(key)) continue;
         seen.add(key);
         result.push(keyword);
         if (result.length === KEYWORD_MAX) break;
@@ -92,12 +95,22 @@ function list<T>(value: T[] | undefined | null): T[] {
     return Array.isArray(value) ? value : [];
 }
 
-export function normalizeGallery(saved: GalleryConfig, accounts: AccountConfig[]): GalleryConfig {
+/** 글자이면 그대로, 아니면 없는 것으로 봅니다(손상되거나 손으로 고친 설정 파일 대비). */
+function optionalText(value: unknown): string | undefined {
+    return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * 갤러리 설정을 허용 범위로 맞춥니다. 아는 항목만 남겨, 화면이나 설정 파일에서 들어온 다른 값이 저장되지 않게 합니다.
+ * (1.1.x에 있던 "골라내기" 설정 같은 옛 항목도 여기서 빠집니다.)
+ */
+export function normalizeGallery(gallery: GalleryConfig, accounts: AccountConfig[]): GalleryConfig {
     const accountIds = new Set(accounts.map((account) => account.id));
-    // 1.1.x에 있던 "골라내기" 설정은 모든 새 글을 묶어 판단하게 되면서 없어졌습니다.
-    const {screenUnmatched: _removed, ...gallery} = saved as GalleryConfig & {screenUnmatched?: boolean};
+    const checkedId = optionalText(gallery.checkedId);
+    const title = optionalText(gallery.title);
     return {
-        ...gallery,
+        id: String(gallery.id),
+        isMinor: gallery.isMinor === true,
         enabled: gallery.enabled === true,
         galleryId: galleryIdFromInput(String(gallery.galleryId ?? "")),
         intervalSec: clamp(gallery.intervalSec, INTERVAL_MIN_SEC, INTERVAL_MAX_SEC),
@@ -107,9 +120,11 @@ export function normalizeGallery(saved: GalleryConfig, accounts: AccountConfig[]
         // 이전 버전에서 저장한 설정에는 제외 키워드가 없습니다.
         excludeKeywords: normalizeKeywords(list(gallery.excludeKeywords)),
         // 이전 버전에서 저장한 설정에는 없으므로 기본(켜짐)으로 봅니다.
-        scanBody: gallery.scanBody ?? true,
+        scanBody: gallery.scanBody !== false,
         bodyReadLimit: clamp(gallery.bodyReadLimit, 0, BODY_READ_LIMIT_MAX, BODY_READ_LIMIT_DEFAULT),
-        accountIds: [...new Set(list(gallery.accountIds))].filter((id) => accountIds.has(id))
+        accountIds: [...new Set(list(gallery.accountIds))].filter((id) => accountIds.has(id)),
+        ...(checkedId !== undefined ? {checkedId} : {}),
+        ...(title !== undefined ? {title} : {})
     };
 }
 
@@ -131,6 +146,9 @@ function normalizeDccons(dccons: DcconRef[] | undefined): DcconRef[] {
     }));
 }
 
+/** 모델 이름 형식입니다(예: gemini-3.5-flash-lite, claude-haiku-5-5). 맞지 않으면 저장할 때 기본 모델을 씁니다. */
+export const MODEL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+
 /** 계정 ID는 앱이 만든 UUID입니다. 비밀 정보 키에 쓰이므로 다른 형식은 받지 않습니다. */
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -139,14 +157,14 @@ export function normalizeSettings(settings: Settings): Settings {
     const accounts = list(settings.accounts)
         .filter((account) => typeof account?.id === "string" && ACCOUNT_ID_PATTERN.test(account.id))
         .map((account): AccountConfig => ({
-            ...account,
+            id: account.id,
             loginId: String(account.loginId ?? "").trim(),
             memberTypeOverride: account.memberTypeOverride === "gonick" || account.memberTypeOverride === "semi" ? account.memberTypeOverride : "auto",
             defaultDccons: normalizeDccons(account.defaultDccons)
         }));
     const llm: Partial<LlmConfig> = settings.llm ?? {};
+    // 아는 항목만 남깁니다. 화면에서 온 다른 값이 설정 파일에 쌓이지 않게 합니다.
     return {
-        ...settings,
         accounts,
         galleries: list(settings.galleries)
             .filter((gallery) => typeof gallery?.id === "string" && gallery.id !== "")
@@ -154,7 +172,11 @@ export function normalizeSettings(settings: Settings): Settings {
         llm: {
             provider: llm.provider && PROVIDERS.includes(llm.provider) ? llm.provider : "gemini",
             // 모델 이름을 비우면 기본 모델을 씁니다. 화면에도 기본 모델이 안내 문구로 보입니다.
-            models: Object.fromEntries(PROVIDERS.map((id) => [id, String(llm.models?.[id] ?? "").trim() || DEFAULT_MODELS[id]])) as Record<LlmProviderId, string>,
+            // 모델 이름은 LLM 서비스 주소와 요청에 그대로 들어가므로 이름에 쓰이는 글자만 받습니다. 아니면 기본 모델입니다.
+            models: Object.fromEntries(PROVIDERS.map((id) => {
+                const model = String(llm.models?.[id] ?? "").trim();
+                return [id, MODEL_NAME_PATTERN.test(model) ? model : DEFAULT_MODELS[id]];
+            })) as Record<LlmProviderId, string>,
             paidPlan: llm.paidPlan === true,
             requestsPerMinute: clamp(llm.requestsPerMinute as number, 0, LLM_RPM_MAX, FREE_LLM_RPM)
         },

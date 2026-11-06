@@ -150,6 +150,8 @@ export interface GalleryStatus {
     newPosts: number;
     /** 마지막 확인에서 키워드에 걸린 글 수입니다. */
     matched: number;
+    /** 감시를 시작한 뒤 LLM이 나눔으로 판단한 글 수입니다(사진까지 보고 다시 판단해 나눔이 아니라고 나온 글은 빼고). */
+    giveaways: number;
 }
 
 /** 오늘 쓴 LLM 요청 수입니다. `limit`이 0이면 제한이 없습니다(유료 요금제). */
