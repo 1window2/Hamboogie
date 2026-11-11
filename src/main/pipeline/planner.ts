@@ -321,9 +321,9 @@ export function bareMinuteDeadline(postText: string, postedFrom: number): number
         if (minutes <= 59 && seconds <= 59) found.add((minutes * 60 + seconds) * 1000);
     }
     if (found.size !== 1) return null;
-    // 한국 시간은 UTC와 정확히 몇 시간 차이라 정시도 같습니다.
+    // 한국 시간은 UTC와 정확히 몇 시간 차이라 정시도 같습니다. 글을 올린 그 분이면(19:10에 올린 글의 "10분까지") 다음 시각으로 봅니다.
     let at = Math.floor(postedFrom / HOUR_MS) * HOUR_MS + [...found][0]!;
-    while (at < postedFrom) at += HOUR_MS;
+    while (at <= postedFrom) at += HOUR_MS;
     return at;
 }
 

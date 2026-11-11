@@ -441,7 +441,7 @@ describe("Engine 새 글 묶음 판단", () => {
     });
 
     it("다시 확인해서 나눔이 아니라고 해도 글에 \"줄\"과 마감 시각이 함께 있으면 알린다", async () => {
-        const {run, written, logger} = withGallery({2: {title: "치킨 나눔 줄", body: "10분까지"}, 3: {title: "잡담", body: ""}}, {loggedIn: true, confirm: () => false});
+        const {run, written, logger} = withGallery({2: {title: "치킨 나눔 줄", body: "오늘 23시 59분까지"}, 3: {title: "잡담", body: ""}}, {loggedIn: true, confirm: () => false});
         await run(gallery);
         expect(written).toEqual([]);
         expect(logged(logger, "나눔 글이 아니라고 판단했지만")).toBe(true);
@@ -465,11 +465,11 @@ describe("Engine 새 글 묶음 판단", () => {
         const photo = `<img src="https://dcimg7.dcinside.co.kr/viewimage.php?id=a&no=1">`;
         // 처음(글자만) 판단은 나눔, 사진까지 본 판단은 나눔 아님입니다.
         let first = false;
-        const {engine, run, calls, imageCounts, written} = withGallery({2: {title: "23분까지 나눔", body: `축하합니다${photo}`}}, {loggedIn: true, confirm: () => (first = !first)});
+        const {engine, run, calls, imageCounts, written} = withGallery({2: {title: "23시 59분까지 나눔", body: `축하합니다${photo}`}}, {loggedIn: true, confirm: () => (first = !first)});
         const loaded: string[][] = [];
         Object.assign((engine as unknown as {deps: EngineDeps}).deps, {postImages: async (urls: string[]) => (loaded.push(urls), [{mimeType: "image/jpeg", data: "eA=="}])});
         await run(gallery);
-        expect(calls).toEqual([["단독", "23분까지 나눔"], ["단독", "23분까지 나눔"]]);
+        expect(calls).toEqual([["단독", "23시 59분까지 나눔"], ["단독", "23시 59분까지 나눔"]]);
         expect(imageCounts).toEqual([0, 1]);
         expect(loaded).toEqual([["https://dcimg7.dcinside.co.kr/viewimage.php?id=a&no=1"]]);
         await new Promise((resolve) => setTimeout(resolve, 30));

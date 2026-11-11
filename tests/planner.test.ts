@@ -525,6 +525,8 @@ describe("bareMinuteDeadline", () => {
         expect(bareMinuteDeadline("50분까지 2명 줄", kst(18, 40) + 59_000)).toBe(kst(18, 50));
         expect(bareMinuteDeadline("9분 59초 마감", posted)).toBe(kst(18, 9) + 59_000);
         expect(bareMinuteDeadline("58분까지", posted)).toBe(kst(17, 58));
+        // 글을 올린 그 분이면 다음 시각입니다(작성 시각을 분까지만 알아 가장 이른 시각이 정각인 경우).
+        expect(bareMinuteDeadline("57분까지", kst(17, 57))).toBe(kst(18, 57));
     });
 
     it("시까지 쓴 마감이 있거나, 분만 쓴 마감이 없거나 여럿이면 셈하지 않는다", () => {
