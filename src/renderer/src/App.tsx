@@ -7,7 +7,7 @@ import {LogsTab} from "./tabs/LogsTab";
 import {HistoryTab} from "./tabs/HistoryTab";
 import {DevTestTab} from "./tabs/DevTestTab";
 import {clockText} from "@shared/time";
-import iconUrl from "./assets/icon.svg";
+import {Logo} from "./components/Logo";
 import {errorMessage} from "@shared/errors";
 
 /** 설정 초안 갱신 함수입니다. 값이나, 이전 초안을 받아 새 초안을 돌려주는 함수를 받습니다. */
@@ -84,7 +84,7 @@ export function App() {
     return (
         <div className="app">
             <header className="header">
-                <h1 className="brand"><img src={iconUrl} alt="" width={26} height={26}/>Hamboogie<small className="version">v{state.version}</small></h1>
+                <h1 className="brand"><Logo size={26}/>Hamboogie<small className="version">v{state.version}</small></h1>
                 {state.offline && <span className="badge failure" title="디시 대신 가짜 글과 가짜 계정을 씁니다">오프라인 모드</span>}
                 <nav className="tabs">
                     {TABS.map((item) => (

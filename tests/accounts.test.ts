@@ -39,6 +39,12 @@ interface FakeServer {
     dcconLists?: number;
     /** 만든 클라이언트입니다. `loggedOut`으로 로그아웃됐는지 볼 수 있습니다. */
     clients?: FakeClient[];
+    /** 이 계정이 관리하는 갤러리 목록 응답입니다. */
+    managed?: {gall_id?: string; gall_koname?: string; manager_type?: string}[];
+    /** 있으면 관리 갤러리 목록 요청이 이 오류로 실패합니다. */
+    managedError?: Error;
+    /** 관리 갤러리 목록을 요청한 횟수입니다. */
+    managedCalls?: number;
 }
 
 /** 가짜 클라이언트입니다. 로그아웃하면 `loggedOut`이 true가 됩니다. */
@@ -80,6 +86,13 @@ function fakeClientFactory(server: FakeServer) {
                 },
                 insert: async () => ({img_tag: "<img>"})
             },
+            user: {
+                async managedGalleries() {
+                    server.managedCalls = (server.managedCalls ?? 0) + 1;
+                    if (server.managedError) throw server.managedError;
+                    return {result: true, mymanageList: server.managed ?? []};
+                }
+            },
             comments: {
                 async write(_gallery: string, _no: number, content: unknown) {
                     if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
@@ -103,6 +116,34 @@ function setup(secretsInit: Record<string, string> = {}) {
     const manager = new AccountManager(secrets, fakeClientFactory(server));
     return {server, secrets, manager};
 }
+
+describe("AccountManager 매니저인 갤러리", () => {
+    it("로그인하면 관리 갤러리 목록으로 매니저·부매니저를 가려 상태와 대기 계정 정보에 담는다", async () => {
+        const {server, manager} = setup({"otp:acc1": "token-abc"});
+        server.managed = [{gall_id: "testgall", gall_koname: "테스트", manager_type: "M"}, {gall_id: "subgall", gall_koname: "부매니저갤", manager_type: "S"}];
+        const status = await manager.login(ACCOUNT);
+        expect(status).toMatchObject({state: "logged_in", managedGalleries: [
+            {galleryId: "testgall", name: "테스트", role: "manager"},
+            {galleryId: "subgall", name: "부매니저갤", role: "submanager"}
+        ]});
+        expect(manager.candidates([ACCOUNT], ["acc1"])[0]!.roles).toEqual({testgall: "manager", subgall: "submanager"});
+    });
+
+    it("관리 갤러리를 못 알아내면 로그인은 그대로 두고, 잠시 뒤 다시 알아본다", async () => {
+        let now = 0;
+        const server: FakeServer = {validOtpToken: "token-abc", loginCalls: [], expireWrites: 0, written: [], clientsCreated: 0, savedDeviceBroken: false, managedError: new Error("HTTP 500")};
+        const manager = new AccountManager(memorySecrets({"account:acc1": "pw", "otp:acc1": "token-abc"}), fakeClientFactory(server), new AppIdBackoff(() => now), () => now);
+        expect(await manager.login(ACCOUNT)).toMatchObject({state: "logged_in", managedError: "매니저인 갤러리를 확인하지 못함: HTTP 500"});
+        expect(manager.candidates([ACCOUNT], ["acc1"])[0]!.roles).toBeNull();
+
+        server.managedError = undefined;
+        await manager.maintain([ACCOUNT]);
+        expect(server.managedCalls).toBe(1);
+        now += 10 * 60 * 1000;
+        expect(await manager.maintain([ACCOUNT])).toBe(true);
+        expect(manager.candidates([ACCOUNT], ["acc1"])[0]!.roles).toEqual({});
+    });
+});
 
 describe("AccountManager OTP 로그인", () => {
     it("OTP 토큰이 없으면 OTP 입력을 요구하고, OTP로 로그인하면 토큰을 저장한다", async () => {

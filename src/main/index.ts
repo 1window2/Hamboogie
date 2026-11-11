@@ -14,6 +14,7 @@ import {Engine} from "./pipeline/engine";
 import {LlmUsage} from "./llm/usage";
 import {flushAllJson, HistoryStore, JudgmentLog, Ledger, SecretStore, SettingsStore, UsageStore} from "./store";
 import {createTray} from "./tray";
+import {ThemeStore} from "./theme";
 import {REPO_PATH, startUpdater, type Updater} from "./updater";
 import {push, trustedHandle} from "./ipc";
 import {errorMessage} from "@shared/errors";
@@ -165,6 +166,8 @@ async function main(): Promise<void> {
     if (import.meta.env.DEV && process.platform === "darwin") app.dock?.setIcon(join(app.getAppPath(), "build/icon.png"));
     const dataDir = app.getPath("userData");
     const logger = new Logger(join(dataDir, "hamboogie.log"));
+    // 창과 대화상자를 띄우기 전에 고른 화면 테마를 적용합니다.
+    const theme = new ThemeStore(dataDir, (message) => logger.warn(message));
     // 종료 신호(터미널의 kill, Ctrl+C 등)를 받으면 기록을 저장하고 끕니다. Electron은 이 신호를 받아도 앱을 끄지 않습니다.
     handleQuitSignals((signal) => {
         logger.info(`종료 신호(${signal})를 받아 앱을 끕니다.`);
@@ -537,6 +540,8 @@ async function main(): Promise<void> {
         watching: () => engine.watching,
         start: startWatching,
         stop: stopWatching,
+        theme: () => theme.choice,
+        setTheme: (choice) => theme.set(choice),
         quit: () => app.quit()
     });
 

@@ -1,5 +1,5 @@
 import {ApiError, AuthExpiredError, CaptchaRequiredError, DCInside, OtpRequiredError, type DeviceCredentials} from "@green-1052/dcinside.js";
-import type {AccountConfig, AccountStatus, MemberType} from "@shared/types";
+import type {AccountConfig, AccountStatus, GalleryRole, ManagedGallery, MemberType} from "@shared/types";
 import type {SecretStore} from "../store";
 import {AppIdBackoff} from "./app-id-backoff";
 import {DC_APP_VERSION_CODE, isOutdatedAppError, OUTDATED_APP_MESSAGE, OUTDATED_PAUSE_MS} from "./app-version";
@@ -18,6 +18,12 @@ interface LoggedIn {
     dcconError?: string;
     /** 보유 디시콘을 다시 불러와도 되는 시각입니다. app_id 거절이 아닌 오류로 실패했을 때 매 확인마다 다시 요청하지 않게 합니다. */
     dcconRetryAt?: number;
+    /** 매니저나 부매니저인 갤러리입니다. 아직 알아내지 못했으면 null입니다. */
+    managed: ManagedGallery[] | null;
+    /** 매니저인 갤러리를 아직 못 알아냈으면 그 이유입니다. */
+    managedError?: string;
+    /** 매니저인 갤러리를 다시 알아봐도 되는 시각입니다. */
+    managedRetryAt?: number;
 }
 
 /** 받아 둔 app_id를 다시 발급받지 않고 쓸 수 있다고 보는 시간입니다(라이브러리의 갱신 주기 11시간보다 짧게). */
@@ -25,6 +31,11 @@ const APP_ID_FRESH_MS = 10 * 60 * 60 * 1000;
 
 /** app_id 거절이 아닌 오류로 보유 디시콘을 못 불러왔을 때 다시 시도하기까지 기다리는 시간입니다. */
 const DCCON_RETRY_MS = 10 * 60 * 1000;
+
+/** 관리 갤러리 목록의 manager_type입니다. 매니저는 "M", 부매니저는 "S"로 옵니다. */
+export function roleFromManagerType(type: string | undefined): GalleryRole {
+    return type === "S" ? "submanager" : "manager";
+}
 
 /**
  * 댓글을 보내기 전에 실패해서 댓글이 달리지 않은 것이 확실한 오류입니다.
@@ -202,7 +213,8 @@ export class AccountManager {
                 client,
                 nickname: session.result.name ?? account.loginId,
                 detectedMemberType: isGonick === 1 ? "gonick" : isGonick === 0 ? "semi" : null,
-                dccons: []
+                dccons: [],
+                managed: null
             };
             // 보유 디시콘을 불러오면서 app_id도 받아 둡니다. 거절되면 로그인은 그대로 두고 디시콘만 나중에 다시 불러옵니다.
             // 이미 app_id 거절로 쉬는 중이면(계정 여럿을 이어서 로그인할 때 등) 발급을 또 시도하지 않습니다.
@@ -222,6 +234,8 @@ export class AccountManager {
                     this.sessions.delete(account.id);
                     return this.setStatus(account.id, {state: "error", message});
                 }
+                // 디시콘을 불러왔으면 app_id가 있으니 매니저인 갤러리도 알아 둡니다. 실패하면 나중에 다시 알아봅니다.
+                if (!loggedIn.dcconError) await this.loadManaged(loggedIn);
             } else {
                 loggedIn.dcconError = this.refusal;
             }
@@ -341,7 +355,8 @@ export class AccountManager {
             nickname: loggedIn.nickname,
             memberType: this.memberType(account, loggedIn),
             dcconCount: loggedIn.dccons.length,
-            ...(loggedIn.dcconError ? {dcconError: loggedIn.dcconError} : {})
+            ...(loggedIn.dcconError ? {dcconError: loggedIn.dcconError} : {}),
+            ...(loggedIn.managed ? {managedGalleries: loggedIn.managed} : {managedError: loggedIn.managedError ?? "아직 확인하지 못함"})
         };
     }
 
@@ -385,6 +400,27 @@ export class AccountManager {
     }
 
     /**
+     * 계정이 매니저나 부매니저인 갤러리를 알아냅니다. 관리 갤러리 목록 하나로 매니저인지 부매니저인지까지 압니다.
+     * 로그인할 때(그리고 실패했으면 잠시 뒤) 한 번만 알아봅니다. 로그인이 풀렸으면 "login_expired"입니다.
+     */
+    private async loadManaged(loggedIn: LoggedIn): Promise<"ok" | "failed" | "login_expired"> {
+        try {
+            const response = await loggedIn.client.user.managedGalleries();
+            loggedIn.managed = (response.mymanageList ?? []).flatMap((item): ManagedGallery[] =>
+                item.gall_id ? [{galleryId: item.gall_id, name: item.gall_koname || item.gall_id, role: roleFromManagerType(item.manager_type)}] : []);
+            loggedIn.managedError = undefined;
+            loggedIn.managedRetryAt = undefined;
+            return "ok";
+        } catch (error) {
+            if (isLoginExpired(error)) return "login_expired";
+            if (isAppIdFailure(error)) this.refuseAppId(error);
+            loggedIn.managedError = `매니저인 갤러리를 확인하지 못함: ${errorMessage(error)}`;
+            loggedIn.managedRetryAt = this.now() + DCCON_RETRY_MS;
+            return "failed";
+        }
+    }
+
+    /**
      * 보유 디시콘을 못 불러온 계정은 잠시 쉰 뒤 다시 불러옵니다. 감시 중에 주기적으로 부릅니다.
      * 상태가 바뀐 계정이 있으면 true를 돌려줍니다.
      */
@@ -416,6 +452,20 @@ export class AccountManager {
             if (loaded === "login_expired") {
                 // 확인할 때마다 로그인을 다시 시도하지 않도록, OTP 토큰으로도 살릴 수 없으면 세션을 내려놓습니다.
                 await this.recoverLogin(id, "보유 디시콘을 불러오다 로그인이 풀림");
+            } else {
+                const account = accounts.find((item) => item.id === id) ?? loggedIn.account;
+                this.setStatus(id, this.loggedInStatus(account, loggedIn));
+            }
+            changed = true;
+        }
+        // 매니저인 갤러리를 못 알아낸 계정은 디시콘을 불러온 뒤(app_id가 있을 때) 잠시 쉬었다가 다시 알아봅니다.
+        for (const [id, loggedIn] of this.sessions) {
+            if (loggedIn.managed !== null || loggedIn.dcconError || !this.appId.canTry()) continue;
+            if (loggedIn.managedRetryAt !== undefined && this.now() < loggedIn.managedRetryAt) continue;
+            const loaded = await this.loadManaged(loggedIn);
+            if (this.sessions.get(id) !== loggedIn) continue;
+            if (loaded === "login_expired") {
+                await this.recoverLogin(id, "매니저인 갤러리를 알아보다 로그인이 풀림");
             } else {
                 const account = accounts.find((item) => item.id === id) ?? loggedIn.account;
                 this.setStatus(id, this.loggedInStatus(account, loggedIn));
@@ -491,7 +541,8 @@ export class AccountManager {
             // 기본 디시콘은 지금 가진 것만 씁니다(설정한 뒤 디시콘을 지웠거나 기간이 끝났을 수 있습니다).
             const defaults = (account.defaultDccons ?? []).flatMap((ref) =>
                 loggedIn.dccons.filter((dccon) => dccon.packageIdx === ref.packageIdx && dccon.detailIdx === ref.detailIdx).slice(0, 1));
-            return [{id, memberType: this.memberType(account, loggedIn), dccons: loggedIn.dccons, defaultDccons: defaults}];
+            const roles = loggedIn.managed ? Object.fromEntries(loggedIn.managed.map((gallery) => [gallery.galleryId, gallery.role])) : null;
+            return [{id, memberType: this.memberType(account, loggedIn), dccons: loggedIn.dccons, defaultDccons: defaults, roles}];
         });
     }
 

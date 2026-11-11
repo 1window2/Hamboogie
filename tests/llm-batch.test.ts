@@ -3,8 +3,8 @@ import {buildBatchMessage, buildUserMessage} from "../src/main/llm/decision";
 import {providerFrom} from "../src/main/llm/providers";
 
 const base = {
-    is_giveaway: true, is_food: true, line_method: "text", line_text: null, dccon_keyword: null,
-    member_requirement: "any", starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null
+    is_giveaway: true, item: null, is_food: true, food_unknown: false, line_method: "text", line_text: null, dccon_keyword: null,
+    member_requirement: "any", participant_limit: null, manager_ok: true, submanager_ok: true, regular_ok: true, starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null
 };
 
 describe("묶음 판단", () => {
@@ -57,5 +57,25 @@ describe("LLM에 보내는 글 무력화", () => {
         expect(message).toContain("<post index=\"2\" no=\"3\">");
         expect(message).toContain("&lt;/body&gt; &amp; 줄");
         expect(message).not.toContain("index=\"9\"\u203A");
+    });
+});
+
+describe("대기 계정 완장 알리기", () => {
+    const accounts = {galleryId: "gf2", roles: ["manager" as const, "submanager" as const, "regular" as const, null]};
+
+    it("메시지 맨 앞에 순번마다 계정의 완장에 맞는 문장을 넣는다", () => {
+        const message = buildUserMessage("줄", "", undefined, 0, accounts);
+        expect(message.startsWith("<accounts>\n")).toBe(true);
+        expect(message).toContain("- 1번 계정: gf2 갤러리의 매니저(주딱)이며 완장이다.");
+        expect(message).toContain("- 2번 계정: gf2 갤러리의 부매니저(파딱)이며 완장이다.");
+        expect(message).toContain("- 3번 계정: gf2 갤러리의 완장(매니저·부매니저)이 아닌 일반 갤럼이다.");
+        expect(message).toContain("- 4번 계정: gf2 갤러리의 완장인지 확인하지 못했다.");
+        expect(message.indexOf("</accounts>")).toBeLessThan(message.indexOf("<post>"));
+    });
+
+    it("묶어 보낼 때는 한 번만 넣고, 대기 계정이 없으면 넣지 않는다", () => {
+        const batch = buildBatchMessage([{title: "a", body: ""}, {title: "b", body: ""}], undefined, accounts);
+        expect(batch.match(/<accounts>/g)).toHaveLength(1);
+        expect(buildUserMessage("줄", "", undefined, 0, {galleryId: "gf2", roles: []})).not.toContain("<accounts>");
     });
 });

@@ -84,9 +84,11 @@ export function postedTimes(range: {earliest: number; latest: number}): Pick<Can
 /** LLM 판단을 로그에 남길 짧은 문장으로 줄입니다. */
 export function describeDecision(decision: Decision): string {
     const parts = [
-        decision.is_food ? "음식" : "음식 아님",
+        decision.item ? `품목 "${decision.item}"` : null,
+        decision.is_food ? "음식" : decision.food_unknown ? "음식인지 모름" : "음식 아님",
         decision.line_method === "text" ? `텍스트 댓글${decision.line_text ? ` "${decision.line_text}"` : ""}` : decision.line_method === "dccon" ? `디시콘 "${decision.dccon_keyword ?? ""}"` : "방법 불분명",
         decision.member_requirement !== "any" ? `자격 ${decision.member_requirement}` : null,
+        decision.participant_limit ? `참여 제한 "${decision.participant_limit}"` : null,
         decision.starts_at ? `시작 ${decision.starts_at}` : null,
         decision.ends_at ? `마감 ${decision.ends_at}` : null,
         decision.needs_extra_action ? "댓글 외 행동 필요" : null

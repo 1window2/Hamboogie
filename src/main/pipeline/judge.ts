@@ -8,7 +8,7 @@ import {describeDecision, STALE_POST_MS, toPostInput, type Analysis, type Candid
 import type {Dispatcher} from "./dispatcher";
 import type {EngineDeps} from "./engine";
 import type {Notifier} from "./notifier";
-import {brief, findInjectionWord, makePlan, type Plan} from "./planner";
+import {brief, findInjectionWord, hasLineAndDeadline, makePlan, roleIn, type Plan} from "./planner";
 import {LONG_SLEEP_MS, type SleepState} from "./sleep-state";
 
 /** LLM 요청 한 번에 묶어 보낼 최대 글 수입니다. 40개까지 묶어도 판단이 거의 흔들리지 않는 것을 확인했습니다. */
@@ -23,6 +23,12 @@ const SINGLE_RETRY_MAX = 5;
 /** 글이 하나면 그 글 하나로, 여러 개면 묶어서 LLM 요청 한 번으로 판단합니다. 응답에 빠진 글은 null입니다. */
 async function decideGroup(provider: LlmProvider, posts: PostInput[]): Promise<(Decision | null)[]> {
     return posts.length === 1 ? [await provider.decide(posts[0]!)] : provider.decideMany(posts);
+}
+
+/** LLM이 나눔이 아니라고 했어도 글에 "줄"과 마감 시각이 함께 있으면 나눔 줄일 때가 많아 넘기지 않고 알립니다. 아니면 null입니다. */
+function missedLinePlan(candidate: Candidate, decision: Decision): Plan | null {
+    if (!hasLineAndDeadline(`${candidate.title}\n${candidate.body}`)) return null;
+    return {kind: "notify", reason: `나눔 글이 아니라고 판단했지만 글에 "줄"과 마감 시각이 함께 있어 직접 확인이 필요함 (LLM 근거: ${brief(decision.reason)})`};
 }
 
 /** LLM 판단을 바꾸려는 듯한 말이 든 글입니다. 다른 글과 묶으면 묶인 다른 글의 판단까지 흔들 수 있어 따로 묶습니다. */
@@ -126,9 +132,11 @@ export class Judge {
         const {sleep} = this.host;
         const context = {galleryId: gallery.galleryId};
         let startedAt = this.host.now();
+        let posts: PostInput[] = [];
         const request = async () => {
             await this.llm.request(gallery.galleryId);
-            return decideGroup(provider, group.map(toPostInput));
+            posts = this.postInputs(gallery, group);
+            return decideGroup(provider, posts);
         };
         let decisions: (Decision | null)[];
         try {
@@ -157,7 +165,7 @@ export class Judge {
         }
         const found = group.filter((_, index) => decisions[index]?.is_giveaway).length;
         // 나눔으로 판단한 글이 있거나 키워드에 걸린 글이 있는 묶음은 남겨, 놓친 글이나 판단이 흔들린 묶음을 나중에 되짚을 수 있게 합니다.
-        if (found > 0 || group.some((candidate) => candidate.keyword)) this.recordJudgment(gallery, "batch", group, decisions);
+        if (found > 0 || group.some((candidate) => candidate.keyword)) this.recordJudgment(gallery, "batch", group, posts, decisions);
         logger.info(`새 글 ${group.length}개를 LLM 요청 한 번으로 판단: 나눔 ${found}개 (${((this.host.now() - startedAt) / 1000).toFixed(1)}초)`, context);
         return decisions;
     }
@@ -188,8 +196,9 @@ export class Judge {
         if (!this.llm.canUseToday()) return null;
         try {
             await this.llm.request(gallery.galleryId);
-            const decision = await provider.decide(toPostInput(candidate));
-            this.recordJudgment(gallery, "batch", [candidate], [decision]);
+            const posts = this.postInputs(gallery, [candidate]);
+            const decision = await provider.decide(posts[0]!);
+            this.recordJudgment(gallery, "batch", [candidate], posts, [decision]);
             return decision;
         } catch (error) {
             this.host.deps.logger.warn(`글 하나로 다시 판단하지 못했습니다: ${errorMessage(error)}`, {galleryId: gallery.galleryId, postNo: candidate.post.no});
@@ -204,6 +213,8 @@ export class Judge {
         // 나중에 놓친 글이나 잘못 선 글을 되짚을 수 있도록, 글마다 판단과 LLM의 근거를 남깁니다.
         if (!decision.is_giveaway) {
             logger.info(`나눔 아님: "${candidate.title}" (근거: ${decision.reason})`, postContext);
+            const missed = missedLinePlan(candidate, decision);
+            if (missed) await this.host.dispatcher.dispatch(gallery, candidate.post, missed, {live: {epoch}});
             return;
         }
         logger.info(`나눔으로 판단: "${candidate.title}" (${describeDecision(decision)}) (근거: ${decision.reason})`, postContext);
@@ -253,11 +264,12 @@ export class Judge {
                 return {kind: "notify", reason: `${why} 사진까지 보고 확인하지 못함`};
             }
             await this.llm.request(gallery.galleryId);
-            const decision = await provider.decide({...toPostInput(candidate), images});
-            this.recordJudgment(gallery, "confirm", [candidate], [decision], images.length);
+            const post = {...this.postInputs(gallery, [candidate])[0]!, images};
+            const decision = await provider.decide(post);
+            this.recordJudgment(gallery, "confirm", [candidate], [post], [decision], images.length);
             const photos = images.length > 0 ? `, 사진 ${images.length}장` : "";
             deps.logger.info(`2차 확인${photos}: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`, context);
-            if (!decision.is_giveaway) return {kind: "skip", reason: NOT_GIVEAWAY_ON_RECHECK};
+            if (!decision.is_giveaway) return missedLinePlan(candidate, decision) ?? {kind: "skip", reason: NOT_GIVEAWAY_ON_RECHECK};
             return this.planFor(gallery, decision, candidate);
         } catch (error) {
             if (candidate.images.length > 0) return {kind: "notify", reason: `사진까지 보고 다시 판단하지 못함: ${errorMessage(error)}`};
@@ -270,15 +282,22 @@ export class Judge {
         }
     }
 
+    /** LLM에 보낼 글들입니다. 대기 계정마다 이 갤러리에서 맡은 완장(매니저, 부매니저, 일반 갤럼)을 한 번만 구해 함께 보냅니다. */
+    private postInputs(gallery: GalleryConfig, group: Candidate[]): PostInput[] {
+        const {accounts, settings} = this.host.deps;
+        const roles = accounts.candidates(settings().accounts, gallery.accountIds).map((account) => roleIn(account, gallery.galleryId));
+        return group.map((candidate) => ({...toPostInput(candidate), accounts: {galleryId: gallery.galleryId, roles}}));
+    }
+
     /**
-     * LLM에 보낸 내용(요청과 똑같이 만든 메시지)과 판단 원문을 남깁니다.
+     * LLM에 보낸 내용(보낸 글로 요청과 똑같이 만든 메시지)과 판단 원문을 남깁니다.
+     * @param posts LLM에 보낸 글입니다(`postInputs`로 만든 것).
      * @param imageCount 글 하나를 판단할 때 함께 보낸 사진 수입니다.
      */
-    private recordJudgment(gallery: GalleryConfig, kind: JudgmentRecord["kind"], group: Candidate[], decisions: (Decision | null)[], imageCount = 0): void {
+    private recordJudgment(gallery: GalleryConfig, kind: JudgmentRecord["kind"], group: Candidate[], posts: PostInput[], decisions: (Decision | null)[], imageCount = 0): void {
         const {deps} = this.host;
         if (!deps.recordJudgment) return;
         const {llm} = deps.settings();
-        const posts = group.map(toPostInput);
         const single = group.length === 1;
         deps.recordJudgment({
             time: this.host.now(),
@@ -286,7 +305,7 @@ export class Judge {
             kind,
             model: `${llm.provider}/${llm.models[llm.provider]}`,
             systemPrompt: single ? "SYSTEM_PROMPT" : "BATCH_SYSTEM_PROMPT",
-            message: single ? buildUserMessage(posts[0]!.title, posts[0]!.body, posts[0]!.postedAt, imageCount) : buildBatchMessage(posts),
+            message: single ? buildUserMessage(posts[0]!.title, posts[0]!.body, posts[0]!.postedAt, imageCount, posts[0]!.accounts) : buildBatchMessage(posts, undefined, posts[0]!.accounts),
             // 디시가 준 작성 시각 문자열도 남겨 두어, 작성 시각을 제대로 읽었는지 나중에 확인할 수 있게 합니다.
             posts: group.map((candidate) => ({
                 no: candidate.post.no, title: candidate.title, bodyRead: candidate.bodyRead, keyword: candidate.keyword,

@@ -4,7 +4,8 @@
     --border: #e2dfd8;
     --text: #1f1d1a;
     --muted: #6f6a62;
-    --accent: #d9481f;
+    /* 강조색은 앱 아이콘과 같은 디시 파랑입니다. */
+    --accent: #3b4890;
     --accent-text: #ffffff;
     --ok: #237a3b;
     --error: #c42b1c;
@@ -13,6 +14,9 @@
     --warn-bg: #fff4d6;
     --info-bg: #e8f0fb;
     --ok-bg: #e3f2e6;
+    /* 주딱은 주황, 파딱은 파랑입니다. 흰 글자가 잘 읽히도록 조금 짙게 고릅니다. */
+    --role-manager: #d9711c;
+    --role-submanager: #2f74d0;
     /* 버튼: 누를 수 있는 버튼은 흰 바탕에 테두리와 그림자, 누를 수 없는 버튼은 그림자 없는 회색 바탕입니다. */
     --button-border: #cfcac0;
     --hover-bg: #f2f0eb;
@@ -22,7 +26,8 @@
     --disabled-text: #8a857c;
     /* 흰 글자를 올리는 빨간 바탕(삭제 확인 버튼)입니다. */
     --danger-solid: #c42b1c;
-    --focus: #d9481f;
+    --focus: #3b4890;
+    --brand-logo: #3b4890;
     --backdrop: rgba(20, 18, 15, 0.4);
     --mono: ui-monospace, "D2Coding", Consolas, monospace;
     color-scheme: light;
@@ -35,13 +40,15 @@
         --border: #3a3631;
         --text: #ece8e1;
         --muted: #a39d93;
-        --accent: #f0643a;
+        --accent: #5a68b8;
         --ok: #5cc27a;
         --error: #ff7b6e;
         --danger-bg: #3d1a17;
         --warn-bg: #3a3014;
         --info-bg: #1b2a3d;
         --ok-bg: #1c3324;
+        --role-manager: #c8681c;
+        --role-submanager: #3a7bd5;
         --button-border: #4a453e;
         --hover-bg: #2c2a26;
         --shadow: rgba(0, 0, 0, 0.3);
@@ -49,7 +56,8 @@
         --disabled-border: #2f2c28;
         --disabled-text: #7a746b;
         --danger-solid: #d23a2a;
-        --focus: #f0643a;
+        --focus: #8b97d6;
+        --brand-logo: #f3e8d0;
         --backdrop: rgba(0, 0, 0, 0.6);
         color-scheme: dark;
     }
@@ -96,6 +104,11 @@ h1 {
     display: flex;
     align-items: center;
     gap: 8px;
+}
+
+.brand-logo {
+    fill: var(--brand-logo);
+    flex: none;
 }
 
 .card p {
@@ -552,6 +565,44 @@ fieldset {
 
 .account-order li span {
     flex: 1;
+}
+
+/* 대기 계정 이름 오른쪽의 주딱·파딱 표시입니다. 한눈에 띄도록 색을 채웁니다. */
+.role-badge {
+    display: inline-block;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.5;
+    padding: 0 8px;
+    border-radius: 999px;
+    color: #fff;
+    vertical-align: 1px;
+}
+
+.role-badge.manager {
+    background: var(--role-manager);
+}
+
+.role-badge.submanager {
+    background: var(--role-submanager);
+}
+
+.managed-galleries {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 12px;
+    margin-top: 10px;
+}
+
+.managed-galleries ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
 }
 
 .muted {

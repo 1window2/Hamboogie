@@ -2,7 +2,7 @@ import {describe, expect, it} from "vitest";
 import {newGallery} from "@shared/settings";
 import {DAY_MS, kstDayStart} from "@shared/time";
 import type {Decision} from "../src/main/llm/decision";
-import {brief, containsSecret, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, isSafeCommentText, makePlan, resolveClock, START_MARGIN_MS, type CandidateAccount} from "../src/main/pipeline/planner";
+import {bareMinuteDeadline, brief, containsSecret, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, fixBareMinute, hasLineAndDeadline, isSafeCommentText, makePlan, resolveClock, START_MARGIN_MS, type CandidateAccount} from "../src/main/pipeline/planner";
 
 /** 2026-10-23 14:00 (한국 시간) */
 const NOW = Date.UTC(2026, 9, 23, 5, 0);
@@ -22,11 +22,17 @@ const semi: CandidateAccount = {
 function decision(patch: Partial<Decision> = {}): Decision {
     return {
         is_giveaway: true,
+        item: null,
         is_food: true,
+        food_unknown: false,
         line_method: "text",
         line_text: null,
         dccon_keyword: null,
         member_requirement: "any",
+        participant_limit: null,
+        manager_ok: true,
+        submanager_ok: true,
+        regular_ok: true,
         starts_at: null,
         ends_at: null,
         text_only: false,
@@ -38,6 +44,44 @@ function decision(patch: Partial<Decision> = {}): Decision {
 }
 
 describe("makePlan", () => {
+    it("시 없이 분만 쓴 마감을 LLM이 글 올린 시각보다 이르게 바꿨으면 처음 오는 그 분으로 고쳐 줄을 선다", () => {
+        const posted = kst(17, 57) + 33_000;
+        const plan = makePlan(decision({ends_at: "17:20"}), {...gallery, category: "all"}, [gonick], "빼빼로 줄!!\n20분까지!", {detectedAt: posted, postedAt: posted});
+        expect(plan).toMatchObject({kind: "comment", deadline: kst(18, 20)});
+    });
+
+    it("시 없이 분만 쓴 마감은 LLM이 분까지 틀리게 읽었거나 빠뜨려도 글에서 직접 셈한다", () => {
+        const posted = kst(17, 57) + 33_000;
+        const text = "빼빼로 줄!!\n20분까지!";
+        expect(makePlan(decision({ends_at: "17:30"}), gallery, [gonick], text, {detectedAt: posted, postedAt: posted})).toMatchObject({kind: "comment", deadline: kst(18, 20)});
+        expect(makePlan(decision({ends_at: null}), gallery, [gonick], text, {detectedAt: posted, postedAt: posted})).toMatchObject({kind: "comment", deadline: kst(18, 20)});
+    });
+
+    it("시와 분을 함께 쓴 마감이 이미 지났으면 넘어간다", () => {
+        const posted = kst(17, 57);
+        expect(makePlan(decision({ends_at: "17:20"}), gallery, [gonick], "17시 20분까지 줄", {detectedAt: posted, postedAt: posted}).kind).toBe("skip");
+        expect(makePlan(decision({ends_at: "17:20"}), gallery, [gonick], "17:20까지 줄", {detectedAt: posted, postedAt: posted}).kind).toBe("skip");
+    });
+
+    it("시 없이 분만 쓴 시작 시각도 글 올린 뒤 처음 오는 그 분으로 고친다", () => {
+        const posted = kst(17, 45);
+        const plan = makePlan(decision({starts_at: "17:30"}), gallery, [gonick], "30분부터 줄", {detectedAt: posted, postedAt: posted});
+        expect(plan).toMatchObject({kind: "comment", notBefore: kst(18, 30) + START_MARGIN_MS});
+    });
+
+    it("줄 설 수 있는 사람을 제한한 글은 알린다", () => {
+        const plan = makePlan(decision({participant_limit: "못 받은 사람만"}), gallery, [gonick], POST, {detectedAt: NOW});
+        expect(plan).toEqual({kind: "notify", reason: "줄 설 수 있는 사람을 제한함: \"못 받은 사람만\""});
+    });
+
+    it("음식만 설정에서 먹을 것인지 알 수 없으면 넘기지 않고 알린다", () => {
+        expect(makePlan(decision({is_food: false, food_unknown: true, item: "깁티(기프티콘)"}), gallery, [gonick], POST, {detectedAt: NOW}))
+            .toEqual({kind: "notify", reason: "먹을 것인지 알 수 없음: \"깁티(기프티콘)\""});
+        expect(makePlan(decision({is_food: false, food_unknown: true}), gallery, [gonick], POST, {detectedAt: NOW}))
+            .toEqual({kind: "notify", reason: "먹을 것인지 알 수 없음: 주는 물건을 밝히지 않음"});
+        expect(makePlan(decision({is_food: false, food_unknown: true}), {...gallery, category: "all"}, [gonick], POST, {detectedAt: NOW}).kind).toBe("comment");
+    });
+
     it("특정 문구가 없으면 기본 문구 '줄'로 우선순위 순서대로 시도한다", () => {
         expect(makePlan(decision(), gallery, [gonick, semi], POST, {detectedAt: NOW})).toEqual({
             kind: "comment",
@@ -424,5 +468,83 @@ describe("makePlan 요구 디시콘", () => {
             kind: "comment",
             attempts: [{accountId: "a", content: {type: "dccon", dccon: chicken.dccons[0]}}]
         });
+    });
+});
+
+describe("완장 조건", () => {
+    const manager: CandidateAccount = {id: "m", memberType: "gonick", dccons: [], roles: {gf2: "manager", other: "submanager"}};
+    const sub: CandidateAccount = {id: "s", memberType: "gonick", dccons: [], roles: {gf2: "submanager"}};
+    const regular: CandidateAccount = {id: "r", memberType: "gonick", dccons: [], roles: {other: "manager"}};
+    const unknown: CandidateAccount = {id: "u", memberType: "gonick", dccons: [], roles: null};
+    const attempted = (plan: ReturnType<typeof makePlan>) => (plan.kind === "comment" ? plan.attempts.map((attempt) => attempt.accountId) : plan.kind);
+
+    it("여러 계정이 섞여 있으면 계정마다 이 갤러리의 완장을 보고 조건에 맞는 계정만 우선순위대로 선다", () => {
+        const all = [manager, sub, regular, unknown];
+        expect(attempted(makePlan(decision(), gallery, all, POST, {detectedAt: NOW}))).toEqual(["m", "s", "r", "u"]);
+        // "완장 제외"
+        expect(attempted(makePlan(decision({manager_ok: false, submanager_ok: false}), gallery, all, POST, {detectedAt: NOW}))).toEqual(["r"]);
+        // "주딱 빼고"
+        expect(attempted(makePlan(decision({manager_ok: false}), gallery, all, POST, {detectedAt: NOW}))).toEqual(["s", "r"]);
+        // "파딱만"
+        expect(attempted(makePlan(decision({manager_ok: false, regular_ok: false}), gallery, all, POST, {detectedAt: NOW}))).toEqual(["s"]);
+    });
+
+    it("조건에 맞는 계정이 없으면 넘어가고, 완장인지 모르는 계정만 남으면 알린다", () => {
+        expect(makePlan(decision({regular_ok: false}), gallery, [regular], POST, {detectedAt: NOW}).kind).toBe("skip");
+        expect(makePlan(decision({regular_ok: false}), gallery, [regular, unknown], POST, {detectedAt: NOW}).kind).toBe("notify");
+    });
+
+
+    it("완장 조건은 실행 직전에 다시 확인하도록 계획에 남긴다", () => {
+        expect(makePlan(decision({regular_ok: false}), gallery, [manager], POST, {detectedAt: NOW})).toMatchObject({roles: {manager: true, submanager: true, regular: false}});
+        expect(makePlan(decision(), gallery, [manager], POST, {detectedAt: NOW})).not.toHaveProperty("roles");
+    });
+});
+
+describe("fixBareMinute", () => {
+    const posted = kst(17, 57);
+    it("시 없이 쓴 분만 고치고, 시를 함께 썼거나 \"N분 뒤\"면 그대로 둔다", () => {
+        expect(fixBareMinute(kst(17, 20), posted, "20분까지")).toBe(kst(18, 20));
+        expect(fixBareMinute(kst(17, 20), posted, "20 분 마감")).toBe(kst(18, 20));
+        expect(fixBareMinute(kst(17, 20), posted, "5시 20분까지")).toBe(kst(17, 20));
+        expect(fixBareMinute(kst(17, 20), posted, "8시20분 00초까지")).toBe(kst(17, 20));
+        expect(fixBareMinute(kst(17, 20), posted, "20분 뒤 마감")).toBe(kst(17, 20));
+        expect(fixBareMinute(kst(17, 20), posted, "25분까지")).toBe(kst(17, 20));
+        expect(fixBareMinute(kst(18, 20), posted, "20분까지")).toBe(kst(18, 20));
+    });
+
+    it("자정을 넘기면 다음 날 그 분으로 고친다", () => {
+        expect(fixBareMinute(kst(23, 10), kst(23, 50), "10분까지")).toBe(kst(23, 10) + 60 * 60 * 1000);
+    });
+});
+
+describe("bareMinuteDeadline", () => {
+    const posted = kst(17, 57) + 33_000;
+    it("시 없이 분만 쓴 마감 하나를 글을 올린 뒤 처음 오는 그 분으로 바꾼다", () => {
+        expect(bareMinuteDeadline("20분까지!", posted)).toBe(kst(18, 20));
+        expect(bareMinuteDeadline("50분까지 2명 줄", kst(18, 40) + 59_000)).toBe(kst(18, 50));
+        expect(bareMinuteDeadline("9분 59초 마감", posted)).toBe(kst(18, 9) + 59_000);
+        expect(bareMinuteDeadline("58분까지", posted)).toBe(kst(17, 58));
+        // 글을 올린 그 분이면 다음 시각입니다(작성 시각을 분까지만 알아 가장 이른 시각이 정각인 경우).
+        expect(bareMinuteDeadline("57분까지", kst(17, 57))).toBe(kst(18, 57));
+    });
+
+    it("시까지 쓴 마감이 있거나, 분만 쓴 마감이 없거나 여럿이면 셈하지 않는다", () => {
+        expect(bareMinuteDeadline("8시 20분까지", posted)).toBeNull();
+        expect(bareMinuteDeadline("17:20까지 줄", posted)).toBeNull();
+        expect(bareMinuteDeadline("20분 뒤 마감", posted)).toBeNull();
+        expect(bareMinuteDeadline("20분까지 아니 30분까지", posted)).toBeNull();
+        expect(bareMinuteDeadline("햄버거 줄", posted)).toBeNull();
+    });
+});
+
+describe("hasLineAndDeadline", () => {
+    it("\"줄\"과 마감 시각이 함께 있어야 한다", () => {
+        expect(hasLineAndDeadline("두번째) 둘다 서는 줄이래\n25분까지!")).toBe(true);
+        expect(hasLineAndDeadline("8시20분 00초까지 줄")).toBe(true);
+        expect(hasLineAndDeadline("줄 17:20까지")).toBe(true);
+        expect(hasLineAndDeadline("줄 서\n오후 3 시 마감")).toBe(true);
+        expect(hasLineAndDeadline("부거줄 너무 길다")).toBe(false);
+        expect(hasLineAndDeadline("번호는 5개로 줄어들거야 25분까지")).toBe(false);
     });
 });
