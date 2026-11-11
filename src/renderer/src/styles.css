@@ -13,10 +13,9 @@
     --warn-bg: #fff4d6;
     --info-bg: #e8f0fb;
     --ok-bg: #e3f2e6;
-    /* 매니저(주딱)는 주황, 부매니저(파딱)는 파랑으로 디시의 딱지 색에 맞춥니다. */
-    --role-manager: #d9481f;
-    --role-submanager: #1f63d9;
-    --role-staff: #5b5650;
+    /* 주딱은 주황, 파딱은 파랑입니다. 흰 글자가 잘 읽히도록 조금 짙게 고릅니다. */
+    --role-manager: #d9711c;
+    --role-submanager: #2f74d0;
     /* 버튼: 누를 수 있는 버튼은 흰 바탕에 테두리와 그림자, 누를 수 없는 버튼은 그림자 없는 회색 바탕입니다. */
     --button-border: #cfcac0;
     --hover-bg: #f2f0eb;
@@ -46,9 +45,8 @@
         --warn-bg: #3a3014;
         --info-bg: #1b2a3d;
         --ok-bg: #1c3324;
-        --role-manager: #c2410c;
-        --role-submanager: #2563eb;
-        --role-staff: #6b655c;
+        --role-manager: #c8681c;
+        --role-submanager: #3a7bd5;
         --button-border: #4a453e;
         --hover-bg: #2c2a26;
         --shadow: rgba(0, 0, 0, 0.3);
@@ -561,7 +559,7 @@ fieldset {
     flex: 1;
 }
 
-/* 대기 계정 이름 오른쪽의 매니저·부매니저 표시입니다. 한눈에 띄도록 색을 채웁니다. */
+/* 대기 계정 이름 오른쪽의 주딱·파딱 표시입니다. 한눈에 띄도록 색을 채웁니다. */
 .role-badge {
     display: inline-block;
     white-space: nowrap;
@@ -580,10 +578,6 @@ fieldset {
 
 .role-badge.submanager {
     background: var(--role-submanager);
-}
-
-.role-badge.staff {
-    background: var(--role-staff);
 }
 
 .managed-galleries {

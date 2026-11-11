@@ -41,8 +41,6 @@ interface FakeServer {
     clients?: FakeClient[];
     /** 이 계정이 관리하는 갤러리 목록 응답입니다. */
     managed?: {gall_id?: string; gall_koname?: string; manager_type?: string}[];
-    /** 갤러리마다 매니저 명단입니다. */
-    intros?: Record<string, {master_id?: string; submanager?: {id?: string}[]}>;
     /** 있으면 관리 갤러리 목록 요청이 이 오류로 실패합니다. */
     managedError?: Error;
     /** 관리 갤러리 목록을 요청한 횟수입니다. */
@@ -95,9 +93,6 @@ function fakeClientFactory(server: FakeServer) {
                     return {result: true, mymanageList: server.managed ?? []};
                 }
             },
-            galleries: {
-                info: async (gallery: string) => ({result: true, ...server.intros?.[gallery]})
-            },
             comments: {
                 async write(_gallery: string, _no: number, content: unknown) {
                     if (credentials && server.savedDeviceBroken) throw APP_ID_REFUSED();
@@ -123,10 +118,9 @@ function setup(secretsInit: Record<string, string> = {}) {
 }
 
 describe("AccountManager 매니저인 갤러리", () => {
-    it("로그인하면 관리 갤러리마다 매니저 명단을 보고 매니저·부매니저를 가려 상태와 대기 계정 정보에 담는다", async () => {
+    it("로그인하면 관리 갤러리 목록으로 매니저·부매니저를 가려 상태와 대기 계정 정보에 담는다", async () => {
         const {server, manager} = setup({"otp:acc1": "token-abc"});
-        server.managed = [{gall_id: "testgall", gall_koname: "테스트"}, {gall_id: "subgall", gall_koname: "부매니저갤"}, {gall_id: "oddgall"}];
-        server.intros = {testgall: {master_id: "tester"}, subgall: {master_id: "other", submanager: [{id: "x"}, {id: "tester"}]}, oddgall: {master_id: "other"}};
+        server.managed = [{gall_id: "testgall", gall_koname: "테스트", manager_type: "M"}, {gall_id: "subgall", gall_koname: "부매니저갤", manager_type: "S"}, {gall_id: "oddgall", manager_type: "X"}];
         const status = await manager.login(ACCOUNT);
         expect(status).toMatchObject({state: "logged_in", managedGalleries: [
             {galleryId: "testgall", name: "테스트", role: "manager"},

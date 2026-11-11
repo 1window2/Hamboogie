@@ -18,8 +18,6 @@ interface LoggedIn {
     dcconError?: string;
     /** 보유 디시콘을 다시 불러와도 되는 시각입니다. app_id 거절이 아닌 오류로 실패했을 때 매 확인마다 다시 요청하지 않게 합니다. */
     dcconRetryAt?: number;
-    /** 로그인 응답의 회원 아이디입니다. 갤러리 매니저 명단과 맞춰 볼 때만 씁니다. */
-    userId?: string;
     /** 매니저나 부매니저인 갤러리입니다. 아직 알아내지 못했으면 null입니다. */
     managed: ManagedGallery[] | null;
     /** 매니저인 갤러리를 아직 못 알아냈으면 그 이유입니다. */
@@ -34,15 +32,9 @@ const APP_ID_FRESH_MS = 10 * 60 * 60 * 1000;
 /** app_id 거절이 아닌 오류로 보유 디시콘을 못 불러왔을 때 다시 시도하기까지 기다리는 시간입니다. */
 const DCCON_RETRY_MS = 10 * 60 * 1000;
 
-/**
- * 갤러리 매니저 명단에서 이 계정이 맡은 완장을 찾습니다. 명단에 없으면(관리 갤러리 목록에는 있는데 명단과 맞지 않으면) 종류를 모르는 완장입니다.
- * 관리 갤러리 목록의 manager_type 값은 뜻이 알려져 있지 않아 쓰지 않습니다.
- */
-export function roleFromManagers(userId: string | undefined, intro: {master_id?: string; submanager?: {id?: string}[]}): GalleryRole {
-    if (!userId) return "staff";
-    if (intro.master_id === userId) return "manager";
-    if (intro.submanager?.some((manager) => manager.id === userId)) return "submanager";
-    return "staff";
+/** 관리 갤러리 목록의 manager_type입니다. 매니저는 "M", 부매니저는 "S"로 옵니다. 다른 값이면 종류를 모르는 완장입니다. */
+export function roleFromManagerType(type: string | undefined): GalleryRole {
+    return type === "M" ? "manager" : type === "S" ? "submanager" : "staff";
 }
 
 /**
@@ -222,7 +214,6 @@ export class AccountManager {
                 nickname: session.result.name ?? account.loginId,
                 detectedMemberType: isGonick === 1 ? "gonick" : isGonick === 0 ? "semi" : null,
                 dccons: [],
-                ...(session.result.user_id ? {userId: session.result.user_id} : {}),
                 managed: null
             };
             // 보유 디시콘을 불러오면서 app_id도 받아 둡니다. 거절되면 로그인은 그대로 두고 디시콘만 나중에 다시 불러옵니다.
@@ -409,19 +400,14 @@ export class AccountManager {
     }
 
     /**
-     * 계정이 매니저나 부매니저인 갤러리를 알아냅니다. 관리 갤러리 목록을 받고, 갤러리마다 매니저 명단을 보고 매니저인지 부매니저인지 가립니다.
+     * 계정이 매니저나 부매니저인 갤러리를 알아냅니다. 관리 갤러리 목록 하나로 매니저인지 부매니저인지까지 압니다.
      * 로그인할 때(그리고 실패했으면 잠시 뒤) 한 번만 알아봅니다. 로그인이 풀렸으면 "login_expired"입니다.
      */
     private async loadManaged(loggedIn: LoggedIn): Promise<"ok" | "failed" | "login_expired"> {
         try {
             const response = await loggedIn.client.user.managedGalleries();
-            const managed: ManagedGallery[] = [];
-            for (const item of response.mymanageList ?? []) {
-                if (!item.gall_id) continue;
-                const intro = await loggedIn.client.galleries.info(item.gall_id);
-                managed.push({galleryId: item.gall_id, name: item.gall_koname || intro.ko_name || item.gall_id, role: roleFromManagers(loggedIn.userId, intro)});
-            }
-            loggedIn.managed = managed;
+            loggedIn.managed = (response.mymanageList ?? []).flatMap((item): ManagedGallery[] =>
+                item.gall_id ? [{galleryId: item.gall_id, name: item.gall_koname || item.gall_id, role: roleFromManagerType(item.manager_type)}] : []);
             loggedIn.managedError = undefined;
             loggedIn.managedRetryAt = undefined;
             return "ok";
