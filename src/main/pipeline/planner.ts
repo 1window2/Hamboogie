@@ -38,7 +38,7 @@ export function roleIn(account: Pick<CandidateAccount, "roles">, galleryId: stri
     return account.roles[galleryId] ?? "regular";
 }
 
-/** 계정이 글의 완장 조건에 맞는지입니다. 완장인지 모르거나 매니저인지 부매니저인지 몰라 가릴 수 없으면 null입니다. */
+/** 계정이 글의 완장 조건에 맞는지입니다. 매니저인 갤러리를 아직 알아내지 못해 가릴 수 없으면 null입니다. */
 export function roleAllowed(account: Pick<CandidateAccount, "roles">, galleryId: string, rule: RoleRule): boolean | null {
     if (rule.manager && rule.submanager && rule.regular) return true;
     switch (roleIn(account, galleryId)) {
@@ -50,8 +50,6 @@ export function roleAllowed(account: Pick<CandidateAccount, "roles">, galleryId:
             return rule.manager;
         case "submanager":
             return rule.submanager;
-        case "staff":
-            return rule.manager === rule.submanager ? rule.manager : null;
     }
 }
 

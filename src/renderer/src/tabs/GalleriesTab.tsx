@@ -132,7 +132,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
     const roleBadge = (id: string) => {
         const account = accounts.find((item) => item.id === id);
         const role = account ? galleryRole(account.status, gallery.galleryId.trim()) : null;
-        return role === "manager" || role === "submanager" ? <> <RoleBadge role={role}/></> : null;
+        return role ? <> <RoleBadge role={role}/></> : null;
     };
 
     return (

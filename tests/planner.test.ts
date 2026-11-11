@@ -2,7 +2,7 @@ import {describe, expect, it} from "vitest";
 import {newGallery} from "@shared/settings";
 import {DAY_MS, kstDayStart} from "@shared/time";
 import type {Decision} from "../src/main/llm/decision";
-import {bareMinuteDeadline, brief, containsSecret, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, fixBareMinute, hasLineAndDeadline, isSafeCommentText, makePlan, resolveClock, roleAllowed, START_MARGIN_MS, type CandidateAccount} from "../src/main/pipeline/planner";
+import {bareMinuteDeadline, brief, containsSecret, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, fixBareMinute, hasLineAndDeadline, isSafeCommentText, makePlan, resolveClock, START_MARGIN_MS, type CandidateAccount} from "../src/main/pipeline/planner";
 
 /** 2026-10-23 14:00 (한국 시간) */
 const NOW = Date.UTC(2026, 9, 23, 5, 0);
@@ -476,7 +476,6 @@ describe("완장 조건", () => {
     const sub: CandidateAccount = {id: "s", memberType: "gonick", dccons: [], roles: {gf2: "submanager"}};
     const regular: CandidateAccount = {id: "r", memberType: "gonick", dccons: [], roles: {other: "manager"}};
     const unknown: CandidateAccount = {id: "u", memberType: "gonick", dccons: [], roles: null};
-    const staff: CandidateAccount = {id: "t", memberType: "gonick", dccons: [], roles: {gf2: "staff"}};
     const attempted = (plan: ReturnType<typeof makePlan>) => (plan.kind === "comment" ? plan.attempts.map((attempt) => attempt.accountId) : plan.kind);
 
     it("여러 계정이 섞여 있으면 계정마다 이 갤러리의 완장을 보고 조건에 맞는 계정만 우선순위대로 선다", () => {
@@ -495,11 +494,6 @@ describe("완장 조건", () => {
         expect(makePlan(decision({regular_ok: false}), gallery, [regular, unknown], POST, {detectedAt: NOW}).kind).toBe("notify");
     });
 
-    it("매니저인지 부매니저인지 모르는 완장은 둘을 똑같이 다루는 조건일 때만 가린다", () => {
-        expect(roleAllowed(staff, "gf2", {manager: false, submanager: false, regular: true})).toBe(false);
-        expect(roleAllowed(staff, "gf2", {manager: true, submanager: true, regular: false})).toBe(true);
-        expect(roleAllowed(staff, "gf2", {manager: false, submanager: true, regular: true})).toBeNull();
-    });
 
     it("완장 조건은 실행 직전에 다시 확인하도록 계획에 남긴다", () => {
         expect(makePlan(decision({regular_ok: false}), gallery, [manager], POST, {detectedAt: NOW})).toMatchObject({roles: {manager: true, submanager: true, regular: false}});

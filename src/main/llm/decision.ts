@@ -107,8 +107,6 @@ function roleSentence(role: AccountRole, gallery: string): string {
             return `${gallery} 갤러리의 매니저(주딱)이며 완장이다.`;
         case "submanager":
             return `${gallery} 갤러리의 부매니저(파딱)이며 완장이다.`;
-        case "staff":
-            return `${gallery} 갤러리의 완장이지만 매니저(주딱)인지 부매니저(파딱)인지는 모른다.`;
         case "regular":
             return `${gallery} 갤러리의 완장(매니저·부매니저)이 아닌 일반 갤럼이다.`;
         case null:

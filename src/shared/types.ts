@@ -8,8 +8,8 @@ export type GiveawayCategory = "food" | "all";
 /** 로그인한 계정의 종류입니다. 로그인하면 유동이 아니므로 고닉/반고닉 둘 중 하나입니다. */
 export type MemberType = "gonick" | "semi";
 
-/** 갤러리에서 맡은 완장입니다. 매니저(주딱)인지 부매니저(파딱)인지 알 수 없으면 staff입니다. */
-export type GalleryRole = "manager" | "submanager" | "staff";
+/** 갤러리에서 맡은 완장입니다. 매니저(주딱)이거나 부매니저(파딱)입니다. */
+export type GalleryRole = "manager" | "submanager";
 
 /** 계정이 매니저나 부매니저인 갤러리입니다. */
 export interface ManagedGallery {

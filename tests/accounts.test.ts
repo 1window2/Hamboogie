@@ -120,14 +120,13 @@ function setup(secretsInit: Record<string, string> = {}) {
 describe("AccountManager 매니저인 갤러리", () => {
     it("로그인하면 관리 갤러리 목록으로 매니저·부매니저를 가려 상태와 대기 계정 정보에 담는다", async () => {
         const {server, manager} = setup({"otp:acc1": "token-abc"});
-        server.managed = [{gall_id: "testgall", gall_koname: "테스트", manager_type: "M"}, {gall_id: "subgall", gall_koname: "부매니저갤", manager_type: "S"}, {gall_id: "oddgall", manager_type: "X"}];
+        server.managed = [{gall_id: "testgall", gall_koname: "테스트", manager_type: "M"}, {gall_id: "subgall", gall_koname: "부매니저갤", manager_type: "S"}];
         const status = await manager.login(ACCOUNT);
         expect(status).toMatchObject({state: "logged_in", managedGalleries: [
             {galleryId: "testgall", name: "테스트", role: "manager"},
-            {galleryId: "subgall", name: "부매니저갤", role: "submanager"},
-            {galleryId: "oddgall", name: "oddgall", role: "staff"}
+            {galleryId: "subgall", name: "부매니저갤", role: "submanager"}
         ]});
-        expect(manager.candidates([ACCOUNT], ["acc1"])[0]!.roles).toEqual({testgall: "manager", subgall: "submanager", oddgall: "staff"});
+        expect(manager.candidates([ACCOUNT], ["acc1"])[0]!.roles).toEqual({testgall: "manager", subgall: "submanager"});
     });
 
     it("관리 갤러리를 못 알아내면 로그인은 그대로 두고, 잠시 뒤 다시 알아본다", async () => {

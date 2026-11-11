@@ -32,9 +32,9 @@ const APP_ID_FRESH_MS = 10 * 60 * 60 * 1000;
 /** app_id 거절이 아닌 오류로 보유 디시콘을 못 불러왔을 때 다시 시도하기까지 기다리는 시간입니다. */
 const DCCON_RETRY_MS = 10 * 60 * 1000;
 
-/** 관리 갤러리 목록의 manager_type입니다. 매니저는 "M", 부매니저는 "S"로 옵니다. 다른 값이면 종류를 모르는 완장입니다. */
+/** 관리 갤러리 목록의 manager_type입니다. 매니저는 "M", 부매니저는 "S"로 옵니다. */
 export function roleFromManagerType(type: string | undefined): GalleryRole {
-    return type === "M" ? "manager" : type === "S" ? "submanager" : "staff";
+    return type === "S" ? "submanager" : "manager";
 }
 
 /**
