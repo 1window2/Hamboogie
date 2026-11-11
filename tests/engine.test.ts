@@ -319,7 +319,7 @@ describe("Engine 성공 알림", () => {
 
 const GIVEAWAY = {
     is_giveaway: true, item: null, is_food: true, food_unknown: false, line_method: "text" as const, line_text: null, dccon_keyword: null,
-    member_requirement: "any" as const, participant_limit: null, starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null, reason: "나눔"
+    member_requirement: "any" as const, participant_limit: null, manager_ok: true, submanager_ok: true, regular_ok: true, starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null, reason: "나눔"
 };
 const NOT_GIVEAWAY = {...GIVEAWAY, is_giveaway: false, reason: "잡담"};
 

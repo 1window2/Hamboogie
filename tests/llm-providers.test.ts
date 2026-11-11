@@ -14,7 +14,7 @@ const {createProvider, LlmError} = await import("../src/main/llm/providers");
 
 const DECISION = {
     is_giveaway: true, item: null, is_food: true, food_unknown: false, line_method: "text", line_text: null, dccon_keyword: null,
-    member_requirement: "any", participant_limit: null, starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null, reason: "나눔"
+    member_requirement: "any", participant_limit: null, manager_ok: true, submanager_ok: true, regular_ok: true, starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null, reason: "나눔"
 };
 const httpError = (status: number, message: string) => Object.assign(new Error(message), {status});
 

@@ -7,7 +7,7 @@ import {imageIdentity} from "../dc/post-images";
 import type {CommentPlan, Live, NewPost} from "./candidate";
 import type {EngineDeps} from "./engine";
 import type {Notifier} from "./notifier";
-import {containsSecret, eligible, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, hasStartHint, type Plan} from "./planner";
+import {containsSecret, eligible, END_MARGIN_MS, roleAllowed, findBaitWord, findInjectionWord, findPrivacyProbe, hasStartHint, type Plan} from "./planner";
 import type {SleepState} from "./sleep-state";
 import {WallTimer} from "./wall-timer";
 
@@ -141,8 +141,8 @@ export class Dispatcher {
         const attempts = plan.attempts.filter((attempt) => {
             if (!allowed.has(attempt.accountId)) return false;
             const candidate = candidates.get(attempt.accountId);
-            // 로그아웃된 계정은 시도해서 실패로 남기고, 로그인된 계정은 바뀐 계정 종류로 자격을 다시 봅니다.
-            return !candidate || eligible(candidate, plan.requirement);
+            // 로그아웃된 계정은 시도해서 실패로 남기고, 로그인된 계정은 바뀐 계정 종류와 완장으로 자격을 다시 봅니다.
+            return !candidate || (eligible(candidate, plan.requirement) && (!plan.roles || roleAllowed(candidate, latest.galleryId, plan.roles) === true));
         });
         if (attempts.length === 0) return {reason: "대기 계정 설정이 바뀌어 줄을 설 계정이 없어 취소함"};
         return {attempts};

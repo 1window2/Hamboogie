@@ -8,6 +8,16 @@ export type GiveawayCategory = "food" | "all";
 /** 로그인한 계정의 종류입니다. 로그인하면 유동이 아니므로 고닉/반고닉 둘 중 하나입니다. */
 export type MemberType = "gonick" | "semi";
 
+/** 갤러리에서 맡은 완장입니다. 매니저(주딱)인지 부매니저(파딱)인지 알 수 없으면 staff입니다. */
+export type GalleryRole = "manager" | "submanager" | "staff";
+
+/** 계정이 매니저나 부매니저인 갤러리입니다. */
+export interface ManagedGallery {
+    galleryId: string;
+    name: string;
+    role: GalleryRole;
+}
+
 export interface GalleryConfig {
     id: string;
     /** URL상의 갤러리 ID입니다. 예: `gf2` */
@@ -113,7 +123,11 @@ export type AccountStatus =
     | {state: "logged_out"}
     | {state: "logging_in"}
     | {state: "otp_required"; message: string}
-    | {state: "logged_in"; nickname: string; memberType: MemberType | null; dcconCount: number; dcconError?: string}
+    | {
+        state: "logged_in"; nickname: string; memberType: MemberType | null; dcconCount: number; dcconError?: string;
+        /** 매니저나 부매니저인 갤러리입니다. 아직 알아내지 못했으면 없고, 그 이유가 `managedError`입니다. */
+        managedGalleries?: ManagedGallery[]; managedError?: string;
+    }
     /**
      * `retryAt`이 있으면 일시적인 오류(네트워크, 서버 오류, app_id 거절)라 그 시각에 자동으로 다시 로그인합니다.
      * `failingSince`는 그렇게 실패하기 시작한 시각입니다.

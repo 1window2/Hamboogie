@@ -8,7 +8,7 @@ import {describeDecision, STALE_POST_MS, toPostInput, type Analysis, type Candid
 import type {Dispatcher} from "./dispatcher";
 import type {EngineDeps} from "./engine";
 import type {Notifier} from "./notifier";
-import {brief, findInjectionWord, hasLineAndDeadline, makePlan, type Plan} from "./planner";
+import {brief, findInjectionWord, hasLineAndDeadline, makePlan, roleIn, type Plan} from "./planner";
 import {LONG_SLEEP_MS, type SleepState} from "./sleep-state";
 
 /** LLM 요청 한 번에 묶어 보낼 최대 글 수입니다. 40개까지 묶어도 판단이 거의 흔들리지 않는 것을 확인했습니다. */
@@ -134,7 +134,7 @@ export class Judge {
         let startedAt = this.host.now();
         const request = async () => {
             await this.llm.request(gallery.galleryId);
-            return decideGroup(provider, group.map(toPostInput));
+            return decideGroup(provider, group.map((candidate) => this.postInput(gallery, candidate)));
         };
         let decisions: (Decision | null)[];
         try {
@@ -194,7 +194,7 @@ export class Judge {
         if (!this.llm.canUseToday()) return null;
         try {
             await this.llm.request(gallery.galleryId);
-            const decision = await provider.decide(toPostInput(candidate));
+            const decision = await provider.decide(this.postInput(gallery, candidate));
             this.recordJudgment(gallery, "batch", [candidate], [decision]);
             return decision;
         } catch (error) {
@@ -261,7 +261,7 @@ export class Judge {
                 return {kind: "notify", reason: `${why} 사진까지 보고 확인하지 못함`};
             }
             await this.llm.request(gallery.galleryId);
-            const decision = await provider.decide({...toPostInput(candidate), images});
+            const decision = await provider.decide({...this.postInput(gallery, candidate), images});
             this.recordJudgment(gallery, "confirm", [candidate], [decision], images.length);
             const photos = images.length > 0 ? `, 사진 ${images.length}장` : "";
             deps.logger.info(`2차 확인${photos}: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`, context);
@@ -282,11 +282,18 @@ export class Judge {
      * LLM에 보낸 내용(요청과 똑같이 만든 메시지)과 판단 원문을 남깁니다.
      * @param imageCount 글 하나를 판단할 때 함께 보낸 사진 수입니다.
      */
+    /** LLM에 보낼 글입니다. 대기 계정마다 이 갤러리에서 맡은 완장(매니저, 부매니저, 일반 갤럼)을 함께 보냅니다. */
+    private postInput(gallery: GalleryConfig, candidate: Candidate): PostInput {
+        const {accounts, settings} = this.host.deps;
+        const roles = accounts.candidates(settings().accounts, gallery.accountIds).map((account) => roleIn(account, gallery.galleryId));
+        return {...toPostInput(candidate), accounts: {galleryId: gallery.galleryId, roles}};
+    }
+
     private recordJudgment(gallery: GalleryConfig, kind: JudgmentRecord["kind"], group: Candidate[], decisions: (Decision | null)[], imageCount = 0): void {
         const {deps} = this.host;
         if (!deps.recordJudgment) return;
         const {llm} = deps.settings();
-        const posts = group.map(toPostInput);
+        const posts = group.map((candidate) => this.postInput(gallery, candidate));
         const single = group.length === 1;
         deps.recordJudgment({
             time: this.host.now(),
@@ -294,7 +301,7 @@ export class Judge {
             kind,
             model: `${llm.provider}/${llm.models[llm.provider]}`,
             systemPrompt: single ? "SYSTEM_PROMPT" : "BATCH_SYSTEM_PROMPT",
-            message: single ? buildUserMessage(posts[0]!.title, posts[0]!.body, posts[0]!.postedAt, imageCount) : buildBatchMessage(posts),
+            message: single ? buildUserMessage(posts[0]!.title, posts[0]!.body, posts[0]!.postedAt, imageCount, posts[0]!.accounts) : buildBatchMessage(posts, undefined, posts[0]!.accounts),
             // 디시가 준 작성 시각 문자열도 남겨 두어, 작성 시각을 제대로 읽었는지 나중에 확인할 수 있게 합니다.
             posts: group.map((candidate) => ({
                 no: candidate.post.no, title: candidate.title, bodyRead: candidate.bodyRead, keyword: candidate.keyword,

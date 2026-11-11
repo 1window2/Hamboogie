@@ -1,7 +1,7 @@
-import type {GalleryConfig, MemberType} from "@shared/types";
+import type {GalleryConfig, GalleryRole, MemberType} from "@shared/types";
 import {DEFAULT_COMMENT_TEXT} from "@shared/settings";
 import {hasHiddenCharacter, normalizeForMatch, truncateChars} from "@shared/text";
-import {DAY_MS, kstDayStart} from "@shared/time";
+import {DAY_MS, formatKst, kstDayStart} from "@shared/time";
 import type {Decision} from "../llm/decision";
 
 export interface OwnedDccon {
@@ -21,6 +21,38 @@ export interface CandidateAccount {
     dccons: OwnedDccon[];
     /** 정해진 문구나 디시콘이 없는 줄에 "줄" 대신 달 기본 디시콘 가운데 지금 가진 것입니다. */
     defaultDccons?: OwnedDccon[];
+    /** 매니저나 부매니저인 갤러리(갤러리 ID → 완장)입니다. 아직 알아내지 못했으면 null(또는 없음)입니다. */
+    roles?: Record<string, GalleryRole> | null;
+}
+
+/** 글의 완장 조건("완장 제외", "파딱만" 등)에 따라 줄을 설 수 있는 계정입니다. */
+export interface RoleRule {
+    manager: boolean;
+    submanager: boolean;
+    regular: boolean;
+}
+
+/** 이 갤러리에서 이 계정이 맡은 완장입니다. 완장이 아니면 "regular", 매니저인 갤러리를 아직 알아내지 못했으면 null입니다. */
+export function roleIn(account: Pick<CandidateAccount, "roles">, galleryId: string): GalleryRole | "regular" | null {
+    if (!account.roles) return null;
+    return account.roles[galleryId] ?? "regular";
+}
+
+/** 계정이 글의 완장 조건에 맞는지입니다. 완장인지 모르거나 매니저인지 부매니저인지 몰라 가릴 수 없으면 null입니다. */
+export function roleAllowed(account: Pick<CandidateAccount, "roles">, galleryId: string, rule: RoleRule): boolean | null {
+    if (rule.manager && rule.submanager && rule.regular) return true;
+    switch (roleIn(account, galleryId)) {
+        case null:
+            return null;
+        case "regular":
+            return rule.regular;
+        case "manager":
+            return rule.manager;
+        case "submanager":
+            return rule.submanager;
+        case "staff":
+            return rule.manager === rule.submanager ? rule.manager : null;
+    }
 }
 
 export type CommentContent = {type: "text"; text: string} | {type: "dccon"; dccon: OwnedDccon};
@@ -36,6 +68,8 @@ export type Plan =
         deadline?: number;
         /** 예약한 뒤 설정이 바뀌었을 때 실행 직전에 다시 확인하려고 남겨 둡니다. */
         requirement: Decision["member_requirement"];
+        /** 글의 완장 조건입니다. 실행 직전에 계정이 아직 조건에 맞는지 다시 확인합니다. */
+        roles?: RoleRule;
         isFood: boolean;
         /** 글에 줄 서기 시작 시각이 있어 그 시각에 맞춰 섰는지입니다. 실행 직전에 글이 바뀌어 시작 시각이 새로 생겼는지 볼 때 씁니다. */
         hasStartTime?: boolean;
@@ -267,6 +301,34 @@ export function hasLineAndDeadline(postText: string): boolean {
 const BARE_MINUTE = /(?<!\d|\d시)(\d{1,2})분(?!뒤|후|전|동안|간|만에|째)/g;
 const HOUR_MS = 60 * 60 * 1000;
 
+/** "20분까지", "9분 59초 마감"처럼 시 없이 분(과 초)만 쓴 마감입니다. 공백을 지운 글에서 찾습니다. */
+const BARE_DEADLINE = /(?<!\d|\d시)(\d{1,2})분(?:(\d{1,2})초)?(?:까지|마감)/g;
+/** "8시 20분까지", "17:20 마감"처럼 시까지 쓴 마감입니다. 공백을 지운 글에서 찾습니다. */
+const HOUR_DEADLINE = /\d시(?:\d{1,2}분)?(?:\d{1,2}초)?(?:까지|마감)|\d:\d{2}(?::\d{2})?(?:까지|마감)/;
+
+/**
+ * 글의 마감이 시 없이 분만 쓴 것("20분까지") 하나뿐이면 글을 올린 뒤 처음 오는 그 분을 돌려줍니다.
+ * LLM이 이런 마감의 시를 자주 틀려(17:57에 올린 글의 "20분까지"를 "17:30"으로 쓰는 등) 코드로 셉니다.
+ * 그런 마감이 없거나, 서로 다른 것이 여럿이거나, 시까지 쓴 마감도 함께 있으면 null입니다(LLM이 읽은 시각을 씁니다).
+ *
+ * @param postedFrom 글을 올렸을 수 있는 가장 이른 시각입니다.
+ */
+export function bareMinuteDeadline(postText: string, postedFrom: number): number | null {
+    const text = normalizeForMatch(postText);
+    if (HOUR_DEADLINE.test(text)) return null;
+    const found = new Set<number>();
+    for (const match of text.matchAll(BARE_DEADLINE)) {
+        const minutes = Number(match[1]);
+        const seconds = Number(match[2] ?? 0);
+        if (minutes <= 59 && seconds <= 59) found.add((minutes * 60 + seconds) * 1000);
+    }
+    if (found.size !== 1) return null;
+    // 한국 시간은 UTC와 정확히 몇 시간 차이라 정시도 같습니다.
+    let at = Math.floor(postedFrom / HOUR_MS) * HOUR_MS + [...found][0]!;
+    while (at < postedFrom) at += HOUR_MS;
+    return at;
+}
+
 /**
  * LLM이 시 없이 분만 쓴 시각을 글을 올린 시각보다 이르게 바꿨으면(17:57에 올린 글의 "20분까지"를 "17:20"으로) 글을 올린 뒤 처음 오는 그 분으로 고칩니다.
  * 글에 "17시 20분까지"처럼 시까지 적었거나 그 분을 시 없이 쓴 말이 글에 없으면 그대로 둡니다(이미 지난 시각으로 봅니다).
@@ -350,19 +412,27 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     // 먹을 것인지 알 수 없는 글은 넘기지 않고, 아래에서 줄을 설 수 있는 글이면 알립니다.
     if (gallery.category === "food" && !decision.is_food && !decision.food_unknown) return {kind: "skip", reason: "음식 나눔이 아님"};
 
-    let endsAt: number | null = null;
-    if (decision.ends_at) {
+    let endsAt = bareMinuteDeadline(postText, clockBase - deadlineSlackMs);
+    const endsText = endsAt !== null ? formatKst(endsAt).slice(11) : decision.ends_at;
+    if (endsAt === null && decision.ends_at) {
         endsAt = resolveClock(decision.ends_at, clockBase);
         if (endsAt === null) return {kind: "notify", reason: `마감 시각을 해석할 수 없음: ${brief(decision.ends_at, 20)}`};
         endsAt = fixBareMinute(endsAt, clockBase - deadlineSlackMs, postText);
         // 작성 시각을 초까지 모르면 "5분 후 마감" 같은 상대 마감이 실제보다 늦게 계산될 수 있어 그만큼 앞당겨 봅니다.
         endsAt -= deadlineSlackMs;
-        if (endsAt - END_MARGIN_MS <= detectedAt) return {kind: "skip", reason: `마감 시각(${decision.ends_at})이 지남`};
     }
+    if (endsAt !== null && endsAt - END_MARGIN_MS <= detectedAt) return {kind: "skip", reason: `마감 시각(${endsText})이 지남`};
 
     if (accounts.length === 0) return {kind: "notify", reason: "로그인된 대기 계정이 없어 줄을 설 수 없습니다. 계정 탭에서 로그인 상태를 확인하세요."};
-    const qualified = accounts.filter((account) => eligible(account, decision.member_requirement));
-    if (qualified.length === 0) return {kind: "skip", reason: "참여 자격에 맞는 대기 계정이 없음"};
+    const roles: RoleRule = {manager: decision.manager_ok, submanager: decision.submanager_ok, regular: decision.regular_ok};
+    const members = accounts.filter((account) => eligible(account, decision.member_requirement));
+    const qualified = members.filter((account) => roleAllowed(account, gallery.galleryId, roles) === true);
+    if (qualified.length === 0) {
+        if (members.some((account) => roleAllowed(account, gallery.galleryId, roles) === null)) {
+            return {kind: "notify", reason: "글에 완장 조건이 있는데 대기 계정이 이 갤러리의 매니저·부매니저인지 확인하지 못함"};
+        }
+        return {kind: "skip", reason: "참여 자격에 맞는 대기 계정이 없음"};
+    }
 
     if (decision.needs_extra_action) return {kind: "notify", reason: `댓글 외의 행동이 필요함: ${brief(decision.reason)}`};
     // 고닉·회원 같은 자격은 계정으로 가릴 수 있지만, 그 밖의 제한("못 받은 사람만" 등)은 계정이 맞는지 알 수 없어 사람이 판단합니다.
@@ -396,9 +466,9 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     notBefore += gallery.delaySec * 1000;
     // 줄 서기 지연이나 시작 시각 대기 때문에 마감 뒤에 댓글을 달게 되면 처음부터 서지 않습니다.
     if (endsAt !== null && notBefore > endsAt - END_MARGIN_MS) {
-        return {kind: "skip", reason: `줄 서기 지연 때문에 마감 시각(${decision.ends_at}) 전에 댓글을 달 수 없음`};
+        return {kind: "skip", reason: `줄 서기 지연 때문에 마감 시각(${endsText}) 전에 댓글을 달 수 없음`};
     }
-    const common = {notBefore, requirement: decision.member_requirement, isFood: decision.is_food, hasStartTime: Boolean(decision.starts_at), ...(endsAt !== null ? {deadline: endsAt} : {})};
+    const common = {notBefore, requirement: decision.member_requirement, ...(roles.manager && roles.submanager && roles.regular ? {} : {roles}), isFood: decision.is_food, hasStartTime: Boolean(decision.starts_at), ...(endsAt !== null ? {deadline: endsAt} : {})};
 
     // 기본 디시콘을 정해 둔 계정은 "줄" 대신 그중 하나를 무작위로 답니다. 글이 디시콘 댓글을 인정하지 않으면 "줄"입니다.
     const pickDefault = (account: CandidateAccount): CommentContent | null => {

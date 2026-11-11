@@ -9,6 +9,7 @@ import {
     buildUserMessage,
     DecisionSchema,
     SYSTEM_PROMPT,
+    type AccountsContext,
     type Decision
 } from "./decision";
 import {errorMessage} from "@shared/errors";
@@ -36,6 +37,8 @@ export interface PostInput {
     postedAt?: number;
     /** 글에 올린 사진입니다. 글 하나를 판단할 때(`decide`)만 보냅니다. */
     images?: LlmImage[];
+    /** 대기 계정마다 이 갤러리에서 맡은 완장입니다. 묶어 보낼 때는 첫 글의 것을 씁니다(모두 같은 갤러리 글입니다). */
+    accounts?: AccountsContext;
 }
 
 export interface LlmProvider {
@@ -316,10 +319,10 @@ export function providerFrom(structured: Structured): LlmProvider {
     return {
         decide: (post) => structured({
             schema: DecisionSchema, name: "decision", system: SYSTEM_PROMPT,
-            user: buildUserMessage(post.title, post.body, post.postedAt, post.images?.length ?? 0), images: post.images
+            user: buildUserMessage(post.title, post.body, post.postedAt, post.images?.length ?? 0, post.accounts), images: post.images
         }),
         async decideMany(posts) {
-            const result = await structured({schema: BatchDecisionSchema, name: "decisions", system: BATCH_SYSTEM_PROMPT, user: buildBatchMessage(posts)});
+            const result = await structured({schema: BatchDecisionSchema, name: "decisions", system: BATCH_SYSTEM_PROMPT, user: buildBatchMessage(posts, undefined, posts[0]?.accounts)});
             const decisions: (Decision | null)[] = posts.map(() => null);
             for (const {index, ...decision} of result.decisions) {
                 // 번호는 1부터입니다. 범위를 벗어나거나 같은 번호가 또 오면 무시합니다.

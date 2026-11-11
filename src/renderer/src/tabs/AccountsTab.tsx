@@ -3,6 +3,7 @@ import type {AccountConfig, AccountStatus, AccountView} from "@shared/types";
 import type {SettingsTabProps} from "../App";
 import {isCommitEnter} from "../components/keys";
 import {DefaultDccons} from "../components/DefaultDccons";
+import {RoleBadge} from "../components/RoleBadge";
 import {SecretField} from "../components/SecretField";
 import {useConfirm} from "../components/ConfirmDialog";
 import {applyAccountChange, draftAfterAccountChange, type AccountChange} from "../components/account-change";
@@ -144,6 +145,20 @@ function AccountCard({account, view, onChange, run, onRemove, removing, saved}: 
                 </button>
                 <button className="button danger small" onClick={onRemove} disabled={removing}>삭제</button>
             </div>
+            {status.state === "logged_in" && (
+                <div className="managed-galleries">
+                    <span className="muted">매니저·부매니저인 갤러리</span>
+                    {!status.managedGalleries ? <span className="muted">{status.managedError}</span>
+                        : status.managedGalleries.length === 0 ? <span className="muted">없음</span>
+                        : (
+                            <ul>
+                                {status.managedGalleries.map((gallery) => (
+                                    <li key={gallery.galleryId}><RoleBadge role={gallery.role}/> {gallery.name} <span className="muted">({gallery.galleryId})</span></li>
+                                ))}
+                            </ul>
+                        )}
+                </div>
+            )}
         </section>
     );
 }

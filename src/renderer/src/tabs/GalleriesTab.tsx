@@ -8,6 +8,7 @@ import type {DraftSetter} from "../App";
 import {NumberInput} from "../components/NumberInput";
 import {KeywordEditor} from "../components/KeywordEditor";
 import {AutoStopCard} from "../components/AutoStopCard";
+import {galleryRole, RoleBadge} from "../components/RoleBadge";
 import {useConfirm} from "../components/ConfirmDialog";
 import {galleryIdFromInput} from "@shared/text";
 import {errorMessage} from "@shared/errors";
@@ -127,6 +128,12 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
         if (!account) return id;
         return account.status.state === "logged_in" ? `${account.status.nickname} (${account.loginId})` : account.loginId || "(아이디 없음)";
     };
+    // 이 갤러리의 매니저·부매니저인 계정은 이름 오른쪽에 표시를 답니다.
+    const roleBadge = (id: string) => {
+        const account = accounts.find((item) => item.id === id);
+        const role = account ? galleryRole(account.status, gallery.galleryId.trim()) : null;
+        return role ? <> <RoleBadge role={role}/></> : null;
+    };
 
     return (
         <section className="card">
@@ -182,7 +189,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                 <ol className="account-order">
                     {gallery.accountIds.map((id, index) => (
                         <li key={id}>
-                            <span>{index + 1}. {accountLabel(id)}</span>
+                            <span>{index + 1}. {accountLabel(id)}{roleBadge(id)}</span>
                             <button className="button small" disabled={index === 0} aria-label={`${accountLabel(id)} 우선순위 올리기`} onClick={() => moveAccount(index, -1)}>▲</button>
                             <button className="button small" disabled={index === gallery.accountIds.length - 1} aria-label={`${accountLabel(id)} 우선순위 내리기`} onClick={() => moveAccount(index, 1)}>▼</button>
                             <button className="button small" onClick={() => toggleAccount(id, false)}>빼기</button>
@@ -192,7 +199,7 @@ function GalleryCard({gallery, accounts, status, onChange, onRemove}: {
                 <div className="row wrap">
                     {accounts.filter((account) => !gallery.accountIds.includes(account.id)).map((account) => (
                         <button key={account.id} className="button small" onClick={() => toggleAccount(account.id, true)}>
-                            + {accountLabel(account.id)}
+                            + {accountLabel(account.id)}{roleBadge(account.id)}
                         </button>
                     ))}
                 </div>
