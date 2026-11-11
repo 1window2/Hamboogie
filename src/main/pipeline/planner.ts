@@ -32,6 +32,11 @@ export interface RoleRule {
     regular: boolean;
 }
 
+/** 완장 조건이 없는지(매니저·부매니저·일반 갤럼 모두 설 수 있는지)입니다. */
+function allowsAnyRole(rule: RoleRule): boolean {
+    return rule.manager && rule.submanager && rule.regular;
+}
+
 /** 이 갤러리에서 이 계정이 맡은 완장입니다. 완장이 아니면 "regular", 매니저인 갤러리를 아직 알아내지 못했으면 null입니다. */
 export function roleIn(account: Pick<CandidateAccount, "roles">, galleryId: string): GalleryRole | "regular" | null {
     if (!account.roles) return null;
@@ -40,7 +45,7 @@ export function roleIn(account: Pick<CandidateAccount, "roles">, galleryId: stri
 
 /** 계정이 글의 완장 조건에 맞는지입니다. 매니저인 갤러리를 아직 알아내지 못해 가릴 수 없으면 null입니다. */
 export function roleAllowed(account: Pick<CandidateAccount, "roles">, galleryId: string, rule: RoleRule): boolean | null {
-    if (rule.manager && rule.submanager && rule.regular) return true;
+    if (allowsAnyRole(rule)) return true;
     switch (roleIn(account, galleryId)) {
         case null:
             return null;
@@ -295,9 +300,9 @@ export function hasLineAndDeadline(postText: string): boolean {
     return LINE_WORD.test(text) && DEADLINE_HINT.test(text);
 }
 
+const HOUR_MS = 60 * 60 * 1000;
 /** "20분까지"처럼 시 없이 분만 쓴 시각입니다. "8시 20분", "20분 뒤", "120분"은 해당하지 않습니다. 공백을 지운 글에서 찾습니다. */
 const BARE_MINUTE = /(?<!\d|\d시)(\d{1,2})분(?!뒤|후|전|동안|간|만에|째)/g;
-const HOUR_MS = 60 * 60 * 1000;
 
 /** "20분까지", "9분 59초 마감"처럼 시 없이 분(과 초)만 쓴 마감입니다. 공백을 지운 글에서 찾습니다. */
 const BARE_DEADLINE = /(?<!\d|\d시)(\d{1,2})분(?:(\d{1,2})초)?(?:까지|마감)/g;
@@ -466,7 +471,7 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     if (endsAt !== null && notBefore > endsAt - END_MARGIN_MS) {
         return {kind: "skip", reason: `줄 서기 지연 때문에 마감 시각(${endsText}) 전에 댓글을 달 수 없음`};
     }
-    const common = {notBefore, requirement: decision.member_requirement, ...(roles.manager && roles.submanager && roles.regular ? {} : {roles}), isFood: decision.is_food, hasStartTime: Boolean(decision.starts_at), ...(endsAt !== null ? {deadline: endsAt} : {})};
+    const common = {notBefore, requirement: decision.member_requirement, ...(allowsAnyRole(roles) ? {} : {roles}), isFood: decision.is_food, hasStartTime: Boolean(decision.starts_at), ...(endsAt !== null ? {deadline: endsAt} : {})};
 
     // 기본 디시콘을 정해 둔 계정은 "줄" 대신 그중 하나를 무작위로 답니다. 글이 디시콘 댓글을 인정하지 않으면 "줄"입니다.
     const pickDefault = (account: CandidateAccount): CommentContent | null => {

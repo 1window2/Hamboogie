@@ -7,7 +7,7 @@ import {imageIdentity} from "../dc/post-images";
 import type {CommentPlan, Live, NewPost} from "./candidate";
 import type {EngineDeps} from "./engine";
 import type {Notifier} from "./notifier";
-import {containsSecret, eligible, END_MARGIN_MS, roleAllowed, findBaitWord, findInjectionWord, findPrivacyProbe, hasStartHint, type Plan} from "./planner";
+import {containsSecret, eligible, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, hasStartHint, roleAllowed, type Plan} from "./planner";
 import type {SleepState} from "./sleep-state";
 import {WallTimer} from "./wall-timer";
 

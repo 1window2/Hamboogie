@@ -132,9 +132,11 @@ export class Judge {
         const {sleep} = this.host;
         const context = {galleryId: gallery.galleryId};
         let startedAt = this.host.now();
+        let posts: PostInput[] = [];
         const request = async () => {
             await this.llm.request(gallery.galleryId);
-            return decideGroup(provider, group.map((candidate) => this.postInput(gallery, candidate)));
+            posts = this.postInputs(gallery, group);
+            return decideGroup(provider, posts);
         };
         let decisions: (Decision | null)[];
         try {
@@ -163,7 +165,7 @@ export class Judge {
         }
         const found = group.filter((_, index) => decisions[index]?.is_giveaway).length;
         // 나눔으로 판단한 글이 있거나 키워드에 걸린 글이 있는 묶음은 남겨, 놓친 글이나 판단이 흔들린 묶음을 나중에 되짚을 수 있게 합니다.
-        if (found > 0 || group.some((candidate) => candidate.keyword)) this.recordJudgment(gallery, "batch", group, decisions);
+        if (found > 0 || group.some((candidate) => candidate.keyword)) this.recordJudgment(gallery, "batch", group, posts, decisions);
         logger.info(`새 글 ${group.length}개를 LLM 요청 한 번으로 판단: 나눔 ${found}개 (${((this.host.now() - startedAt) / 1000).toFixed(1)}초)`, context);
         return decisions;
     }
@@ -194,8 +196,9 @@ export class Judge {
         if (!this.llm.canUseToday()) return null;
         try {
             await this.llm.request(gallery.galleryId);
-            const decision = await provider.decide(this.postInput(gallery, candidate));
-            this.recordJudgment(gallery, "batch", [candidate], [decision]);
+            const posts = this.postInputs(gallery, [candidate]);
+            const decision = await provider.decide(posts[0]!);
+            this.recordJudgment(gallery, "batch", [candidate], posts, [decision]);
             return decision;
         } catch (error) {
             this.host.deps.logger.warn(`글 하나로 다시 판단하지 못했습니다: ${errorMessage(error)}`, {galleryId: gallery.galleryId, postNo: candidate.post.no});
@@ -261,8 +264,9 @@ export class Judge {
                 return {kind: "notify", reason: `${why} 사진까지 보고 확인하지 못함`};
             }
             await this.llm.request(gallery.galleryId);
-            const decision = await provider.decide({...this.postInput(gallery, candidate), images});
-            this.recordJudgment(gallery, "confirm", [candidate], [decision], images.length);
+            const post = {...this.postInputs(gallery, [candidate])[0]!, images};
+            const decision = await provider.decide(post);
+            this.recordJudgment(gallery, "confirm", [candidate], [post], [decision], images.length);
             const photos = images.length > 0 ? `, 사진 ${images.length}장` : "";
             deps.logger.info(`2차 확인${photos}: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`, context);
             if (!decision.is_giveaway) return missedLinePlan(candidate, decision) ?? {kind: "skip", reason: NOT_GIVEAWAY_ON_RECHECK};
@@ -278,22 +282,22 @@ export class Judge {
         }
     }
 
-    /**
-     * LLM에 보낸 내용(요청과 똑같이 만든 메시지)과 판단 원문을 남깁니다.
-     * @param imageCount 글 하나를 판단할 때 함께 보낸 사진 수입니다.
-     */
-    /** LLM에 보낼 글입니다. 대기 계정마다 이 갤러리에서 맡은 완장(매니저, 부매니저, 일반 갤럼)을 함께 보냅니다. */
-    private postInput(gallery: GalleryConfig, candidate: Candidate): PostInput {
+    /** LLM에 보낼 글들입니다. 대기 계정마다 이 갤러리에서 맡은 완장(매니저, 부매니저, 일반 갤럼)을 한 번만 구해 함께 보냅니다. */
+    private postInputs(gallery: GalleryConfig, group: Candidate[]): PostInput[] {
         const {accounts, settings} = this.host.deps;
         const roles = accounts.candidates(settings().accounts, gallery.accountIds).map((account) => roleIn(account, gallery.galleryId));
-        return {...toPostInput(candidate), accounts: {galleryId: gallery.galleryId, roles}};
+        return group.map((candidate) => ({...toPostInput(candidate), accounts: {galleryId: gallery.galleryId, roles}}));
     }
 
-    private recordJudgment(gallery: GalleryConfig, kind: JudgmentRecord["kind"], group: Candidate[], decisions: (Decision | null)[], imageCount = 0): void {
+    /**
+     * LLM에 보낸 내용(보낸 글로 요청과 똑같이 만든 메시지)과 판단 원문을 남깁니다.
+     * @param posts LLM에 보낸 글입니다(`postInputs`로 만든 것).
+     * @param imageCount 글 하나를 판단할 때 함께 보낸 사진 수입니다.
+     */
+    private recordJudgment(gallery: GalleryConfig, kind: JudgmentRecord["kind"], group: Candidate[], posts: PostInput[], decisions: (Decision | null)[], imageCount = 0): void {
         const {deps} = this.host;
         if (!deps.recordJudgment) return;
         const {llm} = deps.settings();
-        const posts = group.map((candidate) => this.postInput(gallery, candidate));
         const single = group.length === 1;
         deps.recordJudgment({
             time: this.host.now(),
