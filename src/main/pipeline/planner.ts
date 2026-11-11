@@ -252,6 +252,38 @@ export function hasStartHint(postText: string): boolean {
     return START_HINT.test(postText);
 }
 
+/** "줄"이라는 말입니다. "줄어들다", "줄여" 같은 말은 뺍니다. 공백을 지운 글에서 찾습니다. */
+const LINE_WORD = /줄(?![어여였])/;
+/** "20분까지", "8시 마감", "17:20까지" 같은 마감 시각입니다. 공백을 지운 글에서 찾습니다. */
+const DEADLINE_HINT = /\d([시분초]|:\d{2})(까지|마감)/;
+
+/** 글에 "줄"과 마감 시각이 함께 있는지입니다. 이런 글은 나눔 줄일 때가 많아, LLM이 나눔이 아니라고 해도 넘기지 않고 알립니다. */
+export function hasLineAndDeadline(postText: string): boolean {
+    const text = normalizeForMatch(postText);
+    return LINE_WORD.test(text) && DEADLINE_HINT.test(text);
+}
+
+/** "20분까지"처럼 시 없이 분만 쓴 시각입니다. "8시 20분", "20분 뒤", "120분"은 해당하지 않습니다. 공백을 지운 글에서 찾습니다. */
+const BARE_MINUTE = /(?<!\d|\d시)(\d{1,2})분(?!뒤|후|전|동안|간|만에|째)/g;
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * LLM이 시 없이 분만 쓴 시각을 글을 올린 시각보다 이르게 바꿨으면(17:57에 올린 글의 "20분까지"를 "17:20"으로) 글을 올린 뒤 처음 오는 그 분으로 고칩니다.
+ * 글에 "17시 20분까지"처럼 시까지 적었거나 그 분을 시 없이 쓴 말이 글에 없으면 그대로 둡니다(이미 지난 시각으로 봅니다).
+ *
+ * @param postedFrom 글을 올렸을 수 있는 가장 이른 시각입니다.
+ */
+export function fixBareMinute(at: number, postedFrom: number, postText: string): number {
+    if (at >= postedFrom) return at;
+    // 한국 시간은 UTC와 정확히 몇 시간 차이라 분은 같습니다.
+    const minute = Math.floor(at / 60000) % 60;
+    const bare = [...normalizeForMatch(postText).matchAll(BARE_MINUTE)].some((match) => Number(match[1]) === minute);
+    if (!bare) return at;
+    let fixed = at;
+    while (fixed < postedFrom) fixed += HOUR_MS;
+    return fixed;
+}
+
 /** 연락처나 외부 링크로 이어지는 단어입니다. */
 const CONTACT_WORDS = ["카톡", "카카오", "오픈채팅", "텔레", "telegram", "디코", "discord", "라인", "연락", "전화", "번호", "계좌", "주소", "링크"];
 
@@ -315,12 +347,14 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     const {detectedAt, deadlineSlackMs = 0, random = Math.random} = times;
     const clockBase = times.postedAt ?? detectedAt;
     if (!decision.is_giveaway) return {kind: "skip", reason: "나눔 글이 아님"};
-    if (gallery.category === "food" && !decision.is_food) return {kind: "skip", reason: "음식 나눔이 아님"};
+    // 먹을 것인지 알 수 없는 글은 넘기지 않고, 아래에서 줄을 설 수 있는 글이면 알립니다.
+    if (gallery.category === "food" && !decision.is_food && !decision.food_unknown) return {kind: "skip", reason: "음식 나눔이 아님"};
 
     let endsAt: number | null = null;
     if (decision.ends_at) {
         endsAt = resolveClock(decision.ends_at, clockBase);
         if (endsAt === null) return {kind: "notify", reason: `마감 시각을 해석할 수 없음: ${brief(decision.ends_at, 20)}`};
+        endsAt = fixBareMinute(endsAt, clockBase - deadlineSlackMs, postText);
         // 작성 시각을 초까지 모르면 "5분 후 마감" 같은 상대 마감이 실제보다 늦게 계산될 수 있어 그만큼 앞당겨 봅니다.
         endsAt -= deadlineSlackMs;
         if (endsAt - END_MARGIN_MS <= detectedAt) return {kind: "skip", reason: `마감 시각(${decision.ends_at})이 지남`};
@@ -331,6 +365,12 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     if (qualified.length === 0) return {kind: "skip", reason: "참여 자격에 맞는 대기 계정이 없음"};
 
     if (decision.needs_extra_action) return {kind: "notify", reason: `댓글 외의 행동이 필요함: ${brief(decision.reason)}`};
+    // 고닉·회원 같은 자격은 계정으로 가릴 수 있지만, 그 밖의 제한("못 받은 사람만" 등)은 계정이 맞는지 알 수 없어 사람이 판단합니다.
+    const limit = decision.participant_limit?.trim();
+    if (limit) return {kind: "notify", reason: `줄 설 수 있는 사람을 제한함: "${brief(limit, 40)}"`};
+    if (gallery.category === "food" && !decision.is_food) {
+        return {kind: "notify", reason: `먹을 것인지 알 수 없음: ${decision.item ? `"${brief(decision.item, 40)}"` : "주는 물건을 밝히지 않음"}`};
+    }
     // 아래 검사는 사진 속 글자(LLM이 옮겨 적은 것)도 함께 봅니다. 사진에 적은 봇 함정이나 지시를 프롬프트 규칙만으로 거르지 않게 합니다.
     // 요구 문구와 디시콘 이름은 실제 글자에 있는지 보는 것이라 글의 제목과 본문만 봅니다.
     const imageText = decision.image_text?.slice(0, IMAGE_TEXT_MAX) ?? "";
@@ -347,8 +387,9 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
 
     let notBefore = detectedAt;
     if (decision.starts_at) {
-        const startsAt = resolveClock(decision.starts_at, clockBase);
-        if (startsAt === null) return {kind: "notify", reason: `시작 시각을 해석할 수 없음: ${brief(decision.starts_at, 20)}`};
+        const resolved = resolveClock(decision.starts_at, clockBase);
+        if (resolved === null) return {kind: "notify", reason: `시작 시각을 해석할 수 없음: ${brief(decision.starts_at, 20)}`};
+        const startsAt = fixBareMinute(resolved, clockBase - deadlineSlackMs, postText);
         // 이미 시작했어도 정각 직후라면 여유 시간까지는 기다립니다.
         notBefore = Math.max(detectedAt, startsAt + START_MARGIN_MS);
     }

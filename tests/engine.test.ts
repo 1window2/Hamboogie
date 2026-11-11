@@ -318,8 +318,8 @@ describe("Engine 성공 알림", () => {
 });
 
 const GIVEAWAY = {
-    is_giveaway: true, is_food: true, line_method: "text" as const, line_text: null, dccon_keyword: null,
-    member_requirement: "any" as const, starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null, reason: "나눔"
+    is_giveaway: true, item: null, is_food: true, food_unknown: false, line_method: "text" as const, line_text: null, dccon_keyword: null,
+    member_requirement: "any" as const, participant_limit: null, starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null, reason: "나눔"
 };
 const NOT_GIVEAWAY = {...GIVEAWAY, is_giveaway: false, reason: "잡담"};
 
@@ -431,6 +431,20 @@ describe("Engine 새 글 묶음 판단", () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
         expect(written).toEqual([]);
         expect(logged(logger, "따로 다시 판단하니 나눔 글이 아님")).toBe(true);
+    });
+
+    it("나눔이 아니라고 판단해도 글에 \"줄\"과 마감 시각이 함께 있으면 넘기지 않고 알린다", async () => {
+        const {run, written, logger} = withGallery({2: {title: "남이 뿌린대 줄이래", body: "25분까지!"}, 3: {title: "부거줄 너무 길다", body: "다음엔 일찍 서야지"}}, {loggedIn: true, giveaway: () => false});
+        await run(gallery);
+        expect(written).toEqual([]);
+        expect(logger.recent().filter((entry) => entry.message.includes("나눔 글이 아니라고 판단했지만 글에 \"줄\"과 마감 시각이 함께 있어"))).toHaveLength(1);
+    });
+
+    it("다시 확인해서 나눔이 아니라고 해도 글에 \"줄\"과 마감 시각이 함께 있으면 알린다", async () => {
+        const {run, written, logger} = withGallery({2: {title: "치킨 나눔 줄", body: "10분까지"}, 3: {title: "잡담", body: ""}}, {loggedIn: true, confirm: () => false});
+        await run(gallery);
+        expect(written).toEqual([]);
+        expect(logged(logger, "나눔 글이 아니라고 판단했지만")).toBe(true);
     });
 
     it("새 글이 하나면 묶을 다른 글이 없으므로 다시 확인하지 않는다", async () => {

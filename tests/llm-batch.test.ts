@@ -3,8 +3,8 @@ import {buildBatchMessage, buildUserMessage} from "../src/main/llm/decision";
 import {providerFrom} from "../src/main/llm/providers";
 
 const base = {
-    is_giveaway: true, is_food: true, line_method: "text", line_text: null, dccon_keyword: null,
-    member_requirement: "any", starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null
+    is_giveaway: true, item: null, is_food: true, food_unknown: false, line_method: "text", line_text: null, dccon_keyword: null,
+    member_requirement: "any", participant_limit: null, starts_at: null, ends_at: null, text_only: false, needs_extra_action: false, image_text: null
 };
 
 describe("묶음 판단", () => {

@@ -8,7 +8,7 @@ import {describeDecision, STALE_POST_MS, toPostInput, type Analysis, type Candid
 import type {Dispatcher} from "./dispatcher";
 import type {EngineDeps} from "./engine";
 import type {Notifier} from "./notifier";
-import {brief, findInjectionWord, makePlan, type Plan} from "./planner";
+import {brief, findInjectionWord, hasLineAndDeadline, makePlan, type Plan} from "./planner";
 import {LONG_SLEEP_MS, type SleepState} from "./sleep-state";
 
 /** LLM 요청 한 번에 묶어 보낼 최대 글 수입니다. 40개까지 묶어도 판단이 거의 흔들리지 않는 것을 확인했습니다. */
@@ -23,6 +23,12 @@ const SINGLE_RETRY_MAX = 5;
 /** 글이 하나면 그 글 하나로, 여러 개면 묶어서 LLM 요청 한 번으로 판단합니다. 응답에 빠진 글은 null입니다. */
 async function decideGroup(provider: LlmProvider, posts: PostInput[]): Promise<(Decision | null)[]> {
     return posts.length === 1 ? [await provider.decide(posts[0]!)] : provider.decideMany(posts);
+}
+
+/** LLM이 나눔이 아니라고 했어도 글에 "줄"과 마감 시각이 함께 있으면 나눔 줄일 때가 많아 넘기지 않고 알립니다. 아니면 null입니다. */
+function missedLinePlan(candidate: Candidate, decision: Decision): Plan | null {
+    if (!hasLineAndDeadline(`${candidate.title}\n${candidate.body}`)) return null;
+    return {kind: "notify", reason: `나눔 글이 아니라고 판단했지만 글에 "줄"과 마감 시각이 함께 있어 직접 확인이 필요함 (LLM 근거: ${brief(decision.reason)})`};
 }
 
 /** LLM 판단을 바꾸려는 듯한 말이 든 글입니다. 다른 글과 묶으면 묶인 다른 글의 판단까지 흔들 수 있어 따로 묶습니다. */
@@ -204,6 +210,8 @@ export class Judge {
         // 나중에 놓친 글이나 잘못 선 글을 되짚을 수 있도록, 글마다 판단과 LLM의 근거를 남깁니다.
         if (!decision.is_giveaway) {
             logger.info(`나눔 아님: "${candidate.title}" (근거: ${decision.reason})`, postContext);
+            const missed = missedLinePlan(candidate, decision);
+            if (missed) await this.host.dispatcher.dispatch(gallery, candidate.post, missed, {live: {epoch}});
             return;
         }
         logger.info(`나눔으로 판단: "${candidate.title}" (${describeDecision(decision)}) (근거: ${decision.reason})`, postContext);
@@ -257,7 +265,7 @@ export class Judge {
             this.recordJudgment(gallery, "confirm", [candidate], [decision], images.length);
             const photos = images.length > 0 ? `, 사진 ${images.length}장` : "";
             deps.logger.info(`2차 확인${photos}: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`, context);
-            if (!decision.is_giveaway) return {kind: "skip", reason: NOT_GIVEAWAY_ON_RECHECK};
+            if (!decision.is_giveaway) return missedLinePlan(candidate, decision) ?? {kind: "skip", reason: NOT_GIVEAWAY_ON_RECHECK};
             return this.planFor(gallery, decision, candidate);
         } catch (error) {
             if (candidate.images.length > 0) return {kind: "notify", reason: `사진까지 보고 다시 판단하지 못함: ${errorMessage(error)}`};
