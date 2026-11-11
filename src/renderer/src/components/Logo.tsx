@@ -1,4 +1,4 @@
-/** 머리글 로고(버거 말풍선)입니다. 색은 테마 색(--brand-logo)을 따라, 밝은 화면은 남색, 어두운 화면은 아이보리로 칠합니다. */
+/** 머리글 로고(버거 말풍선)입니다. 색은 테마 색(--brand-logo)을 따라, 밝은 화면은 디시 파랑, 어두운 화면은 아이보리로 칠합니다. */
 export function Logo({size}: {size: number}) {
     return (
         <svg className="brand-logo" viewBox="0 0 32 32" width={size} height={size} aria-hidden="true">
