@@ -19,6 +19,8 @@ electronFuses:
   resetAdHocDarwinSignature: true
 win:
   target: nsis
+  # 16·32px 프레임은 작은 크기용으로 따로 그린 그림을 넣은 아이콘입니다(1024 아이콘을 줄이면 말풍선 꼬리가 사라짐).
+  icon: build/icon.ico
   artifactName: ${productName}-${version}-setup.${ext}
 nsis:
   oneClick: false
