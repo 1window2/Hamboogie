@@ -7,7 +7,7 @@ import {imageIdentity} from "../dc/post-images";
 import type {CommentPlan, Live, NewPost} from "./candidate";
 import type {EngineDeps} from "./engine";
 import type {Notifier} from "./notifier";
-import {containsSecret, eligible, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, hasStartHint, roleAllowed, type Plan} from "./planner";
+import {containsSecret, eligible, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, hasStartHint, roleAllowed, type CommentContent, type Plan} from "./planner";
 import type {SleepState} from "./sleep-state";
 import {WallTimer} from "./wall-timer";
 
@@ -239,12 +239,24 @@ export class Dispatcher {
             // 예약해 둔 사이, 또는 앞 계정이 실패해 재시도하는 사이 마감이 지났으면 달지 않습니다.
             if (plan.deadline !== undefined && this.host.now() > plan.deadline - END_MARGIN_MS) return cancel("마감 시각이 지나 댓글을 달지 않음");
 
-            const label = attempt.content.type === "text" ? `"${attempt.content.text}"` : `디시콘 "${attempt.content.dccon.title}"`;
+            const labelOf = (content: CommentContent) => content.type === "text" ? `"${content.text}"` : `디시콘 "${content.dccon.title}"`;
+            let label = labelOf(attempt.content);
             let failure: unknown = null;
             try {
                 await accounts.writeComment(attempt.accountId, gallery.galleryId, post.no, attempt.content);
             } catch (error) {
                 failure = error;
+            }
+            // 글이 요구하지 않은 기본 디시콘을 달지 못했으면(댓글이 달리지 않은 것이 확실할 때만) 같은 계정으로 "줄"을 대신 답니다.
+            if (failure !== null && attempt.fallback && isDefiniteCommentFailure(failure) && !isCaptchaFailure(failure)) {
+                logger.warn(`${prefix}${label}을(를) 달지 못해 ${labelOf(attempt.fallback)}로 다시 답니다: ${errorMessage(failure)}`, context);
+                label = labelOf(attempt.fallback);
+                failure = null;
+                try {
+                    await accounts.writeComment(attempt.accountId, gallery.galleryId, post.no, attempt.fallback);
+                } catch (error) {
+                    failure = error;
+                }
             }
             const nickname = accounts.nickname(attempt.accountId);
 

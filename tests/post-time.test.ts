@@ -43,9 +43,9 @@ describe("글을 올린 시각 추정", () => {
 
     it("LLM에 한국 시간으로 넘긴다", () => {
         expect(formatKst(kst(16, 19, 33))).toBe("2026-10-25 16:19:33");
-        expect(buildUserMessage("버거 나눔", "30분까지 줄", kst(16, 19, 33))).toContain("<posted_at>2026-10-25 16:19:33</posted_at>");
+        expect(buildUserMessage("버거 나눔", "30분까지 줄", kst(16, 19, 33))).toContain("<posted_at>16:19:33</posted_at>");
         expect(buildBatchMessage([{title: "a", body: "", no: 1, postedAt: kst(9, 5)}, {title: "b", body: ""}]))
-            .toMatch(/<post index="1" no="1">\n<posted_at>2026-10-25 09:05:00<\/posted_at>[\s\S]*<post index="2">\n<title>b/);
+            .toMatch(/<post index="1" no="1">\n<posted_at>09:05:00<\/posted_at>[\s\S]*<post index="2">\n<title>b/);
         expect(buildUserMessage("a", "")).not.toContain("posted_at");
     });
 });

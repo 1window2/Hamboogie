@@ -168,8 +168,8 @@ fieldset {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px 20px;
-    padding: 12px 20px;
+    gap: 6px 18px;
+    padding: 7px 20px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     position: sticky;
@@ -189,7 +189,7 @@ fieldset {
     background: none;
     border: none;
     border-radius: 6px;
-    padding: 6px 12px;
+    padding: 5px 11px;
     cursor: pointer;
 }
 
@@ -208,6 +208,11 @@ fieldset {
     display: flex;
     align-items: center;
     gap: 10px;
+}
+
+/* 머리글의 감시 시작·멈추기 버튼은 머리글이 두꺼워지지 않게 조금 작게 그립니다. */
+.header-actions .button {
+    padding: 4px 12px;
 }
 
 .badge {
@@ -731,13 +736,6 @@ textarea {
     white-space: pre-line;
 }
 
-.version {
-    font-size: 11px;
-    font-weight: 400;
-    color: var(--muted);
-    align-self: flex-end;
-    margin-bottom: 2px;
-}
 
 /* 기본 디시콘 고르기 */
 .dccon-chip img {

@@ -11,8 +11,11 @@ import type {Notifier} from "./notifier";
 import {brief, findInjectionWord, hasLineAndDeadline, makePlan, roleIn, type Plan} from "./planner";
 import {LONG_SLEEP_MS, type SleepState} from "./sleep-state";
 
-/** LLM 요청 한 번에 묶어 보낼 최대 글 수입니다. 40개까지 묶어도 판단이 거의 흔들리지 않는 것을 확인했습니다. */
-const MAX_BATCH_POSTS = 40;
+/**
+ * LLM 요청 한 번에 묶어 보낼 최대 글 수입니다. 글마다 돌려받는 항목이 늘어(품목, 참여 제한, 완장 조건 등) 40개를 묶으면
+ * 응답이 출력 한도를 넘겨 잘리는 일이 있어 20개로 줄였습니다. 평소 1분 사이 새 글은 이보다 훨씬 적습니다.
+ */
+const MAX_BATCH_POSTS = 20;
 /** 판단 실패를 알릴 때 한 알림에 적는 글 수입니다. */
 const FAILED_ALERT_MAX_POSTS = 10;
 /** 글 하나로(사진까지 함께) 다시 판단하니 나눔 글이 아니었을 때의 이유입니다. 이런 글은 "나눔 판단" 수에 세지 않습니다. */
@@ -106,14 +109,13 @@ export class Judge {
             if (fresh.length === 0) continue;
             const decisions = await this.decide(gallery, provider, fresh, epoch, onGiveaway);
             if (!decisions) continue;
+            // 묶음 응답에서 빠진 글은 키워드와 상관없이(키워드에 걸리지 않은 글도 나눔일 수 있음) 빠진 글끼리 한 번 더 묻습니다.
+            const missing = fresh.length > 1 ? fresh.filter((_, index) => !decisions[index]) : [];
+            const retried = missing.length > 0 ? await this.decideMissing(gallery, provider, missing) : new Map<Candidate, Decision>();
             for (const [index, candidate] of fresh.entries()) {
-                let decision = decisions[index] ?? null;
-                // 묶음 응답에서 빠져 글 하나로 다시 판단한 결과는 묶음 판단 결과로 보지 않습니다(2차 확인을 또 하지 않게).
-                let batched = fresh.length > 1;
-                if (!decision && batched && candidate.keyword) {
-                    decision = await this.decideAlone(gallery, provider, candidate);
-                    batched = false;
-                }
+                const decision = decisions[index] ?? retried.get(candidate) ?? null;
+                // 빠져서 글 하나로 다시 판단한 결과는 묶음 판단 결과로 보지 않습니다(2차 확인을 또 하지 않게).
+                const batched = fresh.length > 1 && !(missing.length === 1 && missing[0] === candidate);
                 if (!decision) {
                     if (candidate.keyword) await this.host.dispatcher.dispatch(gallery, candidate.post, {kind: "notify", reason: "글 분석 실패: LLM 응답에 이 글의 판단이 빠져 있음"}, {live: {epoch}});
                     continue;
@@ -189,6 +191,30 @@ export class Judge {
             await this.handle(gallery, provider, candidate, decision, false, epoch, onGiveaway);
         }
         await this.failAll(gallery, failed, reason, epoch);
+    }
+
+    /** 묶음 응답에서 빠진 글들을 한 번 더 판단합니다. 하나면 글 하나로, 여럿이면 빠진 글끼리 묶어 묻습니다. 다시 판단하지 못한 글은 빠집니다. */
+    private async decideMissing(gallery: GalleryConfig, provider: LlmProvider, missing: Candidate[]): Promise<Map<Candidate, Decision>> {
+        const result = new Map<Candidate, Decision>();
+        if (missing.length === 1) {
+            const decision = await this.decideAlone(gallery, provider, missing[0]!);
+            if (decision) result.set(missing[0]!, decision);
+            return result;
+        }
+        if (!this.llm.canUseToday()) return result;
+        try {
+            await this.llm.request(gallery.galleryId);
+            const posts = this.postInputs(gallery, missing);
+            const decisions = await decideGroup(provider, posts);
+            this.recordJudgment(gallery, "batch", missing, posts, decisions);
+            missing.forEach((candidate, index) => {
+                const decision = decisions[index];
+                if (decision) result.set(candidate, decision);
+            });
+        } catch (error) {
+            this.host.deps.logger.warn(`묶음 응답에서 빠진 글 ${missing.length}개를 다시 판단하지 못했습니다: ${errorMessage(error)}`, {galleryId: gallery.galleryId});
+        }
+        return result;
     }
 
     /** 글 하나만 따로 판단합니다. 하루 요청 수를 다 썼거나 실패하면 null입니다. */
@@ -269,7 +295,11 @@ export class Judge {
             this.recordJudgment(gallery, "confirm", [candidate], [post], [decision], images.length);
             const photos = images.length > 0 ? `, 사진 ${images.length}장` : "";
             deps.logger.info(`2차 확인${photos}: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`, context);
-            if (!decision.is_giveaway) return missedLinePlan(candidate, decision) ?? {kind: "skip", reason: NOT_GIVEAWAY_ON_RECHECK};
+            if (!decision.is_giveaway) {
+                // 사진을 보고 나눔이 아니라고 했으면(당첨자 안내 캡처 등) 넘어갑니다. 사진 없이 판단만 엇갈렸으면 확신할 수 없으니 알립니다.
+                if (images.length === 0) return {kind: "notify", reason: `처음엔 나눔으로, 다시 판단하니 나눔이 아니라고 해 직접 확인이 필요함 (LLM 근거: ${brief(decision.reason)})`};
+                return missedLinePlan(candidate, decision) ?? {kind: "skip", reason: NOT_GIVEAWAY_ON_RECHECK};
+            }
             return this.planFor(gallery, decision, candidate);
         } catch (error) {
             if (candidate.images.length > 0) return {kind: "notify", reason: `사진까지 보고 다시 판단하지 못함: ${errorMessage(error)}`};

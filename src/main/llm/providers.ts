@@ -200,7 +200,8 @@ function claudeStructured(apiKey: string, model: string, onUsage: UsageReporter)
         ];
         const response = await client.messages.parse({
             model,
-            max_tokens: 8000,
+            // 묶음 판단(최대 20개)의 응답이 잘리지 않을 만큼 여유를 둡니다.
+            max_tokens: 12000,
             system,
             messages: [{role: "user", content}],
             // 단순 분류라 깊게 생각할 필요가 없습니다.

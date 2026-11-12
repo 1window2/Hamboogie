@@ -2,7 +2,7 @@ import {describe, expect, it} from "vitest";
 import {newGallery} from "@shared/settings";
 import {DAY_MS, kstDayStart} from "@shared/time";
 import type {Decision} from "../src/main/llm/decision";
-import {bareMinuteDeadline, brief, containsSecret, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, fixBareMinute, hasLineAndDeadline, isSafeCommentText, makePlan, resolveClock, START_MARGIN_MS, type CandidateAccount} from "../src/main/pipeline/planner";
+import {brief, containsSecret, END_MARGIN_MS, findBaitWord, findInjectionWord, findPrivacyProbe, fixBareMinute, hasLineAndDeadline, isSafeCommentText, makePlan, resolveClock, START_MARGIN_MS, textDeadline, type CandidateAccount} from "../src/main/pipeline/planner";
 
 /** 2026-10-23 14:00 (한국 시간) */
 const NOW = Date.UTC(2026, 9, 23, 5, 0);
@@ -11,6 +11,8 @@ const kst = (hours: number, minutes = 0) => Date.UTC(2026, 9, 23, hours - 9, min
 
 const gallery = {...newGallery("g1"), galleryId: "gf2", accountIds: ["a", "b"]};
 const POST = "햄버거 나눔 글";
+/** 시각을 뜻하는 말이 든 글입니다. 글에 시각이 없으면 LLM이 적은 마감을 지어낸 것으로 보고 쓰지 않으므로, 마감을 다루는 검사에 씁니다. */
+const TIMED = "햄버거 나눔 정각 줄";
 
 const gonick: CandidateAccount = {id: "a", memberType: "gonick", dccons: []};
 const semi: CandidateAccount = {
@@ -67,6 +69,17 @@ describe("makePlan", () => {
         const posted = kst(17, 45);
         const plan = makePlan(decision({starts_at: "17:30"}), gallery, [gonick], "30분부터 줄", {detectedAt: posted, postedAt: posted});
         expect(plan).toMatchObject({kind: "comment", notBefore: kst(18, 30) + START_MARGIN_MS});
+    });
+
+    it("글에 시각을 뜻하는 말이 없으면 LLM이 적은 마감은 지어낸 것으로 보고 쓰지 않는다", () => {
+        expect(makePlan(decision({ends_at: "13:00"}), gallery, [gonick], "과자 나눔 줄\n마감은 적당히", {detectedAt: NOW})).toMatchObject({kind: "comment"});
+        expect(makePlan(decision({ends_at: "13:00"}), gallery, [gonick], "과자 나눔 줄\n1시 마감", {detectedAt: NOW}).kind).toBe("skip");
+    });
+
+    it("인원, 계정으로 가리는 회원·완장 조건, 인증만 적은 제한은 무시한다", () => {
+        for (const limit of ["3명", "2명 뽑음", "유동 제외", "완장만", "완장 제외 없음, 유동 제외", "uid 인증 필요", "UID인증 필수"]) {
+            expect(makePlan(decision({participant_limit: limit}), gallery, [gonick], POST, {detectedAt: NOW}).kind).toBe("comment");
+        }
     });
 
     it("줄 설 수 있는 사람을 제한한 글은 알린다", () => {
@@ -147,34 +160,34 @@ describe("makePlan", () => {
 
 describe("makePlan 시각", () => {
     it("마감이 지났으면 넘어가고, 같은 날 뒤의 마감은 12시간 넘게 남아도 지킨다", () => {
-        expect(makePlan(decision({ends_at: "13:30"}), gallery, [gonick], POST, {detectedAt: NOW}).kind).toBe("skip");
+        expect(makePlan(decision({ends_at: "13:30"}), gallery, [gonick], TIMED, {detectedAt: NOW}).kind).toBe("skip");
         // 10시에 본 "23:00까지"
-        expect(makePlan(decision({ends_at: "23:00"}), gallery, [gonick], POST, {detectedAt: kst(10)})).toMatchObject({kind: "comment", notBefore: kst(10), deadline: kst(23)});
+        expect(makePlan(decision({ends_at: "23:00"}), gallery, [gonick], TIMED, {detectedAt: kst(10)})).toMatchObject({kind: "comment", notBefore: kst(10), deadline: kst(23)});
         // 23:50에 본 "00:30까지"는 다음 날 00:30
-        expect(makePlan(decision({ends_at: "00:30"}), gallery, [gonick], POST, {detectedAt: kst(23, 50)})).toMatchObject({kind: "comment", deadline: kst(24, 30)});
+        expect(makePlan(decision({ends_at: "00:30"}), gallery, [gonick], TIMED, {detectedAt: kst(23, 50)})).toMatchObject({kind: "comment", deadline: kst(24, 30)});
     });
 
     it("시작 시각 전이면 그때까지 기다리고, 12시간 넘게 남아도 바로 서지 않는다", () => {
-        expect(makePlan(decision({starts_at: "14:10"}), {...gallery, delaySec: 5}, [gonick], POST, {detectedAt: NOW}))
+        expect(makePlan(decision({starts_at: "14:10"}), {...gallery, delaySec: 5}, [gonick], TIMED, {detectedAt: NOW}))
             .toMatchObject({notBefore: kst(14, 10) + START_MARGIN_MS + 5000});
         // 8시에 본 "21:00부터"
-        expect(makePlan(decision({starts_at: "21:00"}), gallery, [gonick], POST, {detectedAt: kst(8)})).toMatchObject({notBefore: kst(21) + START_MARGIN_MS});
+        expect(makePlan(decision({starts_at: "21:00"}), gallery, [gonick], TIMED, {detectedAt: kst(8)})).toMatchObject({notBefore: kst(21) + START_MARGIN_MS});
         // 이미 시작한 줄은 바로 서되, 정각 직후라면 여유 시간까지는 기다린다
-        expect(makePlan(decision({starts_at: "13:00"}), gallery, [gonick], POST, {detectedAt: NOW})).toMatchObject({notBefore: NOW});
-        expect(makePlan(decision({starts_at: "14:00"}), gallery, [gonick], POST, {detectedAt: NOW + 500})).toMatchObject({notBefore: NOW + START_MARGIN_MS});
+        expect(makePlan(decision({starts_at: "13:00"}), gallery, [gonick], TIMED, {detectedAt: NOW})).toMatchObject({notBefore: NOW});
+        expect(makePlan(decision({starts_at: "14:00"}), gallery, [gonick], TIMED, {detectedAt: NOW + 500})).toMatchObject({notBefore: NOW + START_MARGIN_MS});
     });
 
     it("지연 시간을 더하면 마감(여유 포함)을 넘기는 줄은 서지 않는다", () => {
-        expect(makePlan(decision({ends_at: "14:01"}), {...gallery, delaySec: 120}, [gonick], POST, {detectedAt: NOW}))
+        expect(makePlan(decision({ends_at: "14:01"}), {...gallery, delaySec: 120}, [gonick], TIMED, {detectedAt: NOW}))
             .toMatchObject({kind: "skip", reason: expect.stringContaining("줄 서기 지연")});
-        expect(makePlan(decision({ends_at: "14:01"}), {...gallery, delaySec: 30}, [gonick], POST, {detectedAt: NOW})).toMatchObject({kind: "comment", deadline: kst(14, 1)});
-        expect(makePlan(decision({ends_at: "14:01"}), {...gallery, delaySec: 60 - END_MARGIN_MS / 1000 + 1}, [gonick], POST, {detectedAt: NOW}).kind).toBe("skip");
-        expect(makePlan(decision({starts_at: "14:05", ends_at: "14:03"}), gallery, [gonick], POST, {detectedAt: NOW}).kind).toBe("skip");
+        expect(makePlan(decision({ends_at: "14:01"}), {...gallery, delaySec: 30}, [gonick], TIMED, {detectedAt: NOW})).toMatchObject({kind: "comment", deadline: kst(14, 1)});
+        expect(makePlan(decision({ends_at: "14:01"}), {...gallery, delaySec: 60 - END_MARGIN_MS / 1000 + 1}, [gonick], TIMED, {detectedAt: NOW}).kind).toBe("skip");
+        expect(makePlan(decision({starts_at: "14:05", ends_at: "14:03"}), gallery, [gonick], TIMED, {detectedAt: NOW}).kind).toBe("skip");
     });
 
     it("시각을 해석할 수 없으면 알린다", () => {
-        expect(makePlan(decision({ends_at: "13:00:61"}), gallery, [gonick], POST, {detectedAt: NOW})).toMatchObject({kind: "notify", reason: expect.stringContaining("마감 시각을 해석할 수 없음")});
-        expect(makePlan(decision({starts_at: "오후 3시"}), gallery, [gonick], POST, {detectedAt: NOW}).kind).toBe("notify");
+        expect(makePlan(decision({ends_at: "13:00:61"}), gallery, [gonick], TIMED, {detectedAt: NOW})).toMatchObject({kind: "notify", reason: expect.stringContaining("마감 시각을 해석할 수 없음")});
+        expect(makePlan(decision({starts_at: "오후 3시"}), gallery, [gonick], TIMED, {detectedAt: NOW}).kind).toBe("notify");
     });
 });
 
@@ -182,20 +195,20 @@ describe("makePlan 상대 시각", () => {
     it("LLM이 초까지 바꾼 'N분 뒤부터'는 그 초 뒤에 선다", () => {
         // 14:00:00에 감지한, 13:59:40에 올라온 "10분 뒤부터" 글
         const seconds = 40 * 1000;
-        expect(makePlan(decision({starts_at: "14:09:40"}), gallery, [gonick], POST, {detectedAt: kst(14)}))
+        expect(makePlan(decision({starts_at: "14:09:40"}), gallery, [gonick], TIMED, {detectedAt: kst(14)}))
             .toMatchObject({kind: "comment", notBefore: kst(14, 9) + seconds + START_MARGIN_MS});
     });
 
     it("작성 시각을 초까지 모르면 그만큼 마감을 앞당겨 본다", () => {
         // 14:29:30에 본 "14:30까지"는 그냥이면 서지만, 작성 시각이 59초까지 늦게 잡혔을 수 있으면 마감이 지난 것으로 봅니다.
         const seen = kst(14, 29) + 30 * 1000;
-        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], POST, {detectedAt: seen}).kind).toBe("comment");
-        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], POST, {detectedAt: seen, deadlineSlackMs: 59 * 1000}).kind).toBe("skip");
+        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], TIMED, {detectedAt: seen}).kind).toBe("comment");
+        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], TIMED, {detectedAt: seen, deadlineSlackMs: 59 * 1000}).kind).toBe("skip");
     });
 
     it("'30분까지'를 바꾼 마감을 지키고, 지났으면 서지 않는다", () => {
-        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], POST, {detectedAt: kst(14, 19)})).toMatchObject({kind: "comment", deadline: kst(14, 30)});
-        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], POST, {detectedAt: kst(14, 31)}).kind).toBe("skip");
+        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], TIMED, {detectedAt: kst(14, 19)})).toMatchObject({kind: "comment", deadline: kst(14, 30)});
+        expect(makePlan(decision({ends_at: "14:30"}), gallery, [gonick], TIMED, {detectedAt: kst(14, 31)}).kind).toBe("skip");
     });
 });
 
@@ -218,6 +231,11 @@ describe("makePlan 기본 디시콘", () => {
     it("문구 지정이 없는 줄에는 기본 디시콘 가운데 무작위로 하나를 단다", () => {
         expect(contents(makePlan(decision(), gallery, [withDefaults], POST, {detectedAt: NOW, deadlineSlackMs: 0, random: () => 0}))).toEqual([{type: "dccon", dccon: burger}]);
         expect(contents(makePlan(decision(), gallery, [withDefaults], POST, {detectedAt: NOW, deadlineSlackMs: 0, random: () => 0.99}))).toEqual([{type: "dccon", dccon: pizza}]);
+    });
+
+    it("기본 디시콘을 달지 못하면 같은 계정으로 '줄'을 대신 달도록 남겨 둔다(글이 디시콘을 요구한 줄은 제외)", () => {
+        expect(makePlan(decision(), gallery, [withDefaults], POST, {detectedAt: NOW, random: () => 0})).toMatchObject({attempts: [{content: {type: "dccon", dccon: burger}, fallback: {type: "text", text: "줄"}}]});
+        expect(makePlan(decision({line_method: "dccon"}), gallery, [withDefaults], POST, {detectedAt: NOW, random: () => 0})).not.toMatchObject({attempts: [{fallback: expect.anything()}]});
     });
 
     it("글이 디시콘 댓글을 인정하지 않으면 '줄'을 단다", () => {
@@ -424,11 +442,11 @@ describe("makePlan 자정 넘어 감지한 글", () => {
     const detectedAt = day + DAY_MS + 60 * 1000;
 
     it("글에 적힌 시각은 글을 올린 날로 읽어, 이미 지난 마감에는 서지 않는다", () => {
-        expect(makePlan(decision({ends_at: "23:59"}), gallery, [gonick], POST, {detectedAt, postedAt})).toMatchObject({kind: "skip", reason: expect.stringContaining("마감")});
+        expect(makePlan(decision({ends_at: "23:59"}), gallery, [gonick], TIMED, {detectedAt, postedAt})).toMatchObject({kind: "skip", reason: expect.stringContaining("마감")});
     });
 
     it("올린 시각을 모르면 감지한 시각 기준으로 읽는다(다음 날 23:59)", () => {
-        expect(makePlan(decision({ends_at: "23:59"}), gallery, [gonick], POST, {detectedAt})).toMatchObject({kind: "comment", deadline: day + DAY_MS + (23 * 60 + 59) * 60 * 1000});
+        expect(makePlan(decision({ends_at: "23:59"}), gallery, [gonick], TIMED, {detectedAt})).toMatchObject({kind: "comment", deadline: day + DAY_MS + (23 * 60 + 59) * 60 * 1000});
     });
 });
 
@@ -518,23 +536,32 @@ describe("fixBareMinute", () => {
     });
 });
 
-describe("bareMinuteDeadline", () => {
+describe("textDeadline", () => {
     const posted = kst(17, 57) + 33_000;
     it("시 없이 분만 쓴 마감 하나를 글을 올린 뒤 처음 오는 그 분으로 바꾼다", () => {
-        expect(bareMinuteDeadline("20분까지!", posted)).toBe(kst(18, 20));
-        expect(bareMinuteDeadline("50분까지 2명 줄", kst(18, 40) + 59_000)).toBe(kst(18, 50));
-        expect(bareMinuteDeadline("9분 59초 마감", posted)).toBe(kst(18, 9) + 59_000);
-        expect(bareMinuteDeadline("58분까지", posted)).toBe(kst(17, 58));
+        expect(textDeadline("20분까지!", posted)).toBe(kst(18, 20));
+        expect(textDeadline("50분까지 두 명", kst(18, 40) + 59_000)).toBe(kst(18, 50));
+        expect(textDeadline("9분 59초 마감", posted)).toBe(kst(18, 9) + 59_000);
+        expect(textDeadline("58분까지", posted)).toBe(kst(17, 58));
         // 글을 올린 그 분이면 다음 시각입니다(작성 시각을 분까지만 알아 가장 이른 시각이 정각인 경우).
-        expect(bareMinuteDeadline("57분까지", kst(17, 57))).toBe(kst(18, 57));
+        expect(textDeadline("57분까지", kst(17, 57))).toBe(kst(18, 57));
     });
 
-    it("시까지 쓴 마감이 있거나, 분만 쓴 마감이 없거나 여럿이면 셈하지 않는다", () => {
-        expect(bareMinuteDeadline("8시 20분까지", posted)).toBeNull();
-        expect(bareMinuteDeadline("17:20까지 줄", posted)).toBeNull();
-        expect(bareMinuteDeadline("20분 뒤 마감", posted)).toBeNull();
-        expect(bareMinuteDeadline("20분까지 아니 30분까지", posted)).toBeNull();
-        expect(bareMinuteDeadline("햄버거 줄", posted)).toBeNull();
+    it("시까지 쓴 마감은 글을 올린 시각에 가장 가까운 시각이고, 12 이하의 시는 오전·오후 중 가까운 쪽이다", () => {
+        expect(textDeadline("8시 45분까지 댓글로", kst(20, 29) + 59_000)).toBe(kst(20, 45));
+        expect(textDeadline("8시 45분까지", kst(20, 50))).toBe(kst(20, 45));
+        expect(textDeadline("8시20분 00초까지", posted)).toBe(kst(20, 20));
+        expect(textDeadline("17:20까지 줄", posted)).toBe(kst(17, 20));
+        expect(textDeadline("7시 정각까지 댓글", kst(18, 40))).toBe(kst(19, 0));
+        expect(textDeadline("9시 00초 까지 댓글", kst(20, 50))).toBe(kst(21, 0));
+        expect(textDeadline("오후 3시 반 마감", kst(14, 10))).toBe(kst(15, 30));
+        expect(textDeadline("10시 9분 59초까지", kst(9, 56))).toBe(kst(10, 9) + 59_000);
+    });
+
+    it("마감으로 보이는 말이 없거나 서로 다른 마감이 여럿이면 셈하지 않는다", () => {
+        expect(textDeadline("20분 뒤 마감", posted)).toBeNull();
+        expect(textDeadline("20분까지 아니 30분까지", posted)).toBeNull();
+        expect(textDeadline("햄버거 줄", posted)).toBeNull();
     });
 });
 
