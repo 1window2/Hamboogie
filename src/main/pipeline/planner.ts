@@ -66,7 +66,8 @@ export type Plan =
     | {
         kind: "comment";
         notBefore: number;
-        attempts: {accountId: string; content: CommentContent}[];
+        /** `fallback`이 있으면 `content`를 달지 못했을 때(댓글이 달리지 않은 것이 확실할 때) 같은 계정으로 대신 답니다. */
+        attempts: {accountId: string; content: CommentContent; fallback?: CommentContent}[];
         /** 마감 시각입니다. 실행 직전에 다시 확인합니다. */
         deadline?: number;
         /** 예약한 뒤 설정이 바뀌었을 때 실행 직전에 다시 확인하려고 남겨 둡니다. */
@@ -301,35 +302,64 @@ export function hasLineAndDeadline(postText: string): boolean {
 }
 
 const HOUR_MS = 60 * 60 * 1000;
+/** 계정 종류와 완장으로만 정한 조건입니다("유동 제외", "완장만", "고닉만", "완장 제외 없음"). 앱이 계정으로 가리므로 사람이 볼 제한이 아닙니다. 공백을 지운 말에서 봅니다. */
+const ACCOUNT_CONDITION_ONLY = /^(완장|주딱|파딱|매니저|부매니저|갤럼|일반|유동|깡계|고닉|고정닉|반고닉|반고정닉|회원|로그인|제외|만|없음|가능|전용|및|외|[,.·/()]|\s)+$/u;
+/** 시각을 뜻하는 말입니다("20분", "8시", "17:20", "정각", "자정"). 공백을 지운 말에서 찾습니다. */
+const TIME_WORD = /\d\s*[시분초]|\d:\d{2}|정각|자정|정오/u;
+/** 인증만 요구하는 말입니다("uid 인증 필요", "UID인증 필수"). 인증은 줄 서기를 막지 않습니다. 공백을 지운 소문자 말에서 봅니다. */
+const VERIFICATION_ONLY = /^(uid|인증|필요|필수|스샷|스크린샷|캡처|당첨|후|시|[,.·/()]|\s)+$/u;
+/** 인원·수량만 적은 말입니다("3명", "2명 뽑음", "10개", "선착 3명"). */
+const HEADCOUNT_ONLY = /^(선착순?\s*)?\d+\s*(명|개)(\s*(뽑음|추첨|한정))?$/u;
 /** "20분까지"처럼 시 없이 분만 쓴 시각입니다. "8시 20분", "20분 뒤", "120분"은 해당하지 않습니다. 공백을 지운 글에서 찾습니다. */
 const BARE_MINUTE = /(?<!\d|\d시)(\d{1,2})분(?!뒤|후|전|동안|간|만에|째)/g;
 
 /** "20분까지", "9분 59초 마감"처럼 시 없이 분(과 초)만 쓴 마감입니다. 공백을 지운 글에서 찾습니다. */
 const BARE_DEADLINE = /(?<!\d|\d시)(\d{1,2})분(?:(\d{1,2})초)?(?:까지|마감)/g;
-/** "8시 20분까지", "17:20 마감"처럼 시까지 쓴 마감입니다. 공백을 지운 글에서 찾습니다. */
-const HOUR_DEADLINE = /\d시(?:\d{1,2}분)?(?:\d{1,2}초)?(?:까지|마감)|\d:\d{2}(?::\d{2})?(?:까지|마감)/;
+/** "8시 20분까지", "오후 3시 마감", "9시 00초까지", "17:20까지"처럼 시까지 쓴 마감입니다. 공백을 지운 글에서 찾습니다. */
+const HOUR_DEADLINE = /(오전|오후)?(?<!\d)(\d{1,2})시(?:(\d{1,2})분|반)?(?:(\d{1,2})초)?(?:정각)?(?:까지|마감)|(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?(?:까지|마감)/g;
+
+/** 시까지 쓴 마감을 글을 올린 시각에 가장 가까운 실제 시각으로 바꿉니다. 12 이하의 시는 오전·오후 중 가까운 쪽입니다. */
+function nearestClock(postedFrom: number, hour: number, minute: number, second: number, half: "오전" | "오후" | undefined): number | null {
+    if (hour > 24 || minute > 59 || second > 59) return null;
+    const hours = half === "오후" ? [hour % 12 + 12] : half === "오전" ? [hour % 12] : hour <= 12 ? [hour % 12, hour % 12 + 12] : [hour];
+    let best: number | null = null;
+    for (const day of [-1, 0, 1]) {
+        for (const h of hours) {
+            const at = kstDayStart(postedFrom) + day * DAY_MS + ((h * 60 + minute) * 60 + second) * 1000;
+            if (best === null || Math.abs(at - postedFrom) < Math.abs(best - postedFrom)) best = at;
+        }
+    }
+    return best;
+}
 
 /**
- * 글의 마감이 시 없이 분만 쓴 것("20분까지") 하나뿐이면 글을 올린 뒤 처음 오는 그 분을 돌려줍니다.
- * LLM이 이런 마감의 시를 자주 틀려(17:57에 올린 글의 "20분까지"를 "17:30"으로 쓰는 등) 코드로 셉니다.
- * 그런 마감이 없거나, 서로 다른 것이 여럿이거나, 시까지 쓴 마감도 함께 있으면 null입니다(LLM이 읽은 시각을 씁니다).
+ * 글에 적힌 마감을 코드로 셉니다. LLM이 이런 시각 계산을 자주 틀려(17:57에 올린 글의 "20분까지"를 "17:30"으로,
+ * 20:29에 올린 글의 "8시 45분까지"를 "16:45"로 쓰는 등) 글에 마감이 하나뿐이면 이 값을 씁니다.
+ * - 시 없이 분만 쓴 마감("20분까지")은 글을 올린 뒤 처음 오는 그 분입니다(글을 올린 그 분이면 다음 시각).
+ * - 시까지 쓴 마감("8시 45분까지")은 글을 올린 시각에 가장 가까운 시각입니다. 이미 지났으면 지난 시각 그대로라 넘어갑니다.
+ * 마감으로 보이는 말이 없거나 서로 다른 마감이 여럿이면 null입니다(LLM이 읽은 시각을 씁니다).
  *
  * @param postedFrom 글을 올렸을 수 있는 가장 이른 시각입니다.
  */
-export function bareMinuteDeadline(postText: string, postedFrom: number): number | null {
+export function textDeadline(postText: string, postedFrom: number): number | null {
     const text = normalizeForMatch(postText);
-    if (HOUR_DEADLINE.test(text)) return null;
     const found = new Set<number>();
+    for (const match of text.matchAll(HOUR_DEADLINE)) {
+        const at = match[2] !== undefined
+            ? nearestClock(postedFrom, Number(match[2]), match[3] !== undefined ? Number(match[3]) : match[0].includes("반") ? 30 : 0, Number(match[4] ?? 0), match[1] as "오전" | "오후" | undefined)
+            : nearestClock(postedFrom, Number(match[5]), Number(match[6]), Number(match[7] ?? 0), undefined);
+        if (at !== null) found.add(at);
+    }
     for (const match of text.matchAll(BARE_DEADLINE)) {
         const minutes = Number(match[1]);
         const seconds = Number(match[2] ?? 0);
-        if (minutes <= 59 && seconds <= 59) found.add((minutes * 60 + seconds) * 1000);
+        if (minutes > 59 || seconds > 59) continue;
+        // 한국 시간은 UTC와 정확히 몇 시간 차이라 정시도 같습니다. 글을 올린 그 분이면(19:10에 올린 글의 "10분까지") 다음 시각으로 봅니다.
+        let at = Math.floor(postedFrom / HOUR_MS) * HOUR_MS + (minutes * 60 + seconds) * 1000;
+        while (at <= postedFrom) at += HOUR_MS;
+        found.add(at);
     }
-    if (found.size !== 1) return null;
-    // 한국 시간은 UTC와 정확히 몇 시간 차이라 정시도 같습니다. 글을 올린 그 분이면(19:10에 올린 글의 "10분까지") 다음 시각으로 봅니다.
-    let at = Math.floor(postedFrom / HOUR_MS) * HOUR_MS + [...found][0]!;
-    while (at <= postedFrom) at += HOUR_MS;
-    return at;
+    return found.size === 1 ? [...found][0]! : null;
 }
 
 /**
@@ -415,9 +445,10 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     // 먹을 것인지 알 수 없는 글은 넘기지 않고, 아래에서 줄을 설 수 있는 글이면 알립니다.
     if (gallery.category === "food" && !decision.is_food && !decision.food_unknown) return {kind: "skip", reason: "음식 나눔이 아님"};
 
-    let endsAt = bareMinuteDeadline(postText, clockBase - deadlineSlackMs);
+    let endsAt = textDeadline(postText, clockBase - deadlineSlackMs);
     const endsText = endsAt !== null ? formatKst(endsAt).slice(11) : decision.ends_at;
-    if (endsAt === null && decision.ends_at) {
+    // 글에 시각을 뜻하는 말이 하나도 없으면 LLM이 지어낸 마감이므로 쓰지 않습니다("내가 꼴리는대로 마감함"에 "17:00" 등).
+    if (endsAt === null && decision.ends_at && TIME_WORD.test(normalizeForMatch(postText))) {
         endsAt = resolveClock(decision.ends_at, clockBase);
         if (endsAt === null) return {kind: "notify", reason: `마감 시각을 해석할 수 없음: ${brief(decision.ends_at, 20)}`};
         endsAt = fixBareMinute(endsAt, clockBase - deadlineSlackMs, postText);
@@ -439,8 +470,10 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
 
     if (decision.needs_extra_action) return {kind: "notify", reason: `댓글 외의 행동이 필요함: ${brief(decision.reason)}`};
     // 고닉·회원 같은 자격은 계정으로 가릴 수 있지만, 그 밖의 제한("못 받은 사람만" 등)은 계정이 맞는지 알 수 없어 사람이 판단합니다.
-    const limit = decision.participant_limit?.trim();
-    if (limit) return {kind: "notify", reason: `줄 설 수 있는 사람을 제한함: "${brief(limit, 40)}"`};
+    // 뽑는 인원("3명"), 계정으로 가리는 회원·완장 조건("유동 제외", "완장만"), 인증("uid 인증 필요")만 적었으면 사람이 볼 제한이 아니므로 무시합니다.
+    const limit = decision.participant_limit?.trim().replace(HEADCOUNT_ONLY, "");
+    const ownLimit = limit && !ACCOUNT_CONDITION_ONLY.test(normalizeForMatch(limit)) && !VERIFICATION_ONLY.test(normalizeForMatch(limit)) ? limit : "";
+    if (ownLimit) return {kind: "notify", reason: `줄 설 수 있는 사람을 제한함: "${brief(ownLimit, 40)}"`};
     if (gallery.category === "food" && !decision.is_food) {
         return {kind: "notify", reason: `먹을 것인지 알 수 없음: ${decision.item ? `"${brief(decision.item, 40)}"` : "주는 물건을 밝히지 않음"}`};
     }
@@ -482,7 +515,12 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     if (decision.line_method === "text") {
         const required = decision.line_text?.trim();
         if (!required) {
-            return {kind: "comment", attempts: qualified.map((account) => ({accountId: account.id, content: pickDefault(account) ?? {type: "text", text: DEFAULT_COMMENT_TEXT}})), ...common};
+            // 기본 디시콘은 글이 요구한 것이 아니므로, 달지 못하면(디시콘이 없어졌거나 태그를 못 받음) "줄"로 대신 답니다.
+            const line: CommentContent = {type: "text", text: DEFAULT_COMMENT_TEXT};
+            return {kind: "comment", attempts: qualified.map((account) => {
+                const dccon = pickDefault(account);
+                return dccon ? {accountId: account.id, content: dccon, fallback: line} : {accountId: account.id, content: line};
+            }), ...common};
         }
         if (!isSafeCommentText(required)) return {kind: "notify", reason: `요구 문구를 자동으로 달기 어려움: "${brief(required, 40)}"`};
         // LLM이 지어낸 문구를 달지 않도록, 요구 문구는 글에 실제로 있어야 합니다.

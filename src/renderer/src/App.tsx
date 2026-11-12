@@ -84,7 +84,7 @@ export function App() {
     return (
         <div className="app">
             <header className="header">
-                <h1 className="brand"><Logo size={26}/>Hamboogie<small className="version">v{state.version}</small></h1>
+                <h1 className="brand"><Logo size={24}/>Hamboogie</h1>
                 {state.offline && <span className="badge failure" title="디시 대신 가짜 글과 가짜 계정을 씁니다">오프라인 모드</span>}
                 <nav className="tabs">
                     {TABS.map((item) => (

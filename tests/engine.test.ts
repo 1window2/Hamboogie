@@ -18,7 +18,7 @@ import {Ledger} from "../src/main/store";
 const gallery: GalleryConfig = {...newGallery("g"), galleryId: "gf2", checkedId: "gf2", accountIds: ["a", "b"]};
 const LIVE = {live: {epoch: 0}};
 
-function setup(options: {notifyOnSuccess?: boolean; write?: (accountId: string, postNo: number) => Promise<void>} = {}) {
+function setup(options: {notifyOnSuccess?: boolean; write?: (accountId: string, postNo: number, content: {type: string}) => Promise<void>} = {}) {
     const dir = mkdtempSync(join(tmpdir(), "hamboogie-engine-"));
     const ledger = new Ledger(dir);
     const logger = new Logger(join(dir, "test.log"));
@@ -37,8 +37,8 @@ function setup(options: {notifyOnSuccess?: boolean; write?: (accountId: string, 
             maintain: async () => false,
             nickname: (id: string) => `계정${id}`,
             status: () => ({state: "logged_out"}),
-            writeComment: async (accountId: string, _galleryId: string, postNo: number) => {
-                await options.write?.(accountId, postNo);
+            writeComment: async (accountId: string, _galleryId: string, postNo: number, content: {type: string}) => {
+                await options.write?.(accountId, postNo, content);
                 written.push([accountId, postNo]);
             }
         }
@@ -159,6 +159,21 @@ describe("Engine 글 하나에 댓글 하나", () => {
         });
         await engine.dispatch(gallery, {no: 40, title: "나눔"}, plan(0), LIVE);
         await vi.waitFor(() => expect(written).toEqual([["b", 40]]));
+    });
+
+    it("기본 디시콘을 달지 못하면 같은 계정으로 '줄'을 대신 단다", async () => {
+        const tried: string[] = [];
+        const {engine, written, logger} = setup({
+            write: async (accountId, _postNo, content) => {
+                tried.push(`${accountId}:${content.type}`);
+                if (content.type === "dccon") throw new CommentNotPostedError("디시콘 태그를 받지 못했습니다.");
+            }
+        });
+        const dccon = {packageIdx: 1, detailIdx: 1, title: "콘1", packageTitle: "콘"};
+        await engine.dispatch(gallery, {no: 41, title: "나눔"}, plan(0, {attempts: [{accountId: "a", content: {type: "dccon", dccon}, fallback: {type: "text", text: "줄"}}]}), LIVE);
+        await vi.waitFor(() => expect(written).toEqual([["a", 41]]));
+        expect(tried).toEqual(["a:dccon", "a:text"]);
+        expect(logged(logger, "로 다시 답니다")).toBe(true);
     });
 
     it("결과를 알 수 없는 실패(응답 시간 초과 등)면 다른 계정으로 또 달지 않고 알린다", async () => {
@@ -425,12 +440,12 @@ describe("Engine 새 글 묶음 판단", () => {
         await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
     });
 
-    it("다시 확인해서 나눔이 아니라고 하면 줄을 서지 않는다", async () => {
+    it("사진 없이 다시 확인한 판단이 엇갈리면 줄을 서지 않고 알린다", async () => {
         const {run, written, logger} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "잡담", body: ""}}, {loggedIn: true, confirm: () => false});
         await run(gallery);
         await new Promise((resolve) => setTimeout(resolve, 30));
         expect(written).toEqual([]);
-        expect(logged(logger, "따로 다시 판단하니 나눔 글이 아님")).toBe(true);
+        expect(logged(logger, "처음엔 나눔으로, 다시 판단하니 나눔이 아니라고 해")).toBe(true);
     });
 
     it("나눔이 아니라고 판단해도 글에 \"줄\"과 마감 시각이 함께 있으면 넘기지 않고 알린다", async () => {
@@ -440,8 +455,10 @@ describe("Engine 새 글 묶음 판단", () => {
         expect(logger.recent().filter((entry) => entry.message.includes("나눔 글이 아니라고 판단했지만 글에 \"줄\"과 마감 시각이 함께 있어"))).toHaveLength(1);
     });
 
-    it("다시 확인해서 나눔이 아니라고 해도 글에 \"줄\"과 마감 시각이 함께 있으면 알린다", async () => {
-        const {run, written, logger} = withGallery({2: {title: "치킨 나눔 줄", body: "오늘 23시 59분까지"}, 3: {title: "잡담", body: ""}}, {loggedIn: true, confirm: () => false});
+    it("사진까지 보고 나눔이 아니라고 해도 글에 \"줄\"과 마감 시각이 함께 있으면 알린다", async () => {
+        const photo = `<img src="https://dcimg7.dcinside.co.kr/viewimage.php?id=a&no=1">`;
+        const {engine, run, written, logger} = withGallery({2: {title: "치킨 나눔 줄", body: `오늘 23시 59분까지${photo}`}, 3: {title: "잡담", body: ""}}, {loggedIn: true, confirm: () => false});
+        Object.assign((engine as unknown as {deps: EngineDeps}).deps, {postImages: async () => [{mimeType: "image/jpeg", data: "eA=="}]});
         await run(gallery);
         expect(written).toEqual([]);
         expect(logged(logger, "나눔 글이 아니라고 판단했지만")).toBe(true);
@@ -504,11 +521,11 @@ describe("Engine 새 글 묶음 판단", () => {
         expect(logged(logger, "사진까지 보고 다시 판단하지 못함")).toBe(true);
     });
 
-    it(`한 번에 ${40}개까지 묶고, 넘으면 나눠 보낸다`, async () => {
+    it(`한 번에 ${20}개까지 묶고, 넘으면 나눠 보낸다`, async () => {
         const posts = Object.fromEntries(Array.from({length: 45}, (_, i) => [i + 2, {title: `잡담 ${i + 2}`, body: ""}]));
         const {run, calls} = withGallery(posts);
         await run({...gallery, scanBody: false});
-        expect(batches(calls).map((batch) => batch.length)).toEqual([40, 5]);
+        expect(batches(calls).map((batch) => batch.length)).toEqual([20, 20, 5]);
     });
 
     it("묶음 판단이 실패하면 키워드에 걸린 글은 하나씩 다시 판단한다(묶인 글 하나 때문에 실패했을 수 있음)", async () => {
@@ -524,6 +541,12 @@ describe("Engine 새 글 묶음 판단", () => {
         await run({...gallery, keywords: ["나눔"]});
         expect(singles(calls)).toEqual(["치킨 나눔"]);
         await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
+    });
+
+    it("묶음 응답에서 빠진 글은 키워드와 상관없이 빠진 글끼리 한 번 더 판단한다", async () => {
+        const {run, calls} = withGallery({2: {title: "치킨 줄", body: ""}, 3: {title: "피자 줄", body: ""}, 4: {title: "잡담", body: ""}}, {batchOmits: (post) => post.title.endsWith("줄") && calls.filter((call) => call[0] === "묶음").length === 1});
+        await run({...gallery, keywords: ["나눔"]});
+        expect(batches(calls)).toEqual([["치킨 줄", "피자 줄", "잡담"], ["치킨 줄", "피자 줄"]]);
     });
 
     it("묶음 판단이 글과 상관없는 이유(서비스 장애, 키 오류)로 실패하면 하나씩 다시 판단하지 않고 키워드 글만 알린다", async () => {
