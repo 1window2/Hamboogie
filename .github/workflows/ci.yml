@@ -22,6 +22,9 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # Electron 44는 설치 때가 아니라 처음 불릴 때 실행 파일을 받습니다. 테스트 파일 여러 개가 동시에 받다가
+      # Windows에서 같은 파일을 함께 풀며 깨지므로(locales\*.pak: The file exists) 테스트 전에 한 번만 받아 둡니다.
+      - run: npx --no install-electron
       - run: npm run typecheck
       - run: npm test
 
@@ -38,6 +41,9 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # Electron 44는 설치 때가 아니라 처음 불릴 때 실행 파일을 받습니다. 테스트 파일 여러 개가 동시에 받다가
+      # Windows에서 같은 파일을 함께 풀며 깨지므로(locales\*.pak: The file exists) 테스트 전에 한 번만 받아 둡니다.
+      - run: npx --no install-electron
       # 릴리스 워크플로처럼 Windows에서도 테스트를 돌려, 태그를 올리기 전에 Windows에서만 깨지는 테스트를 찾습니다.
       - run: npm test
       - run: npm run dist:win -- --publish never

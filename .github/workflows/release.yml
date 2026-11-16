@@ -40,6 +40,9 @@ jobs:
         shell: bash
         run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
       - run: npm ci
+      # Electron 44는 설치 때가 아니라 처음 불릴 때 실행 파일을 받습니다. 테스트 파일 여러 개가 동시에 받다가
+      # Windows에서 같은 파일을 함께 풀며 깨지므로(locales\*.pak: The file exists) 테스트 전에 한 번만 받아 둡니다.
+      - run: npx --no install-electron
       - run: npm run typecheck
       - run: npm test
       - run: npx electron-vite build
