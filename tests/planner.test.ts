@@ -73,11 +73,11 @@ describe("makePlan", () => {
 
     it("글에 시각을 뜻하는 말이 없으면 LLM이 적은 마감은 지어낸 것으로 보고 쓰지 않는다", () => {
         expect(makePlan(decision({ends_at: "13:00"}), gallery, [gonick], "과자 나눔 줄\n마감은 적당히", {detectedAt: NOW})).toMatchObject({kind: "comment"});
-        expect(makePlan(decision({ends_at: "13:00"}), gallery, [gonick], "과자 나눔 줄\n1시 마감", {detectedAt: NOW}).kind).toBe("skip");
+        expect(makePlan(decision({ends_at: "13:00"}), gallery, [gonick], "과자 나눔 줄\n1시 30분 마감", {detectedAt: NOW}).kind).toBe("skip");
     });
 
     it("인원, 계정으로 가리는 회원·완장 조건, 인증만 적은 제한은 무시한다", () => {
-        for (const limit of ["3명", "2명 뽑음", "유동 제외", "완장만", "완장 제외 없음, 유동 제외", "uid 인증 필요", "UID인증 필수"]) {
+        for (const limit of ["3명", "2명 뽑음", "1개 나눔", "40분까지 한 명", "6분까지 다시 줄", "1명(뽑는 인원이라 제한 아님)", "유동 제외", "완장만", "완장 제외 없음, 유동 제외", "uid 인증 필요", "UID인증 필수"]) {
             expect(makePlan(decision({participant_limit: limit}), gallery, [gonick], POST, {detectedAt: NOW}).kind).toBe("comment");
         }
     });
@@ -139,9 +139,9 @@ describe("makePlan", () => {
         expect(makePlan(decision({line_method: "dccon", dccon_keyword: "피자"}), gallery, [gonick, semi], POST, {detectedAt: NOW}).kind).toBe("notify");
     });
 
-    it("판단 불가, 추가 행동 요구는 알림으로 넘긴다", () => {
-        expect(makePlan(decision({line_method: "unclear"}), gallery, [gonick], POST, {detectedAt: NOW}).kind).toBe("notify");
-        expect(makePlan(decision({needs_extra_action: true}), gallery, [gonick], POST, {detectedAt: NOW}).kind).toBe("notify");
+    it("댓글에 직접 지은 답이 필요한 글은 알리지 않고 넘어가고, 댓글 외의 행동(인증 등)이 필요하다는 글은 댓글로 줄을 선다", () => {
+        expect(makePlan(decision({line_method: "unclear"}), gallery, [gonick], POST, {detectedAt: NOW}).kind).toBe("skip");
+        expect(makePlan(decision({needs_extra_action: true}), gallery, [gonick], POST, {detectedAt: NOW}).kind).toBe("comment");
     });
 
     it("사진 속 글자(LLM이 옮겨 적은 것)에 봇 함정이나 시작 시각이 있으면 자동으로 서지 않고 알린다", () => {
@@ -414,7 +414,7 @@ describe("프롬프트 인젝션 막기", () => {
         expect(brief("가".repeat(300))).toHaveLength(200);
         expect(brief("짧은 근거")).toBe("짧은 근거");
         const plan = makePlan(decision({line_method: "unclear", reason: "나".repeat(1000)}), gallery, [gonick], POST, {detectedAt: NOW});
-        expect(plan.kind === "notify" && plan.reason.length).toBeLessThan(260);
+        expect(plan.kind !== "comment" && plan.reason.length).toBeLessThan(260);
     });
 });
 
@@ -556,6 +556,13 @@ describe("textDeadline", () => {
         expect(textDeadline("9시 00초 까지 댓글", kst(20, 50))).toBe(kst(21, 0));
         expect(textDeadline("오후 3시 반 마감", kst(14, 10))).toBe(kst(15, 30));
         expect(textDeadline("10시 9분 59초까지", kst(9, 56))).toBe(kst(10, 9) + 59_000);
+    });
+
+    it("시만 쓴 마감이 이미 지났으면 분을 잘못 쓴 것으로 보고 그 분으로 읽는다", () => {
+        expect(textDeadline("10시까지 디시콘 안 달리면", kst(22, 1) + 42_000)).toBe(kst(22, 10));
+        expect(textDeadline("10시까지", kst(21, 50))).toBe(kst(22, 0));
+        // 분까지 쓴 마감이 지났으면 그대로 둡니다(넘어감).
+        expect(textDeadline("10시 5분까지", kst(22, 7))).toBe(kst(22, 5));
     });
 
     it("마감으로 보이는 말이 없거나 서로 다른 마감이 여럿이면 셈하지 않는다", () => {

@@ -308,8 +308,10 @@ const ACCOUNT_CONDITION_ONLY = /^(완장|주딱|파딱|매니저|부매니저|�
 const TIME_WORD = /\d\s*[시분초]|\d:\d{2}|정각|자정|정오/u;
 /** 인증만 요구하는 말입니다("uid 인증 필요", "UID인증 필수"). 인증은 줄 서기를 막지 않습니다. 공백을 지운 소문자 말에서 봅니다. */
 const VERIFICATION_ONLY = /^(uid|인증|필요|필수|스샷|스크린샷|캡처|당첨|후|시|[,.·/()]|\s)+$/u;
-/** 인원·수량만 적은 말입니다("3명", "2명 뽑음", "10개", "선착 3명"). */
-const HEADCOUNT_ONLY = /^(선착순?\s*)?\d+\s*(명|개)(\s*(뽑음|추첨|한정))?$/u;
+/** 인원·수량만 적은 말입니다("3명", "2명 뽑음", "10개", "선착 3명", "1개 나눔", "40분까지 한 명"). */
+const HEADCOUNT_ONLY = /^(\S+까지\s*)?(선착순?\s*)?(\d+|한|두|세|네|다섯)\s*(명|개)(\s*(뽑음|추첨|한정|나눔))?$/u;
+/** 마감만 적은 말("6분까지 다시 줄")이나 LLM이 스스로 제한이 아니라고 덧붙인 말입니다. 제한으로 보지 않습니다. */
+const NOT_A_LIMIT = /^(\d+\s*[시분초]\s*)+까지(\s*다시)?(\s*줄)?$|제한\s*(이\s*)?(아님|아니|없음)/u;
 /** "20분까지"처럼 시 없이 분만 쓴 시각입니다. "8시 20분", "20분 뒤", "120분"은 해당하지 않습니다. 공백을 지운 글에서 찾습니다. */
 const BARE_MINUTE = /(?<!\d|\d시)(\d{1,2})분(?!뒤|후|전|동안|간|만에|째)/g;
 
@@ -337,6 +339,7 @@ function nearestClock(postedFrom: number, hour: number, minute: number, second: 
  * 20:29에 올린 글의 "8시 45분까지"를 "16:45"로 쓰는 등) 글에 마감이 하나뿐이면 이 값을 씁니다.
  * - 시 없이 분만 쓴 마감("20분까지")은 글을 올린 뒤 처음 오는 그 분입니다(글을 올린 그 분이면 다음 시각).
  * - 시까지 쓴 마감("8시 45분까지")은 글을 올린 시각에 가장 가까운 시각입니다. 이미 지났으면 지난 시각 그대로라 넘어갑니다.
+ *   시만 쓴 마감("10시까지")이 이미 지났으면 분을 잘못 쓴 것으로 보고 분만 쓴 마감처럼 읽습니다.
  * 마감으로 보이는 말이 없거나 서로 다른 마감이 여럿이면 null입니다(LLM이 읽은 시각을 씁니다).
  *
  * @param postedFrom 글을 올렸을 수 있는 가장 이른 시각입니다.
@@ -348,18 +351,27 @@ export function textDeadline(postText: string, postedFrom: number): number | nul
         const at = match[2] !== undefined
             ? nearestClock(postedFrom, Number(match[2]), match[3] !== undefined ? Number(match[3]) : match[0].includes("반") ? 30 : 0, Number(match[4] ?? 0), match[1] as "오전" | "오후" | undefined)
             : nearestClock(postedFrom, Number(match[5]), Number(match[6]), Number(match[7] ?? 0), undefined);
-        if (at !== null) found.add(at);
+        if (at === null) continue;
+        // 시만 쓴 마감("10시까지")이 글을 올렸을 때 이미 지났으면 분을 잘못 쓴 것으로 보고 그 분으로 읽습니다(22:01에 올린 글이면 22:10).
+        // 분까지 쓴 마감이 지났으면 그대로 두어 넘어갑니다.
+        const hourOnly = match[2] !== undefined && match[1] === undefined && match[3] === undefined && match[4] === undefined && !match[0].includes("반");
+        found.add(hourOnly && at <= postedFrom ? nextMinute(postedFrom, Number(match[2]), 0) : at);
     }
     for (const match of text.matchAll(BARE_DEADLINE)) {
         const minutes = Number(match[1]);
         const seconds = Number(match[2] ?? 0);
         if (minutes > 59 || seconds > 59) continue;
-        // 한국 시간은 UTC와 정확히 몇 시간 차이라 정시도 같습니다. 글을 올린 그 분이면(19:10에 올린 글의 "10분까지") 다음 시각으로 봅니다.
-        let at = Math.floor(postedFrom / HOUR_MS) * HOUR_MS + (minutes * 60 + seconds) * 1000;
-        while (at <= postedFrom) at += HOUR_MS;
-        found.add(at);
+        found.add(nextMinute(postedFrom, minutes, seconds));
     }
     return found.size === 1 ? [...found][0]! : null;
+}
+
+/** 글을 올린 뒤 처음 오는 그 분(초)입니다. 글을 올린 그 분이면(19:10에 올린 글의 "10분까지") 다음 시각입니다. */
+function nextMinute(postedFrom: number, minutes: number, seconds: number): number {
+    // 한국 시간은 UTC와 정확히 몇 시간 차이라 정시도 같습니다.
+    let at = Math.floor(postedFrom / HOUR_MS) * HOUR_MS + (minutes * 60 + seconds) * 1000;
+    while (at <= postedFrom) at += HOUR_MS;
+    return at;
 }
 
 /**
@@ -468,11 +480,10 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
         return {kind: "skip", reason: "참여 자격에 맞는 대기 계정이 없음"};
     }
 
-    if (decision.needs_extra_action) return {kind: "notify", reason: `댓글 외의 행동이 필요함: ${brief(decision.reason)}`};
     // 고닉·회원 같은 자격은 계정으로 가릴 수 있지만, 그 밖의 제한("못 받은 사람만" 등)은 계정이 맞는지 알 수 없어 사람이 판단합니다.
     // 뽑는 인원("3명"), 계정으로 가리는 회원·완장 조건("유동 제외", "완장만"), 인증("uid 인증 필요")만 적었으면 사람이 볼 제한이 아니므로 무시합니다.
     const limit = decision.participant_limit?.trim().replace(HEADCOUNT_ONLY, "");
-    const ownLimit = limit && !ACCOUNT_CONDITION_ONLY.test(normalizeForMatch(limit)) && !VERIFICATION_ONLY.test(normalizeForMatch(limit)) ? limit : "";
+    const ownLimit = limit && !NOT_A_LIMIT.test(limit) && !ACCOUNT_CONDITION_ONLY.test(normalizeForMatch(limit)) && !VERIFICATION_ONLY.test(normalizeForMatch(limit)) ? limit : "";
     if (ownLimit) return {kind: "notify", reason: `줄 설 수 있는 사람을 제한함: "${brief(ownLimit, 40)}"`};
     if (gallery.category === "food" && !decision.is_food) {
         return {kind: "notify", reason: `먹을 것인지 알 수 없음: ${decision.item ? `"${brief(decision.item, 40)}"` : "주는 물건을 밝히지 않음"}`};
@@ -488,7 +499,7 @@ export function makePlan(decision: Decision, gallery: GalleryConfig, accounts: C
     if (injection) return {kind: "notify", reason: `글에 LLM 판단을 바꾸려는 듯한 말("${injection}")이 있어 직접 확인이 필요함`};
     const privacy = findPrivacyProbe(checkedText);
     if (privacy) return {kind: "notify", reason: `글에 개인정보나 계정·설정 정보를 캐내려는 듯한 말("${privacy}")이 있어 직접 확인이 필요함`};
-    if (decision.line_method === "unclear") return {kind: "notify", reason: `줄 서는 방법을 판단할 수 없음: ${brief(decision.reason)}`};
+    if (decision.line_method === "unclear") return {kind: "skip", reason: `댓글에 직접 지어 쓴 내용(답, 고른 숫자 등)이 필요함: ${brief(decision.reason)}`};
     if (!decision.starts_at && hasStartHint(checkedText)) return {kind: "notify", reason: "글에 줄 서기 시작 시각이 있는 것 같은데 판단에서 빠져 직접 확인이 필요함"};
 
     let notBefore = detectedAt;
