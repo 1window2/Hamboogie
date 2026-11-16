@@ -28,12 +28,6 @@ async function decideGroup(provider: LlmProvider, posts: PostInput[]): Promise<(
     return posts.length === 1 ? [await provider.decide(posts[0]!)] : provider.decideMany(posts);
 }
 
-/** LLM이 나눔이 아니라고 했어도 글에 "줄"과 마감 시각이 함께 있으면 나눔 줄일 때가 많아 넘기지 않고 알립니다. 아니면 null입니다. */
-function missedLinePlan(candidate: Candidate, decision: Decision): Plan | null {
-    if (!hasLineAndDeadline(`${candidate.title}\n${candidate.body}`)) return null;
-    return {kind: "notify", reason: `나눔 글이 아니라고 판단했지만 글에 "줄"과 마감 시각이 함께 있어 직접 확인이 필요함 (LLM 근거: ${brief(decision.reason)})`};
-}
-
 /** LLM 판단을 바꾸려는 듯한 말이 든 글입니다. 다른 글과 묶으면 묶인 다른 글의 판단까지 흔들 수 있어 따로 묶습니다. */
 function suspicious(candidate: Candidate): boolean {
     return findInjectionWord(`${candidate.title}\n${candidate.body}`) !== null;
@@ -232,24 +226,43 @@ export class Judge {
         }
     }
 
-    /** 판단 하나를 계획으로 바꾸고 처리합니다. 묶어 판단했거나 사진이 있는 나눔 글은 그 글 하나로(사진까지 함께) 다시 판단합니다. */
+    /**
+     * 판단 하나를 계획으로 바꾸고 처리합니다. 묶어 판단했거나 사진이 있는 나눔 글은 그 글 하나로(사진까지 함께) 다시 판단해 따릅니다.
+     * 묶어 판단해 나눔이 아니라고 나온 글도 "줄"과 마감 시각이 함께 있으면 그 글 하나로 다시 판단해 따릅니다.
+     */
     private async handle(gallery: GalleryConfig, provider: LlmProvider, candidate: Candidate, decision: Decision, batched: boolean, epoch: number, onGiveaway: () => void): Promise<void> {
         const {logger} = this.host.deps;
         const postContext = {galleryId: gallery.galleryId, postNo: candidate.post.no};
+        let plan: Plan;
         // 나중에 놓친 글이나 잘못 선 글을 되짚을 수 있도록, 글마다 판단과 LLM의 근거를 남깁니다.
         if (!decision.is_giveaway) {
             logger.info(`나눔 아님: "${candidate.title}" (근거: ${decision.reason})`, postContext);
-            const missed = missedLinePlan(candidate, decision);
-            if (missed) await this.host.dispatcher.dispatch(gallery, candidate.post, missed, {live: {epoch}});
-            return;
+            const again = batched ? await this.recheckMissed(gallery, provider, candidate) : null;
+            if (!again?.is_giveaway) return;
+            plan = this.planFor(gallery, again, candidate);
+        } else {
+            logger.info(`나눔으로 판단: "${candidate.title}" (${describeDecision(decision)}) (근거: ${decision.reason})`, postContext);
+            plan = this.planFor(gallery, decision, candidate);
+            if (plan.kind === "comment" && (batched || candidate.images.length > 0)) plan = await this.confirm(gallery, provider, candidate, batched ? null : plan);
         }
-        logger.info(`나눔으로 판단: "${candidate.title}" (${describeDecision(decision)}) (근거: ${decision.reason})`, postContext);
-        let plan = this.planFor(gallery, decision, candidate);
-        if (plan.kind === "comment" && (batched || candidate.images.length > 0)) plan = await this.confirm(gallery, provider, candidate, batched ? null : plan);
         // 다시 판단해 나눔이 아니라고 나온 글(당첨자 안내 캡처 등)은 세지 않습니다.
         if (!(plan.kind === "skip" && plan.reason === NOT_GIVEAWAY_ON_RECHECK)) onGiveaway();
         const {title, body, images, detectedAt} = candidate;
         await this.host.dispatcher.dispatch(gallery, candidate.post, plan, {live: {epoch}, content: {title, body, images, readAt: detectedAt}});
+    }
+
+    /**
+     * 묶어 판단해 나눔이 아니라고 나온 글에 "줄"과 마감 시각이 함께 있으면 나눔 줄일 때가 많아, 그 글 하나로(사진까지 함께) 다시 판단합니다.
+     * 그런 글이 아니거나 지금 남은 요청 자리가 없거나 다시 판단하지 못했으면 null입니다(처음 판단대로 넘어갑니다).
+     */
+    private async recheckMissed(gallery: GalleryConfig, provider: LlmProvider, candidate: Candidate): Promise<Decision | null> {
+        if (!hasLineAndDeadline(`${candidate.title}\n${candidate.body}`) || !this.llm.hasSlotNow() || !this.llm.canUseToday()) return null;
+        try {
+            return await this.decideWithImages(gallery, provider, candidate);
+        } catch (error) {
+            this.host.deps.logger.warn(`"줄"과 마감 시각이 있는 글을 다시 판단하지 못했습니다: ${errorMessage(error)}`, {galleryId: gallery.galleryId, postNo: candidate.post.no});
+            return null;
+        }
     }
 
     /** 키워드에 걸린 글만 알립니다. 모든 새 글을 알리면 알림이 넘칩니다. 여러 글이면 알림 하나로 묶습니다. */
@@ -270,46 +283,44 @@ export class Judge {
     }
 
     /**
-     * 줄을 서라고 나온 글을 그 글 하나로, 사진이 있으면 사진까지 함께 다시 물어 확인합니다(당첨자 안내 캡처 등은 사진을 봐야 압니다).
+     * 줄을 서라고 나온 글을 그 글 하나로, 사진이 있으면 사진까지 함께 다시 물어 그 판단을 따릅니다(당첨자 안내 캡처 등은 사진을 봐야 압니다).
      * 지금 남은 요청 자리가 없으면 기다리지 않고(선착순을 놓치지 않게), 묶음 판단 결과면 자동으로 서지 않고 알리며
-     * 글 하나로 판단한 결과(`fallback`)면 사진이 있어도 그대로 따릅니다(2차 확인을 기다리다 선착순을 놓치는 것보다 낫다고 봅니다).
-     * 자리가 있어 다시 판단하려 했는데 사진을 받지 못했거나 다시 판단하지 못했으면,
-     * 사진을 봐야 알 수 있는 경우(이미 끝난 나눔의 당첨자 안내 등)를 거르지 못했으므로 자동으로 서지 않고 알립니다.
+     * 글 하나로 판단한 결과(`fallback`)면 그대로 따릅니다(2차 확인을 기다리다 선착순을 놓치는 것보다 낫다고 봅니다).
+     * 다시 판단하지 못했을 때도 글 하나로 판단한 결과가 있으면 그대로 따릅니다.
      */
     private async confirm(gallery: GalleryConfig, provider: LlmProvider, candidate: Candidate, fallback: Plan | null): Promise<Plan> {
-        const {deps} = this.host;
         if (!this.llm.hasSlotNow() || !this.llm.canUseToday()) {
             return fallback ?? {kind: "notify", reason: "여러 글을 묶어 판단한 결과라 따로 확인해야 하는데 남은 LLM 요청이 없어 직접 확인이 필요함"};
         }
-        const context = {galleryId: gallery.galleryId, postNo: candidate.post.no};
         try {
-            const stats = {unreadable: 0};
-            const images = candidate.images.length > 0 && deps.postImages ? await deps.postImages(candidate.images, stats).catch(() => []) : [];
-            if (candidate.images.length > 0 && deps.postImages && images.length === 0) {
-                const why = stats.unreadable > 0 ? "글의 사진을 열 수 없어(지원하지 않는 형식이거나 해상도가 지나치게 큼)" : "글의 사진을 받지 못해";
-                return {kind: "notify", reason: `${why} 사진까지 보고 확인하지 못함`};
-            }
-            await this.llm.request(gallery.galleryId);
-            const post = {...this.postInputs(gallery, [candidate])[0]!, images};
-            const decision = await provider.decide(post);
-            this.recordJudgment(gallery, "confirm", [candidate], [post], [decision], images.length);
-            const photos = images.length > 0 ? `, 사진 ${images.length}장` : "";
-            deps.logger.info(`2차 확인${photos}: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`, context);
-            if (!decision.is_giveaway) {
-                // 사진을 보고 나눔이 아니라고 했으면(당첨자 안내 캡처 등) 넘어갑니다. 사진 없이 판단만 엇갈렸으면 확신할 수 없으니 알립니다.
-                if (images.length === 0) return {kind: "notify", reason: `처음엔 나눔으로, 다시 판단하니 나눔이 아니라고 해 직접 확인이 필요함 (LLM 근거: ${brief(decision.reason)})`};
-                return missedLinePlan(candidate, decision) ?? {kind: "skip", reason: NOT_GIVEAWAY_ON_RECHECK};
-            }
-            return this.planFor(gallery, decision, candidate);
+            const decision = await this.decideWithImages(gallery, provider, candidate);
+            return decision.is_giveaway ? this.planFor(gallery, decision, candidate) : {kind: "skip", reason: NOT_GIVEAWAY_ON_RECHECK};
         } catch (error) {
-            if (candidate.images.length > 0) return {kind: "notify", reason: `사진까지 보고 다시 판단하지 못함: ${errorMessage(error)}`};
-            // 글 하나로 판단한 결과가 있으면 처음 판단대로 합니다.
             if (fallback) {
-                deps.logger.warn(`다시 판단하지 못해 처음 판단대로 합니다: ${errorMessage(error)}`, context);
+                this.host.deps.logger.warn(`다시 판단하지 못해 처음 판단대로 합니다: ${errorMessage(error)}`, {galleryId: gallery.galleryId, postNo: candidate.post.no});
                 return fallback;
             }
             return {kind: "notify", reason: `묶음 판단 결과를 확인하지 못함: ${errorMessage(error)}`};
         }
+    }
+
+    /** 글 하나를 사진까지 함께 판단합니다. 사진을 열지 못했으면 글만으로 판단합니다. */
+    private async decideWithImages(gallery: GalleryConfig, provider: LlmProvider, candidate: Candidate): Promise<Decision> {
+        const {deps} = this.host;
+        const context = {galleryId: gallery.galleryId, postNo: candidate.post.no};
+        const stats = {unreadable: 0};
+        const images = candidate.images.length > 0 && deps.postImages ? await deps.postImages(candidate.images, stats).catch(() => []) : [];
+        if (candidate.images.length > 0 && deps.postImages && images.length === 0) {
+            const why = stats.unreadable > 0 ? "글의 사진을 열 수 없어(지원하지 않는 형식이거나 해상도가 지나치게 큼)" : "글의 사진을 받지 못해";
+            deps.logger.info(`${why} 글만으로 다시 판단합니다.`, context);
+        }
+        await this.llm.request(gallery.galleryId);
+        const post = {...this.postInputs(gallery, [candidate])[0]!, images};
+        const decision = await provider.decide(post);
+        this.recordJudgment(gallery, "confirm", [candidate], [post], [decision], images.length);
+        const photos = images.length > 0 ? `, 사진 ${images.length}장` : "";
+        deps.logger.info(`2차 확인${photos}: ${decision.is_giveaway ? "나눔" : "나눔 아님"} (${describeDecision(decision)}) (근거: ${decision.reason})`, context);
+        return decision;
     }
 
     /** LLM에 보낼 글들입니다. 대기 계정마다 이 갤러리에서 맡은 완장(매니저, 부매니저, 일반 갤럼)을 한 번만 구해 함께 보냅니다. */

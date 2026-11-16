@@ -440,28 +440,42 @@ describe("Engine 새 글 묶음 판단", () => {
         await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
     });
 
-    it("사진 없이 다시 확인한 판단이 엇갈리면 줄을 서지 않고 알린다", async () => {
+    it("다시 확인한 판단이 나눔이 아니면 그 판단을 따라 줄을 서지도 알리지도 않는다", async () => {
         const {run, written, logger} = withGallery({2: {title: "치킨 나눔", body: ""}, 3: {title: "잡담", body: ""}}, {loggedIn: true, confirm: () => false});
         await run(gallery);
         await new Promise((resolve) => setTimeout(resolve, 30));
         expect(written).toEqual([]);
-        expect(logged(logger, "처음엔 나눔으로, 다시 판단하니 나눔이 아니라고 해")).toBe(true);
+        expect(logged(logger, "따로 다시 판단하니 나눔 글이 아님")).toBe(true);
+        expect(logged(logger, "판단 불가")).toBe(false);
     });
 
-    it("나눔이 아니라고 판단해도 글에 \"줄\"과 마감 시각이 함께 있으면 넘기지 않고 알린다", async () => {
-        const {run, written, logger} = withGallery({2: {title: "남이 뿌린대 줄이래", body: "25분까지!"}, 3: {title: "부거줄 너무 길다", body: "다음엔 일찍 서야지"}}, {loggedIn: true, giveaway: () => false});
+    it("묶어 판단해 나눔이 아니라고 나와도 \"줄\"과 마감 시각이 함께 있으면 그 글 하나로 다시 판단해 따른다", async () => {
+        const articles = {2: {title: "남이 뿌린대 줄이래", body: "25분까지!"}, 3: {title: "부거줄 너무 길다", body: "다음엔 일찍 서야지"}};
+        const {run, calls, written} = withGallery(articles, {loggedIn: true, giveaway: () => false, confirm: (post) => post.title.includes("뿌린대")});
         await run(gallery);
-        expect(written).toEqual([]);
-        expect(logger.recent().filter((entry) => entry.message.includes("나눔 글이 아니라고 판단했지만 글에 \"줄\"과 마감 시각이 함께 있어"))).toHaveLength(1);
+        expect(singles(calls)).toEqual(["남이 뿌린대 줄이래"]);
+        await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
     });
 
-    it("사진까지 보고 나눔이 아니라고 해도 글에 \"줄\"과 마감 시각이 함께 있으면 알린다", async () => {
+    it("\"줄\"과 마감 시각이 있는 글을 다시 판단해도 나눔이 아니면 알리지 않고 넘어간다", async () => {
+        const articles = {2: {title: "남이 뿌린대 줄이래", body: "25분까지!"}, 3: {title: "부거줄 너무 길다", body: "다음엔 일찍 서야지"}};
+        const {run, calls, written, logger} = withGallery(articles, {loggedIn: true, giveaway: () => false});
+        await run(gallery);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(singles(calls)).toEqual(["남이 뿌린대 줄이래"]);
+        expect(written).toEqual([]);
+        expect(logged(logger, "판단 불가")).toBe(false);
+    });
+
+    it("사진까지 보고 나눔이 아니라고 하면 \"줄\"과 마감 시각이 있어도 넘어간다", async () => {
         const photo = `<img src="https://dcimg7.dcinside.co.kr/viewimage.php?id=a&no=1">`;
         const {engine, run, written, logger} = withGallery({2: {title: "치킨 나눔 줄", body: `오늘 23시 59분까지${photo}`}, 3: {title: "잡담", body: ""}}, {loggedIn: true, confirm: () => false});
         Object.assign((engine as unknown as {deps: EngineDeps}).deps, {postImages: async () => [{mimeType: "image/jpeg", data: "eA=="}]});
         await run(gallery);
+        await new Promise((resolve) => setTimeout(resolve, 30));
         expect(written).toEqual([]);
-        expect(logged(logger, "나눔 글이 아니라고 판단했지만")).toBe(true);
+        expect(logged(logger, "따로 다시 판단하니 나눔 글이 아님")).toBe(true);
+        expect(logged(logger, "판단 불가")).toBe(false);
     });
 
     it("새 글이 하나면 묶을 다른 글이 없으므로 다시 확인하지 않는다", async () => {
@@ -502,7 +516,7 @@ describe("Engine 새 글 묶음 판단", () => {
         await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
     });
 
-    it("사진까지 보고 다시 판단하는 요청이 실패하면 사진을 봐야 아는 경우를 거르지 못했으므로 줄을 서지 않고 알린다", async () => {
+    it("글 하나로 판단한 나눔 글은 사진까지 보고 다시 판단하는 요청이 실패해도 처음 판단대로 줄을 선다", async () => {
         const photo = `<img src="https://dcimg7.dcinside.co.kr/viewimage.php?id=a&no=1">`;
         const {engine, run, written, logger} = withGallery({2: {title: "치킨 나눔", body: photo}}, {loggedIn: true});
         const internals = engine as unknown as {deps: EngineDeps; llm: LlmGate};
@@ -516,9 +530,8 @@ describe("Engine 새 글 묶음 판단", () => {
             }} as never;
         };
         await run(gallery);
-        await new Promise((resolve) => setTimeout(resolve, 30));
-        expect(written).toEqual([]);
-        expect(logged(logger, "사진까지 보고 다시 판단하지 못함")).toBe(true);
+        await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
+        expect(logged(logger, "다시 판단하지 못해 처음 판단대로 합니다")).toBe(true);
     });
 
     it(`한 번에 ${20}개까지 묶고, 넘으면 나눠 보낸다`, async () => {
@@ -1192,17 +1205,17 @@ describe("Engine 사진까지 보는 확인 실패", () => {
             throw new Error("fetch failed");
         }]
     ] as const) {
-        it(`${name} 사진을 봐야 아는 경우를 거르지 못했으므로 줄을 서지 않고 알린다`, async () => {
-            const {engine, run, written, logger} = withGallery({2: {title: "치킨 나눔", body: `줄${photo}`}}, {loggedIn: true});
+        it(`${name} 글만으로 다시 판단해 따른다`, async () => {
+            const {engine, run, written, logger, imageCounts} = withGallery({2: {title: "치킨 나눔", body: `줄${photo}`}}, {loggedIn: true});
             Object.assign((engine as unknown as {deps: EngineDeps}).deps, {postImages});
             await run(gallery);
-            await new Promise((resolve) => setTimeout(resolve, 30));
-            expect(written).toEqual([]);
-            expect(logged(logger, "글의 사진을 받지 못해")).toBe(true);
+            await vi.waitFor(() => expect(written).toEqual([["a", 2]]));
+            expect(imageCounts).toEqual([0, 0]);
+            expect(logged(logger, "글의 사진을 받지 못해 글만으로 다시 판단합니다")).toBe(true);
         });
     }
 
-    it("묶어 판단한 나눔 글도 사진까지 본 판단이 실패하면 줄을 서지 않는다", async () => {
+    it("묶어 판단한 나눔 글은 사진까지 본 판단이 실패하면 줄을 서지 않고 알린다", async () => {
         const {engine, run, written, logger} = withGallery({2: {title: "치킨 나눔", body: `줄${photo}`}, 3: {title: "잡담", body: ""}}, {loggedIn: true});
         const internals = engine as unknown as {deps: EngineDeps; llm: LlmGate};
         Object.assign(internals.deps, {postImages: async () => [{mimeType: "image/jpeg", data: "eA=="}]});
@@ -1217,6 +1230,6 @@ describe("Engine 사진까지 보는 확인 실패", () => {
         await run(gallery);
         await new Promise((resolve) => setTimeout(resolve, 30));
         expect(written).toEqual([]);
-        expect(logged(logger, "사진까지 보고 다시 판단하지 못함")).toBe(true);
+        expect(logged(logger, "묶음 판단 결과를 확인하지 못함")).toBe(true);
     });
 });
